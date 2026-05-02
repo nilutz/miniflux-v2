@@ -353,9 +353,10 @@ func (e *EntryQueryBuilder) fetchEntries(withCount bool) (model.Entries, int, er
 	}
 	defer rows.Close()
 
-	entries := make(model.Entries, 0)
-	entryMap := make(map[int64]*model.Entry)
-	var entryIDs []int64
+	size := max(e.limit, 0)
+	entries := make(model.Entries, 0, size)
+	entryMap := make(map[int64]*model.Entry, size)
+	entryIDs := make([]int64, 0, size)
 	var totalCount int
 
 	for rows.Next() {
