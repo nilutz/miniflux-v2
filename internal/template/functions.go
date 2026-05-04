@@ -89,13 +89,7 @@ func (f *funcMap) Map() template.FuncMap {
 		},
 		"theme_color": model.ThemeColor,
 		"iconPath":    f.iconPath,
-		"icon": func(iconName string) template.HTML {
-			return template.HTML(fmt.Sprintf(
-				`<svg class="icon" aria-hidden="true"><use href="%s#icon-%s"/></svg>`,
-				f.iconPath("sprite.svg"),
-				iconName,
-			))
-		},
+		"icon":        f.iconFunc(),
 		"nonce": func() string {
 			return crypto.GenerateRandomStringHex(16)
 		},
@@ -165,6 +159,17 @@ func (f *funcMap) iconPath(filename string) string {
 		return fmt.Sprintf("%s/icon/%s/%s", f.basePath, bundle.Checksum, filename)
 	}
 	return fmt.Sprintf("%s/icon/_/%s", f.basePath, filename)
+}
+
+func (f *funcMap) iconFunc() func(string) template.HTML {
+	// Concatenation is used instead of fmt.Sprintf,
+	// as it's much faster, and this function is called
+	// a bunch of times per feed item on the main page.
+	prefix := `<svg class="icon" aria-hidden="true"><use href="` + f.iconPath("sprite.svg") + `#icon-`
+	const suffix = `"/></svg>`
+	return func(iconName string) template.HTML {
+		return template.HTML(prefix + iconName + suffix)
+	}
 }
 
 func csp(user *model.User, nonce string) string {
