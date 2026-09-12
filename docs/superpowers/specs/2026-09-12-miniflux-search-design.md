@@ -32,6 +32,8 @@ the crawler affects new entries only.
 | Question | Decision |
 |---|---|
 | Split of work | Thin fork of Miniflux (UI touchpoints only) plus a sidecar service |
+| Sidecar language | Go, matching the fork |
+| Inference runtime | ONNX Runtime via CGO, behind an `Embedder` interface |
 | Corpus scale | Single user, 100k–1M entries, long retained history |
 | Index location | pgvector in Miniflux's own Postgres, in a sidecar-owned schema |
 | Embeddings | Local model on CPU, same host, 384 dimensions |
@@ -75,6 +77,11 @@ against the index P1 builds, not a new subsystem.
 Both processes talk to one database. Miniflux owns the `public` schema and never
 reads `search`. The sidecar owns the `search` schema, reads `public.entries`
 read-only, and never writes to it.
+
+**Both are Go.** One language across fork and sidecar means one toolchain, one
+CI, and no second runtime on the host. Everything except the forward pass —
+Postgres access, the HTTP API, the admin page, the two-lane scheduler and its
+adaptive throttle — is straightforward Go and benefits from it.
 
 **Why one database.** Every useful query filters on entry metadata: "similar to
 this but unread", "best of this week", "within these feeds", "excluding what I
@@ -227,6 +234,33 @@ Filters — feed, category, date range, unread-only, starred, and later
 The query is embedded at search time: one short forward pass, single-digit
 milliseconds on CPU, with a small LRU cache for repeated queries.
 
+### 6.6 Inference
+
+Embedding runs in-process through ONNX Runtime via CGO — `hugot` over
+`onnxruntime_go`, which supplies WordPiece tokenization, the forward pass, and
+mean pooling. An int8-quantised bge-small-class model keeps CPU inference fast
+enough that the backfill is measured in nights rather than weeks.
+
+The cost is the static-binary property: ONNX Runtime is a shared library that
+must be installed on the host. On a single self-hosted machine that is an
+acceptable trade, and it is confined to the sidecar — the Miniflux fork still
+builds as before.
+
+Inference sits behind a narrow interface so the runtime can be replaced without
+touching the pipeline:
+
+```go
+type Embedder interface {
+    // Embed returns one vector per input text, each of Dimensions() length.
+    Embed(ctx context.Context, texts []string) ([][]float32, error)
+    Dimensions() int
+}
+```
+
+A pure-Go implementation (`cybertron`/`spago`, no CGO, roughly 3–5× slower) and
+a local-HTTP implementation are both viable behind this interface if the native
+dependency becomes inconvenient.
+
 ## 7. P2 — Similar articles
 
 Given an entry, retrieve its passages' nearest neighbours excluding passages
@@ -370,11 +404,20 @@ does not measure extraction *quality*.
 higher-dimension model later means re-embedding the whole corpus — days of
 compute. The 384-dimension choice is effectively load-bearing.
 
+**Go's ML libraries are less trodden than Python's.** `hugot`,
+`onnxruntime_go` and the pure-Go alternatives are usable but far less
+battle-tested than `sentence-transformers`. The P1 plan therefore opens with a
+spike that embeds several hundred real passages and measures throughput and
+output sanity *before* anything is built on top. If that spike fails, the
+`Embedder` interface is the seam at which a local inference service or a Python
+component gets substituted.
+
 ## 13. Open questions
 
 None blocking. Two to resolve during implementation:
 
 1. Exact embedding model within the bge-small class, chosen by measuring
-   recall@10 on the evaluation set rather than by reputation.
+   recall@10 on the evaluation set rather than by reputation, and confirmed to
+   load and run under ONNX Runtime in Go before the pipeline depends on it.
 2. Whether passage mode is a separate picker option or a toggle on results,
    which is a UI question best answered by using the search first.
