@@ -175,6 +175,9 @@ func Parse() {
 		if err := database.Migrate(db); err != nil {
 			printErrorAndExit(err)
 		}
+		if err := database.MigrateFork(db); err != nil {
+			printErrorAndExit(err)
+		}
 		return
 	}
 
@@ -215,6 +218,9 @@ func Parse() {
 	// Run migrations and start the daemon.
 	if config.Opts.RunMigrations() {
 		if err := database.Migrate(db); err != nil {
+			printErrorAndExit(err)
+		}
+		if err := database.MigrateFork(db); err != nil {
 			printErrorAndExit(err)
 		}
 	}
