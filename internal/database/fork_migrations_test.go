@@ -76,3 +76,28 @@ func TestMigrateForkIsIdempotent(t *testing.T) {
 		t.Fatalf("second MigrateFork run failed: %v", err)
 	}
 }
+
+func TestForkMigrationAddsFullTextFetchedAtColumn(t *testing.T) {
+	db := testDB(t)
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("upstream migrations failed: %v", err)
+	}
+	if err := MigrateFork(db); err != nil {
+		t.Fatalf("fork migrations failed: %v", err)
+	}
+
+	var exists bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name='entries' AND column_name='full_text_fetched_at'
+		)
+	`).Scan(&exists)
+	if err != nil {
+		t.Fatalf("unable to inspect columns: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected entries.full_text_fetched_at to exist")
+	}
+}

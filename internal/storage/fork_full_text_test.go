@@ -1,0 +1,130 @@
+// SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package storage // import "miniflux.app/v2/internal/storage"
+
+import (
+	"database/sql"
+	"os"
+	"testing"
+	"time"
+
+	_ "github.com/lib/pq"
+)
+
+func testStorage(t *testing.T) *Storage {
+	t.Helper()
+
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL is not set, skipping database integration test")
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("unable to open database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	return NewStorage(db)
+}
+
+// createTestEntry inserts a user, category, feed and entry, and returns the
+// entry id. Everything is removed when the test finishes.
+func createTestEntry(t *testing.T, s *Storage, username string) int64 {
+	t.Helper()
+
+	var userID int64
+	if err := s.db.QueryRow(
+		`INSERT INTO users (username, password) VALUES ($1, 'x') RETURNING id`,
+		username,
+	).Scan(&userID); err != nil {
+		t.Fatalf("unable to create user: %v", err)
+	}
+	t.Cleanup(func() {
+		s.db.Exec(`DELETE FROM users WHERE id=$1`, userID)
+	})
+
+	var categoryID int64
+	if err := s.db.QueryRow(
+		`INSERT INTO categories (user_id, title) VALUES ($1, 'Test') RETURNING id`,
+		userID,
+	).Scan(&categoryID); err != nil {
+		t.Fatalf("unable to create category: %v", err)
+	}
+
+	var feedID int64
+	if err := s.db.QueryRow(
+		`INSERT INTO feeds (feed_url, site_url, title, category_id, user_id)
+		 VALUES ($1, $1, 'Test feed', $2, $3) RETURNING id`,
+		"https://example.org/"+username+".xml", categoryID, userID,
+	).Scan(&feedID); err != nil {
+		t.Fatalf("unable to create feed: %v", err)
+	}
+
+	var entryID int64
+	if err := s.db.QueryRow(
+		`INSERT INTO entries (title, hash, url, published_at, changed_at, user_id, feed_id, content)
+		 VALUES ('Test entry', $1, 'https://example.org/post', now(), now(), $2, $3, '<p>excerpt</p>')
+		 RETURNING id`,
+		"hash-"+username, userID, feedID,
+	).Scan(&entryID); err != nil {
+		t.Fatalf("unable to create entry: %v", err)
+	}
+
+	return entryID
+}
+
+func TestEntryIDsWithoutFullTextReturnsUnfetchedEntries(t *testing.T) {
+	store := testStorage(t)
+	entryID := createTestEntry(t, store, "fulltext-pending")
+
+	entryIDs, err := store.EntryIDsWithoutFullText(entryID-1, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	found := false
+	for _, id := range entryIDs {
+		if id == entryID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected entry #%d in the pending list, got %v", entryID, entryIDs)
+	}
+}
+
+func TestMarkFullTextFetchedRemovesEntryFromPendingList(t *testing.T) {
+	store := testStorage(t)
+	entryID := createTestEntry(t, store, "fulltext-done")
+
+	if err := store.MarkFullTextFetched(entryID, time.Now()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	entryIDs, err := store.EntryIDsWithoutFullText(entryID-1, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, id := range entryIDs {
+		if id == entryID {
+			t.Fatalf("entry #%d should no longer be pending", entryID)
+		}
+	}
+}
+
+func TestEntryIDsWithoutFullTextRespectsLimit(t *testing.T) {
+	store := testStorage(t)
+	createTestEntry(t, store, "fulltext-limit-a")
+	createTestEntry(t, store, "fulltext-limit-b")
+
+	entryIDs, err := store.EntryIDsWithoutFullText(0, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entryIDs) != 1 {
+		t.Fatalf("expected exactly 1 entry id, got %d", len(entryIDs))
+	}
+}

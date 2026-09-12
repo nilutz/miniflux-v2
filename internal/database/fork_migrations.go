@@ -18,7 +18,18 @@ import (
 // that index would silently never run.
 //
 // Order is important. Add new migrations at the end of the list.
-var forkMigrations = [...]func(tx *sql.Tx) error{}
+var forkMigrations = [...]func(tx *sql.Tx) error{
+	func(tx *sql.Tx) (err error) {
+		_, err = tx.Exec(`
+			ALTER TABLE entries ADD COLUMN full_text_fetched_at timestamp with time zone;
+
+			CREATE INDEX entries_full_text_pending_idx
+				ON entries (id)
+				WHERE full_text_fetched_at IS NULL;
+		`)
+		return err
+	},
+}
 
 var forkSchemaVersion = len(forkMigrations)
 
