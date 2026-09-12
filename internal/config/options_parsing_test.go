@@ -2088,3 +2088,19 @@ func TestValidateSchedulerEntryFrequencyMinLessThanMax(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 }
+
+func TestCrawlerEnabledByDefaultOptionParsing(t *testing.T) {
+	configParser := NewConfigParser()
+
+	if configParser.options.CrawlerEnabledByDefault() {
+		t.Fatal("Expected CRAWLER_ENABLED_BY_DEFAULT to be disabled by default")
+	}
+
+	if err := configParser.parseLines([]string{"CRAWLER_ENABLED_BY_DEFAULT=1"}); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if !configParser.options.CrawlerEnabledByDefault() {
+		t.Fatal("Expected CRAWLER_ENABLED_BY_DEFAULT to be enabled after parsing")
+	}
+}

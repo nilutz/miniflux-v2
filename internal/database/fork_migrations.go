@@ -29,6 +29,10 @@ var forkMigrations = [...]func(tx *sql.Tx) error{
 		`)
 		return err
 	},
+	func(tx *sql.Tx) (err error) {
+		_, err = tx.Exec(`UPDATE feeds SET crawler = true WHERE crawler = false`)
+		return err
+	},
 }
 
 var forkSchemaVersion = len(forkMigrations)

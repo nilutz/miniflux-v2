@@ -159,6 +159,11 @@ func NewConfigOptions() *configOptions {
 				rawValue:        "0",
 				valueType:       boolType,
 			},
+			"CRAWLER_ENABLED_BY_DEFAULT": {
+				parsedBoolValue: false,
+				rawValue:        "0",
+				valueType:       boolType,
+			},
 			"DATABASE_CONNECTION_LIFETIME": {
 				parsedDuration: time.Minute * 5,
 				rawValue:       "5",
@@ -682,6 +687,12 @@ func (c *configOptions) CleanupRemoveSessionsInterval() time.Duration {
 
 func (c *configOptions) CreateAdmin() bool {
 	return c.options["CREATE_ADMIN"].parsedBoolValue
+}
+
+// CrawlerEnabledByDefault returns true when new feeds should fetch the
+// original web page instead of relying on the feed's own content.
+func (c *configOptions) CrawlerEnabledByDefault() bool {
+	return c.options["CRAWLER_ENABLED_BY_DEFAULT"].parsedBoolValue
 }
 
 func (c *configOptions) DatabaseConnectionLifetime() time.Duration {
