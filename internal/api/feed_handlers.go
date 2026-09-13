@@ -24,7 +24,7 @@ func (h *handler) createFeedHandler(w http.ResponseWriter, r *http.Request) {
 	userID := request.UserID(r)
 
 	var feedCreationRequest model.FeedCreationRequest
-	if err := json_parser.NewDecoder(r.Body).Decode(&feedCreationRequest); err != nil {
+	if err := decodeFeedCreationRequest(r.Body, &feedCreationRequest); err != nil {
 		response.JSONBadRequest(w, r, err)
 		return
 	}

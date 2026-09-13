@@ -44,7 +44,10 @@ func (h *handler) bookmarklet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := view.New(h.tpl, r)
-	view.Set("form", form.SubscriptionForm{URL: bookmarkletURL})
+	view.Set("form", form.SubscriptionForm{
+		URL:     bookmarkletURL,
+		Crawler: config.Opts.CrawlerEnabledByDefault(),
+	})
 	view.Set("categories", categories)
 	view.Set("menu", "feeds")
 	view.Set("user", user)

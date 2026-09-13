@@ -431,6 +431,10 @@ func subscribe(newFeed Stream, category Stream, title string, store *storage.Sto
 	feedRequest := model.FeedCreationRequest{
 		FeedURL:    newFeed.ID,
 		CategoryID: destCategory.ID,
+		// The Google Reader quick-add protocol has no crawler field, so the
+		// value is always omitted here: the fork applies its own default so
+		// feeds added from a mobile client still feed the search corpus.
+		Crawler: config.Opts.CrawlerEnabledByDefault(),
 	}
 	verr := validator.ValidateFeedCreation(store, userID, &feedRequest)
 	if verr != nil {
