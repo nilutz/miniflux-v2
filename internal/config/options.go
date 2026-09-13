@@ -154,12 +154,12 @@ func NewConfigOptions() *configOptions {
 				rawValue:       "30",
 				valueType:      dayType,
 			},
-			"CREATE_ADMIN": {
+			"CRAWLER_ENABLED_BY_DEFAULT": {
 				parsedBoolValue: false,
 				rawValue:        "0",
 				valueType:       boolType,
 			},
-			"CRAWLER_ENABLED_BY_DEFAULT": {
+			"CREATE_ADMIN": {
 				parsedBoolValue: false,
 				rawValue:        "0",
 				valueType:       boolType,

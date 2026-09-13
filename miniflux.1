@@ -107,7 +107,10 @@ Reset user password\&.
 .PP
 .B \-run-cleanup-tasks
 .RS 4
-Run cleanup tasks (delete old sessions and archive old entries)\&.
+Run cleanup tasks (delete old sessions and orphan icons)\&.
+.br
+This fork never deletes entries: the entry corpus backs the search index,
+so entry archiving has been removed from the cleanup job\&.
 .RE
 .PP
 .B \-v
@@ -201,34 +204,27 @@ Path to SSL certificate\&.
 Default is empty\&.
 .TP
 .B CLEANUP_ARCHIVE_BATCH_SIZE
-Number of entries to archive for each job interval\&.
+No-op in this fork\&. Entries are never archived, so this option is parsed
+but never read\&.
 .br
 Default is 10000 entries\&.
 .TP
 .B CLEANUP_ARCHIVE_READ_DAYS
-Number of days before the cleanup job archives read entries\&.
-.br
-Archiving deletes non-bookmarked, non-shared read entries from the
-database and records a tombstone to prevent the same entry from being
-imported again during a later feed refresh\&.
-.br
-Set to -1 to disable automatic archiving of read entries\&.
+No-op in this fork\&. Read entries are never archived, whatever this is set
+to: the entry corpus backs the search index, so the call that deleted old
+entries and tombstoned them has been removed from the cleanup job\&.
 .br
 Default is 60 days\&.
 .TP
 .B CLEANUP_ARCHIVE_UNREAD_DAYS
-Number of days before the cleanup job archives unread entries\&.
-.br
-Archiving deletes non-bookmarked, non-shared unread entries from the
-database and records a tombstone to prevent the same entry from being
-imported again during a later feed refresh\&.
-.br
-Set to -1 to disable automatic archiving of unread entries\&.
+No-op in this fork\&. Unread entries are never archived, whatever this is
+set to: the entry corpus backs the search index, so the call that deleted
+old entries and tombstoned them has been removed from the cleanup job\&.
 .br
 Default is 180 days\&.
 .TP
 .B CLEANUP_FREQUENCY_HOURS
-Cleanup job frequency. Remove old sessions and archive entries\&.
+Cleanup job frequency. Remove old sessions and orphan icons\&.
 .br
 Default is 24 hours\&.
 .TP
@@ -237,13 +233,21 @@ Number of days after removing old sessions from the database\&.
 .br
 Default is 30 days\&.
 .TP
-.B CREATE_ADMIN
-Set to 1 to create an admin user from environment variables\&.
+.B CRAWLER_ENABLED_BY_DEFAULT
+Enable the crawler (fetch original content) for newly created feeds\&.
+.br
+This applies to the subscription form, the bookmarklet and the Web Share
+Target, POST /v1/feeds and Google Reader quick-add\&. This deviates from
+upstream, where a POST /v1/feeds payload without a "crawler" field always
+creates the feed with the crawler disabled; here such a payload gets this
+default instead\&. An explicit "crawler": false in the payload is still
+honoured\&. OPML import is unaffected: it keeps the miniflux:crawler value
+carried by the file\&.
 .br
 Disabled by default\&.
 .TP
-.B CRAWLER_ENABLED_BY_DEFAULT
-Enable the crawler (fetch original content) for newly created feeds\&.
+.B CREATE_ADMIN
+Set to 1 to create an admin user from environment variables\&.
 .br
 Disabled by default\&.
 .TP

@@ -32,7 +32,7 @@ const (
 	flagConfigDumpHelp       = "Print parsed configuration values"
 	flagHealthCheckHelp      = `Perform a health check on the given endpoint (the value "auto" tries to guess the health check endpoint).`
 	flagRefreshFeedsHelp     = "Refresh a batch of feeds and exit"
-	flagRunCleanupTasksHelp  = "Run cleanup tasks (delete old sessions and archive old entries)"
+	flagRunCleanupTasksHelp  = "Run cleanup tasks (delete old sessions and orphan icons; entries are never deleted in this fork)"
 	flagExportUserFeedsHelp  = "Export user feeds (provide the username as argument)"
 	flagResetNextCheckAtHelp = "Reset the next check time for all feeds"
 	flagBackfillFullTextHelp = "Fetch the original web page for entries that have never been scraped, then exit"

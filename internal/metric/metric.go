@@ -41,6 +41,10 @@ var (
 		[]string{"status"},
 	)
 
+	// ArchiveEntriesDuration is always empty in this fork: entry archiving has
+	// been removed from the cleanup job so the corpus is never deleted, and
+	// nothing observes this histogram any more. It stays registered so the
+	// diff against upstream metric.go remains a comment.
 	ArchiveEntriesDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "miniflux",
