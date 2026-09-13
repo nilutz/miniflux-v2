@@ -87,11 +87,13 @@ func CreateFeedFromSubscriptionDiscovery(store *storage.Storage, userID int64, f
 	subscription.ProxyURL = feedCreationRequest.ProxyURL
 	subscription.CheckedNow()
 
-	processor.ProcessFeedEntries(store, subscription, userID, true)
+	fullTextEntryHashes := processor.ProcessFeedEntries(store, subscription, userID, true)
 
 	if storeErr := store.CreateFeed(subscription); storeErr != nil {
 		return nil, locale.NewLocalizedErrorWrapper(storeErr, "error.database_error", storeErr)
 	}
+
+	markFullTextFetched(store, subscription.ID, fullTextEntryHashes)
 
 	slog.Debug("Created feed",
 		slog.Int64("user_id", userID),
@@ -183,11 +185,13 @@ func CreateFeed(store *storage.Storage, userID int64, feedCreationRequest *model
 	subscription.WithCategoryID(feedCreationRequest.CategoryID)
 	subscription.CheckedNow()
 
-	processor.ProcessFeedEntries(store, subscription, userID, true)
+	fullTextEntryHashes := processor.ProcessFeedEntries(store, subscription, userID, true)
 
 	if storeErr := store.CreateFeed(subscription); storeErr != nil {
 		return nil, locale.NewLocalizedErrorWrapper(storeErr, "error.database_error", storeErr)
 	}
+
+	markFullTextFetched(store, subscription.ID, fullTextEntryHashes)
 
 	slog.Debug("Created feed",
 		slog.Int64("user_id", userID),
@@ -324,7 +328,7 @@ func RefreshFeed(store *storage.Storage, userID, feedID int64, forceRefresh bool
 		)
 
 		originalFeed.Entries = updatedFeed.Entries
-		processor.ProcessFeedEntries(store, originalFeed, userID, forceRefresh)
+		fullTextEntryHashes := processor.ProcessFeedEntries(store, originalFeed, userID, forceRefresh)
 
 		// We don't update existing entries when the crawler is enabled (we crawl only inexisting entries).
 		// We also skip updating existing entries if the feed has ignore_entry_updates enabled.
@@ -335,6 +339,8 @@ func RefreshFeed(store *storage.Storage, userID, feedID int64, forceRefresh bool
 			localizedError := locale.NewLocalizedErrorWrapper(storeErr, "error.database_error", storeErr)
 			return getTranslatedLocalizedError(store, userID, originalFeed, localizedError)
 		}
+
+		markFullTextFetched(store, originalFeed.ID, fullTextEntryHashes)
 
 		userIntegrations, intErr := store.Integration(userID)
 		if intErr != nil {

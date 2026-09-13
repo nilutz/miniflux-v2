@@ -6,6 +6,8 @@ package storage // import "miniflux.app/v2/internal/storage"
 import (
 	"fmt"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // EntryIDsWithoutFullText returns up to limit entry IDs greater than afterID
@@ -49,6 +51,27 @@ func (s *Storage) MarkFullTextFetched(entryID int64, fetchedAt time.Time) error 
 
 	if _, err := s.db.Exec(query, fetchedAt, entryID); err != nil {
 		return fmt.Errorf(`store: unable to mark entry #%d as fetched: %v`, entryID, err)
+	}
+
+	return nil
+}
+
+// MarkFullTextFetchedByHashes records that the given entries of a feed hold
+// full text scraped from their original web page.
+//
+// The live crawler path (processor.ProcessFeedEntries) scrapes entries before
+// they are persisted, so it has no entry ids to work with; (feed_id, hash) is
+// the natural key those entries are stored under. Hashes that match no row
+// (a tombstoned entry, for instance) are silently ignored.
+func (s *Storage) MarkFullTextFetchedByHashes(feedID int64, entryHashes []string, fetchedAt time.Time) error {
+	if len(entryHashes) == 0 {
+		return nil
+	}
+
+	query := `UPDATE entries SET full_text_fetched_at=$1 WHERE feed_id=$2 AND hash=ANY($3)`
+
+	if _, err := s.db.Exec(query, fetchedAt, feedID, pq.Array(entryHashes)); err != nil {
+		return fmt.Errorf(`store: unable to mark entries of feed #%d as fetched: %v`, feedID, err)
 	}
 
 	return nil

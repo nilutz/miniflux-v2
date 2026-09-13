@@ -80,6 +80,7 @@ func backfillEntry(store *storage.Storage, entryID int64) bool {
 		return false
 	}
 	if entry == nil {
+		slog.Warn("Entry disappeared before it could be scraped", slog.Int64("entry_id", entryID))
 		return false
 	}
 
@@ -95,11 +96,27 @@ func backfillEntry(store *storage.Storage, entryID int64) bool {
 		return false
 	}
 
+	// ProcessEntryWebPage reports no error when the page is fetched but holds
+	// no extractable article (a paywall, a JavaScript-only page, a link farm):
+	// scraper.ScrapeWebsite discards readability's error, and the processor
+	// only replaces entry.Content when the extraction returned something. The
+	// entry then still holds its feed excerpt, so comparing the content before
+	// and after is the only signal available here that full text was obtained.
+	originalContent := entry.Content
+
 	if err := processor.ProcessEntryWebPage(feed, entry, user); err != nil {
 		slog.Warn("Unable to scrape entry",
 			slog.Int64("entry_id", entryID),
 			slog.String("entry_url", entry.URL),
 			slog.Any("error", err),
+		)
+		return false
+	}
+
+	if entry.Content == originalContent {
+		slog.Warn("Scraper returned no article content, leaving entry pending",
+			slog.Int64("entry_id", entryID),
+			slog.String("entry_url", entry.URL),
 		)
 		return false
 	}

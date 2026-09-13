@@ -24,7 +24,12 @@ import (
 )
 
 // ProcessFeedEntries downloads original web page for entries and apply filters.
-func ProcessFeedEntries(store *storage.Storage, feed *model.Feed, userID int64, forceRefresh bool) {
+//
+// Fork addition: it returns the hashes of the entries whose content was
+// actually replaced by a successful scrape, so the caller can record
+// full_text_fetched_at once those entries have been persisted. Callers that do
+// not care may ignore the return value.
+func ProcessFeedEntries(store *storage.Storage, feed *model.Feed, userID int64, forceRefresh bool) (fullTextEntryHashes []string) {
 	var filteredEntries model.Entries
 
 	user, storeErr := store.UserByID(userID)
@@ -166,6 +171,10 @@ func ProcessFeedEntries(store *storage.Storage, feed *model.Feed, userID int64, 
 
 		updateEntryReadingTime(store, feed, entry, entryIsNew, user)
 
+		if contentExtractedSuccessfully {
+			fullTextEntryHashes = append(fullTextEntryHashes, entry.Hash)
+		}
+
 		filteredEntries = append(filteredEntries, entry)
 	}
 
@@ -174,6 +183,8 @@ func ProcessFeedEntries(store *storage.Storage, feed *model.Feed, userID int64, 
 	}
 
 	feed.Entries = filteredEntries
+
+	return fullTextEntryHashes
 }
 
 // ProcessEntryWebPage downloads the entry web page and apply rewrite rules.
