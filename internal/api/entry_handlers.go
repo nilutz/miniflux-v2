@@ -570,12 +570,6 @@ func (h *handler) getEntryIDsHandler(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, r, entryIDsResponse{Total: total, EntryIDs: entryIDs})
 }
 
-func (h *handler) flushHistoryHandler(w http.ResponseWriter, r *http.Request) {
-	loggedUserID := request.UserID(r)
-	go h.store.FlushHistory(loggedUserID)
-	response.JSONAccepted(w, r)
-}
-
 func configureFilters(builder *storage.EntryQueryBuilder, r *http.Request) *storage.EntryQueryBuilder {
 	if beforeEntryID := request.QueryInt64Param(r, "before_entry_id", 0); beforeEntryID > 0 {
 		builder = builder.BeforeEntryID(beforeEntryID)

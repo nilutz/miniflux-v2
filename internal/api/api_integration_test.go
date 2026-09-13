@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -3418,7 +3419,13 @@ func TestFetchContentEndpoint(t *testing.T) {
 	}
 }
 
-func TestFlushHistoryEndpoint(t *testing.T) {
+// TestFlushHistoryEndpointIsRemoved is a regression guard for the fork's
+// decision to remove the flush-history REST endpoint: the corpus this fork
+// builds must not be destroyable by any client holding an API key. It
+// asserts that both PUT and DELETE /v1/flush-history are gone, and that read
+// entries survive an attempted flush. If someone re-adds the route, this
+// test fails.
+func TestFlushHistoryEndpointIsRemoved(t *testing.T) {
 	t.Parallel()
 
 	testConfig := newIntegrationTestConfig()
@@ -3452,17 +3459,39 @@ func TestFlushHistoryEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := regularUserClient.FlushHistory(); err != nil {
-		t.Fatal(err)
+	// The client library only wraps PUT for this call; a removed route must
+	// surface as ErrNotFound rather than succeed.
+	if err := regularUserClient.FlushHistory(); !errors.Is(err, miniflux.ErrNotFound) {
+		t.Fatalf(`Expected PUT /v1/flush-history to be gone (ErrNotFound), got: %v`, err)
 	}
 
+	// DELETE /v1/flush-history was also registered against the same handler
+	// and has no client-library wrapper, so issue it directly.
+	req, err := http.NewRequest(http.MethodDelete, testConfig.testBaseURL+"/v1/flush-history", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth(regularTestUser.Username, testConfig.testRegularPassword)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf(`Expected DELETE /v1/flush-history to be not-found/method-not-allowed, got status %d`, resp.StatusCode)
+	}
+
+	// Since flushing never ran, the entries marked as read above must still
+	// be there — the corpus survives.
 	readEntries, err := regularUserClient.Entries(&miniflux.Filter{Status: miniflux.EntryStatusRead})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if readEntries.Total != 0 {
-		t.Fatalf(`Invalid total, got %d`, readEntries.Total)
+	if readEntries.Total == 0 {
+		t.Fatalf(`Expected read entries to still exist since flush-history is removed, got total=%d`, readEntries.Total)
 	}
 }
 
