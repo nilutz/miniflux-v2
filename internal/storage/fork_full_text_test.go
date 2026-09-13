@@ -30,8 +30,8 @@ func testStorage(t *testing.T) *Storage {
 }
 
 // createTestEntry inserts a user, category, feed and entry, and returns the
-// entry id. Everything is removed when the test finishes.
-func createTestEntry(t *testing.T, s *Storage, username string) int64 {
+// entry id and feed id. Everything is removed when the test finishes.
+func createTestEntry(t *testing.T, s *Storage, username string) (entryID int64, feedID int64) {
 	t.Helper()
 
 	var userID int64
@@ -53,7 +53,6 @@ func createTestEntry(t *testing.T, s *Storage, username string) int64 {
 		t.Fatalf("unable to create category: %v", err)
 	}
 
-	var feedID int64
 	if err := s.db.QueryRow(
 		`INSERT INTO feeds (feed_url, site_url, title, category_id, user_id)
 		 VALUES ($1, $1, 'Test feed', $2, $3) RETURNING id`,
@@ -62,7 +61,6 @@ func createTestEntry(t *testing.T, s *Storage, username string) int64 {
 		t.Fatalf("unable to create feed: %v", err)
 	}
 
-	var entryID int64
 	if err := s.db.QueryRow(
 		`INSERT INTO entries (title, hash, url, published_at, changed_at, user_id, feed_id, content)
 		 VALUES ('Test entry', $1, 'https://example.org/post', now(), now(), $2, $3, '<p>excerpt</p>')
@@ -72,12 +70,12 @@ func createTestEntry(t *testing.T, s *Storage, username string) int64 {
 		t.Fatalf("unable to create entry: %v", err)
 	}
 
-	return entryID
+	return entryID, feedID
 }
 
 func TestEntryIDsWithoutFullTextReturnsUnfetchedEntries(t *testing.T) {
 	store := testStorage(t)
-	entryID := createTestEntry(t, store, "fulltext-pending")
+	entryID, _ := createTestEntry(t, store, "fulltext-pending")
 
 	entryIDs, err := store.EntryIDsWithoutFullText(entryID-1, 100)
 	if err != nil {
@@ -97,7 +95,7 @@ func TestEntryIDsWithoutFullTextReturnsUnfetchedEntries(t *testing.T) {
 
 func TestMarkFullTextFetchedRemovesEntryFromPendingList(t *testing.T) {
 	store := testStorage(t)
-	entryID := createTestEntry(t, store, "fulltext-done")
+	entryID, _ := createTestEntry(t, store, "fulltext-done")
 
 	if err := store.MarkFullTextFetched(entryID, time.Now()); err != nil {
 		t.Fatalf("unexpected error: %v", err)

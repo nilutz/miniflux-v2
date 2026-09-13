@@ -5,14 +5,18 @@ package cli // import "miniflux.app/v2/internal/cli"
 
 import (
 	"log/slog"
-	"time"
 
 	"miniflux.app/v2/internal/config"
-	"miniflux.app/v2/internal/metric"
-	"miniflux.app/v2/internal/model"
 	"miniflux.app/v2/internal/storage"
 )
 
+// runCleanupTasks removes expired sessions and orphan icons.
+//
+// Entry archiving is deliberately absent in this fork: the entry corpus backs
+// the search index, so entries are never deleted. ArchiveEntries deletes rows
+// and writes entry_tombstones that permanently block re-ingestion, and it is
+// disabled only by a negative interval — a zero value deletes everything older
+// than one day. Removing the call is safer than relying on configuration.
 func runCleanupTasks(store *storage.Storage) {
 	if nbWebSessions, err := store.CleanOldWebSessions(config.Opts.CleanupRemoveSessionsInterval()); err != nil {
 		slog.Error("Unable to clean old web sessions", slog.Any("error", err))
@@ -20,32 +24,6 @@ func runCleanupTasks(store *storage.Storage) {
 		slog.Info("Sessions cleanup completed",
 			slog.Int64("web_sessions_removed", nbWebSessions),
 		)
-	}
-
-	startTime := time.Now()
-	if rowsAffected, err := store.ArchiveEntries(model.EntryStatusRead, config.Opts.CleanupArchiveReadInterval(), config.Opts.CleanupArchiveBatchSize()); err != nil {
-		slog.Error("Unable to archive read entries", slog.Any("error", err))
-	} else {
-		slog.Info("Archiving read entries completed",
-			slog.Int64("read_entries_archived", rowsAffected),
-		)
-
-		if config.Opts.HasMetricsCollector() {
-			metric.ArchiveEntriesDuration.WithLabelValues(model.EntryStatusRead).Observe(time.Since(startTime).Seconds())
-		}
-	}
-
-	startTime = time.Now()
-	if rowsAffected, err := store.ArchiveEntries(model.EntryStatusUnread, config.Opts.CleanupArchiveUnreadInterval(), config.Opts.CleanupArchiveBatchSize()); err != nil {
-		slog.Error("Unable to archive unread entries", slog.Any("error", err))
-	} else {
-		slog.Info("Archiving unread entries completed",
-			slog.Int64("unread_entries_archived", rowsAffected),
-		)
-
-		if config.Opts.HasMetricsCollector() {
-			metric.ArchiveEntriesDuration.WithLabelValues(model.EntryStatusUnread).Observe(time.Since(startTime).Seconds())
-		}
 	}
 
 	if nbIcons, err := store.CleanupOrphanIcons(); err != nil {
