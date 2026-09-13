@@ -171,7 +171,7 @@ func ProcessFeedEntries(store *storage.Storage, feed *model.Feed, userID int64, 
 
 		updateEntryReadingTime(store, feed, entry, entryIsNew, user)
 
-		if contentExtractedSuccessfully {
+		if contentExtractedSuccessfully && ContainsArticleText(entry.Content) {
 			fullTextEntryHashes = append(fullTextEntryHashes, entry.Hash)
 		}
 

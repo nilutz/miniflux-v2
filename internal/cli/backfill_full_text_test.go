@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,38 +106,6 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestBackfillFullTextProcessesZeroEntriesWhenNothingPending covers the
-// no-op case: with no unfetched entries in the database, the command must
-// complete without attempting any work.
-func TestBackfillFullTextProcessesZeroEntriesWhenNothingPending(t *testing.T) {
-	db := testDB(t)
-	initTestConfig(t)
-	store := storage.NewStorage(db)
-
-	// Ensure there is at least one entry in the table, but already marked as
-	// fetched, so the "nothing pending" case is exercised against a
-	// non-empty entries table rather than trivially against an empty one.
-	entryID := createBackfillTestEntry(t, db, "backfill-none", "https://example.org/post", "<p>excerpt</p>")
-	if err := store.MarkFullTextFetched(entryID, time.Now()); err != nil {
-		t.Fatalf("unable to mark entry as fetched: %v", err)
-	}
-
-	logs := captureLogs(t)
-
-	backfillFullText(store, 0)
-
-	output := logs.String()
-	if !strings.Contains(output, "Full text backfill completed") {
-		t.Fatalf("expected a completion log line, got: %s", output)
-	}
-	if !strings.Contains(output, "processed=0") {
-		t.Fatalf("expected processed=0 in the completion log, got: %s", output)
-	}
-	if strings.Contains(output, "progress") {
-		t.Fatalf("did not expect any progress log line when nothing is pending, got: %s", output)
-	}
-}
-
 // TestBackfillFullTextSkipsEntriesAlreadyMarkedFetched is the checkpoint
 // regression guard: an entry already marked via MarkFullTextFetched must not
 // be revisited (and, in particular, must never trigger a network fetch).
@@ -191,7 +160,9 @@ func TestBackfillFullTextPaginatesAcrossBatches(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entryCount := backfillBatchSize + 5
+	// One more than a full page is all it takes to cross the batch boundary,
+	// and each extra entry costs a real scrape.
+	entryCount := backfillBatchSize + 1
 	entryIDs := make([]int64, 0, entryCount)
 	for i := 0; i < entryCount; i++ {
 		username := fmt.Sprintf("backfill-page-%d", i)
@@ -212,9 +183,11 @@ func TestBackfillFullTextPaginatesAcrossBatches(t *testing.T) {
 }
 
 // TestBackfillFullTextScrapesAndPersistsContent exercises the real scrape
-// path end to end against an httptest server standing in for the public
-// internet: the entry's excerpt must be replaced with the scraped article
-// content, and full_text_fetched_at must be set.
+// path against an httptest server standing in for the public internet: the
+// entry's excerpt must be replaced with the scraped article content, and
+// full_text_fetched_at must be set. It drives backfillEntry rather than the
+// whole-database walk so the assertions cannot be disturbed by entries other
+// tests write to the same database concurrently.
 func TestBackfillFullTextScrapesAndPersistsContent(t *testing.T) {
 	db := testDB(t)
 	initTestConfig(t)
@@ -229,7 +202,9 @@ func TestBackfillFullTextScrapesAndPersistsContent(t *testing.T) {
 	entryID := createBackfillTestEntry(t, db, "backfill-scrape", server.URL, excerpt)
 
 	logs := captureLogs(t)
-	backfillFullText(store, 0)
+	if !backfillEntry(store, entryID) {
+		t.Fatalf("expected the scrape to succeed, logs: %s", logs.String())
+	}
 
 	var content string
 	var fetchedAt sql.NullTime
@@ -265,7 +240,9 @@ func TestBackfillFullTextLeavesFailedEntryRetryable(t *testing.T) {
 	const originalContent = "<p>excerpt</p>"
 	entryID := createBackfillTestEntry(t, db, "backfill-failure", server.URL, originalContent)
 
-	backfillFullText(store, 0)
+	if backfillEntry(store, entryID) {
+		t.Fatal("expected a 404 to be reported as a failed scrape")
+	}
 
 	var content string
 	var fetchedAt sql.NullTime
@@ -293,6 +270,84 @@ func TestBackfillFullTextLeavesFailedEntryRetryable(t *testing.T) {
 		t.Fatalf("expected entry #%d to still be pending after a failed scrape", entryID)
 	}
 }
+
+// TestBackfillEntryLeavesPageWithoutArticlePending is the regression guard for
+// the silent-success path: a page that fetches fine but holds no extractable
+// article (a paywall, a JavaScript-only app shell, a link farm) makes
+// scraper.ScrapeWebsite discard readability's error and return an empty
+// string, so ProcessEntryWebPage reports no error and leaves entry.Content
+// alone. The entry still holds its feed excerpt, so it must stay pending
+// rather than being checkpointed forever.
+func TestBackfillEntryLeavesPageWithoutArticlePending(t *testing.T) {
+	db := testDB(t)
+	initTestConfig(t)
+	store := storage.NewStorage(db)
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(appShellHTML))
+	}))
+	defer server.Close()
+
+	const originalContent = "<p>the only text this entry will ever have</p>"
+	entryID := createBackfillTestEntry(t, db, "backfill-no-article", server.URL, originalContent)
+
+	logs := captureLogs(t)
+
+	if backfillEntry(store, entryID) {
+		var stored string
+		db.QueryRow(`SELECT content FROM entries WHERE id=$1`, entryID).Scan(&stored)
+		t.Fatalf("expected a page without an article to count as a failed scrape, stored content: %q", stored)
+	}
+
+	if requests != 1 {
+		t.Fatalf("expected exactly one fetch of the page, got %d", requests)
+	}
+
+	var content string
+	var fetchedAt sql.NullTime
+	if err := db.QueryRow(`SELECT content, full_text_fetched_at FROM entries WHERE id=$1`, entryID).Scan(&content, &fetchedAt); err != nil {
+		t.Fatalf("unable to read back entry: %v", err)
+	}
+	if fetchedAt.Valid {
+		t.Fatal("expected full_text_fetched_at to remain null when no article was extracted")
+	}
+	if content != originalContent {
+		t.Fatalf("expected the excerpt to remain untouched, got: %s", content)
+	}
+
+	if !strings.Contains(logs.String(), "Scraper returned no article content") {
+		t.Fatalf("expected a log line explaining why the entry stays pending, got: %s", logs.String())
+	}
+
+	pending, err := store.EntryIDsWithoutFullText(entryID-1, 10)
+	if err != nil {
+		t.Fatalf("unable to list pending entries: %v", err)
+	}
+	if !slices.Contains(pending, entryID) {
+		t.Fatalf("expected entry #%d to still be pending", entryID)
+	}
+}
+
+// appShellHTML is a page that answers 200 OK with well-formed HTML that holds
+// no prose at all, the shape a JavaScript-only single page app serves to a
+// scraper that does not run scripts. Readability finds no candidate and
+// returns an empty string without an error.
+//
+// Note that "no extractable article" is not the same as "no extracted
+// content": a paywall page whose markup still contains navigation and a
+// footer yields that boilerplate as the extracted article, which no amount of
+// checking here can tell apart from a real one.
+const appShellHTML = `<!DOCTYPE html>
+<html>
+<head><title>Subscribe to read</title></head>
+<body>
+<div id="app"></div>
+<script>window.__DATA__ = {};</script>
+</body>
+</html>`
 
 // articleHTML is long enough, and structured enough, for go-readability to
 // extract it as the main content rather than discarding it as boilerplate.
