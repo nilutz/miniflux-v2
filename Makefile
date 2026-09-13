@@ -126,7 +126,7 @@ integration-test:
 	TEST_MINIFLUX_ADMIN_USERNAME=admin \
 	TEST_MINIFLUX_ADMIN_PASSWORD=test123 \
 	DATABASE_URL=$(DB_URL) \
-	go test -v -count=1 ./internal/api ./internal/cli ./internal/database ./internal/storage
+	go test -v -count=1 ./internal/api ./internal/cli ./internal/database ./internal/reader/handler ./internal/storage
 
 clean-integration-test:
 	@ kill -9 `cat /tmp/miniflux.pid`

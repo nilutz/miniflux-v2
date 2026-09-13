@@ -150,3 +150,65 @@ func TestEntryOwnerReturnsErrorForUnknownEntry(t *testing.T) {
 		t.Fatal("expected an error for an entry id that does not exist")
 	}
 }
+
+// TestMarkFullTextFetchedByHashesMarksOnlyTheNamedEntries covers the live
+// crawler path, which knows the entries it scraped by their (feed_id, hash)
+// key rather than by id, because it scrapes them before they are persisted.
+func TestMarkFullTextFetchedByHashesMarksOnlyTheNamedEntries(t *testing.T) {
+	s := testStorage(t)
+
+	entryID, feedID := createTestEntry(t, s, "mark-by-hash")
+
+	var otherEntryID int64
+	if err := s.db.QueryRow(
+		`INSERT INTO entries (title, hash, url, published_at, changed_at, user_id, feed_id, content)
+		 SELECT 'Other entry', 'hash-mark-by-hash-other', 'https://example.org/other', now(), now(), user_id, feed_id, '<p>excerpt</p>'
+		 FROM entries WHERE id=$1
+		 RETURNING id`,
+		entryID,
+	).Scan(&otherEntryID); err != nil {
+		t.Fatalf("unable to create the second entry: %v", err)
+	}
+
+	fetchedAt := time.Now().Truncate(time.Second)
+	if err := s.MarkFullTextFetchedByHashes(feedID, []string{"hash-mark-by-hash", "hash-that-matches-nothing"}, fetchedAt); err != nil {
+		t.Fatalf("unable to mark entries as fetched: %v", err)
+	}
+
+	var markedAt sql.NullTime
+	if err := s.db.QueryRow(`SELECT full_text_fetched_at FROM entries WHERE id=$1`, entryID).Scan(&markedAt); err != nil {
+		t.Fatalf("unable to read back the entry: %v", err)
+	}
+	if !markedAt.Valid || !markedAt.Time.Equal(fetchedAt) {
+		t.Fatalf("expected full_text_fetched_at to be %v, got %v", fetchedAt, markedAt)
+	}
+
+	var otherMarkedAt sql.NullTime
+	if err := s.db.QueryRow(`SELECT full_text_fetched_at FROM entries WHERE id=$1`, otherEntryID).Scan(&otherMarkedAt); err != nil {
+		t.Fatalf("unable to read back the second entry: %v", err)
+	}
+	if otherMarkedAt.Valid {
+		t.Fatal("expected an entry whose hash was not named to stay pending")
+	}
+}
+
+// TestMarkFullTextFetchedByHashesIgnoresAnEmptyList guards the common case: a
+// refresh where the crawler scraped nothing must not issue a statement that
+// could match every entry of the feed.
+func TestMarkFullTextFetchedByHashesIgnoresAnEmptyList(t *testing.T) {
+	s := testStorage(t)
+
+	entryID, feedID := createTestEntry(t, s, "mark-by-hash-empty")
+
+	if err := s.MarkFullTextFetchedByHashes(feedID, nil, time.Now()); err != nil {
+		t.Fatalf("unable to mark an empty list of entries: %v", err)
+	}
+
+	var markedAt sql.NullTime
+	if err := s.db.QueryRow(`SELECT full_text_fetched_at FROM entries WHERE id=$1`, entryID).Scan(&markedAt); err != nil {
+		t.Fatalf("unable to read back the entry: %v", err)
+	}
+	if markedAt.Valid {
+		t.Fatal("expected the entry to stay pending")
+	}
+}
