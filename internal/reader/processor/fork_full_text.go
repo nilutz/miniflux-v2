@@ -9,14 +9,15 @@ import (
 	"miniflux.app/v2/internal/reader/sanitizer"
 )
 
-// ContainsArticleText reports whether scraped content holds any text at all.
+// ContainsAnyText reports whether the given HTML holds any text at all, once
+// tags are stripped. It makes no judgement about whether that text is an
+// article: navigation chrome, a single heading, or a link farm all pass.
 //
 // Readability never fails on a well-formed page: when it finds no article it
 // returns markup with no text in it, such as "<p></p>" for a JavaScript-only
-// page whose body is an empty mount point. That is not an article, and an
-// entry whose content came out of such a scrape must not be recorded as
-// holding full text, or the search index would trust an empty document and the
-// backfill would never revisit the entry.
-func ContainsArticleText(content string) bool {
+// page whose body is an empty mount point. Content that fails this check must
+// not be recorded as holding full text, or the search index would trust an
+// empty document and the backfill would never revisit the entry.
+func ContainsAnyText(content string) bool {
 	return strings.TrimSpace(sanitizer.StripTags(content)) != ""
 }

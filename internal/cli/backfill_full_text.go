@@ -114,7 +114,7 @@ func backfillEntry(store *storage.Storage, entryID int64) bool {
 		return false
 	}
 
-	if entry.Content == originalContent || !processor.ContainsArticleText(entry.Content) {
+	if entry.Content == originalContent || !processor.ContainsAnyText(entry.Content) {
 		slog.Warn("Scraper returned no article content, leaving entry pending",
 			slog.Int64("entry_id", entryID),
 			slog.String("entry_url", entry.URL),

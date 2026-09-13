@@ -5,7 +5,7 @@ package processor // import "miniflux.app/v2/internal/reader/processor"
 
 import "testing"
 
-func TestContainsArticleText(t *testing.T) {
+func TestContainsAnyText(t *testing.T) {
 	scenarios := []struct {
 		name     string
 		content  string
@@ -20,8 +20,8 @@ func TestContainsArticleText(t *testing.T) {
 
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
-			if got := ContainsArticleText(scenario.content); got != scenario.expected {
-				t.Fatalf("ContainsArticleText(%q) = %v, expected %v", scenario.content, got, scenario.expected)
+			if got := ContainsAnyText(scenario.content); got != scenario.expected {
+				t.Fatalf("ContainsAnyText(%q) = %v, expected %v", scenario.content, got, scenario.expected)
 			}
 		})
 	}

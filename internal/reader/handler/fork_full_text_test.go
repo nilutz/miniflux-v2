@@ -138,8 +138,12 @@ func TestCreateFeedRecordsFullTextForCrawledEntries(t *testing.T) {
 		t.Fatalf("expected the scraped article to replace the feed excerpt, got: %s", content)
 	}
 
-	if _, fetchedAt := readEntry(server.URL + "/app-shell"); fetchedAt.Valid {
+	appShellContent, fetchedAt := readEntry(server.URL + "/app-shell")
+	if fetchedAt.Valid {
 		t.Fatal("expected full_text_fetched_at to stay null for a page holding no article")
+	}
+	if !strings.Contains(appShellContent, "another short rss excerpt") {
+		t.Fatalf("expected an article-less scrape to leave the feed excerpt in place, got: %s", appShellContent)
 	}
 }
 

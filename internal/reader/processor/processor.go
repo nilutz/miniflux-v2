@@ -139,8 +139,11 @@ func ProcessFeedEntries(store *storage.Storage, feed *model.Feed, userID int64, 
 					slog.String("feed_url", feed.FeedURL),
 					slog.Any("error", scraperErr),
 				)
-			} else if extractedContent != "" {
-				// We replace the entry content only if the scraper doesn't return any error.
+			} else if extractedContent != "" && ContainsAnyText(extractedContent) {
+				// We replace the entry content only if the scraper doesn't return any error
+				// and the extracted markup actually holds text: readability never fails on a
+				// well-formed page with no article, it just returns empty markup, and that
+				// must not overwrite the feed excerpt.
 				entry.Content = minifyContent(extractedContent)
 				contentExtractedSuccessfully = true
 			}
@@ -171,7 +174,7 @@ func ProcessFeedEntries(store *storage.Storage, feed *model.Feed, userID int64, 
 
 		updateEntryReadingTime(store, feed, entry, entryIsNew, user)
 
-		if contentExtractedSuccessfully && ContainsArticleText(entry.Content) {
+		if contentExtractedSuccessfully && ContainsAnyText(entry.Content) {
 			fullTextEntryHashes = append(fullTextEntryHashes, entry.Hash)
 		}
 
@@ -221,7 +224,7 @@ func ProcessEntryWebPage(feed *model.Feed, entry *model.Entry, user *model.User)
 		return scraperErr
 	}
 
-	if extractedContent != "" {
+	if extractedContent != "" && ContainsAnyText(extractedContent) {
 		entry.Content = minifyContent(extractedContent)
 		if user.ShowReadingTime {
 			entry.ReadingTime = readingtime.EstimateReadingTime(entry.Content, user.DefaultReadingSpeed, user.CJKReadingSpeed)
