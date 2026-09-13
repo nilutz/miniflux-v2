@@ -48,7 +48,6 @@ func Serve(store *storage.Storage, pool *worker.Pool) http.Handler {
 	// History pages.
 	mux.HandleFunc("GET /history", handler.showHistoryPage)
 	mux.HandleFunc("GET /history/entry/{entryID}", handler.showReadEntryPage)
-	mux.HandleFunc("POST /history/flush", handler.flushHistory)
 
 	// Starred pages.
 	mux.HandleFunc("GET /starred", handler.showStarredPage)
