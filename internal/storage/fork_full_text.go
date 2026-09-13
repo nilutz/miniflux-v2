@@ -53,3 +53,18 @@ func (s *Storage) MarkFullTextFetched(entryID int64, fetchedAt time.Time) error 
 
 	return nil
 }
+
+// EntryOwner returns the user id and feed id that own the given entry. It
+// exists so that a caller holding only an entry id (such as the full-text
+// backfill, which discovers ids via EntryIDsWithoutFullText) can build the
+// per-user EntryQueryBuilder that GetEntry requires, without another way to
+// look up a single entry across users.
+func (s *Storage) EntryOwner(entryID int64) (userID, feedID int64, err error) {
+	query := `SELECT user_id, feed_id FROM entries WHERE id=$1`
+
+	if err := s.db.QueryRow(query, entryID).Scan(&userID, &feedID); err != nil {
+		return 0, 0, fmt.Errorf(`store: unable to fetch owner of entry #%d: %v`, entryID, err)
+	}
+
+	return userID, feedID, nil
+}

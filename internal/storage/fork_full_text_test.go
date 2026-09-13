@@ -126,3 +126,27 @@ func TestEntryIDsWithoutFullTextRespectsLimit(t *testing.T) {
 		t.Fatalf("expected exactly 1 entry id, got %d", len(entryIDs))
 	}
 }
+
+func TestEntryOwnerReturnsUserAndFeedID(t *testing.T) {
+	store := testStorage(t)
+	entryID, feedID := createTestEntry(t, store, "fulltext-owner")
+
+	userID, gotFeedID, err := store.EntryOwner(entryID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if userID <= 0 {
+		t.Fatalf("expected a positive user id, got %d", userID)
+	}
+	if gotFeedID != feedID {
+		t.Fatalf("expected feed id %d, got %d", feedID, gotFeedID)
+	}
+}
+
+func TestEntryOwnerReturnsErrorForUnknownEntry(t *testing.T) {
+	store := testStorage(t)
+
+	if _, _, err := store.EntryOwner(-1); err == nil {
+		t.Fatal("expected an error for an entry id that does not exist")
+	}
+}

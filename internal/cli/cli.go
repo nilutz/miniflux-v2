@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	"miniflux.app/v2/internal/config"
 	"miniflux.app/v2/internal/database"
@@ -34,6 +35,7 @@ const (
 	flagRunCleanupTasksHelp  = "Run cleanup tasks (delete old sessions and archive old entries)"
 	flagExportUserFeedsHelp  = "Export user feeds (provide the username as argument)"
 	flagResetNextCheckAtHelp = "Reset the next check time for all feeds"
+	flagBackfillFullTextHelp = "Fetch the original web page for entries that have never been scraped, then exit"
 )
 
 // Parse parses command line arguments.
@@ -55,6 +57,7 @@ func Parse() {
 		flagRefreshFeeds         bool
 		flagRunCleanupTasks      bool
 		flagExportUserFeeds      string
+		flagBackfillFullText     bool
 	)
 
 	flag.BoolVar(&flagInfo, "info", false, flagInfoHelp)
@@ -75,6 +78,7 @@ func Parse() {
 	flag.BoolVar(&flagRefreshFeeds, "refresh-feeds", false, flagRefreshFeedsHelp)
 	flag.BoolVar(&flagRunCleanupTasks, "run-cleanup-tasks", false, flagRunCleanupTasksHelp)
 	flag.StringVar(&flagExportUserFeeds, "export-user-feeds", "", flagExportUserFeedsHelp)
+	flag.BoolVar(&flagBackfillFullText, "backfill-full-text", false, flagBackfillFullTextHelp)
 	flag.Parse()
 
 	cfg := config.NewConfigParser()
@@ -248,6 +252,11 @@ func Parse() {
 
 	if flagRunCleanupTasks {
 		runCleanupTasks(store)
+		return
+	}
+
+	if flagBackfillFullText {
+		backfillFullText(store, time.Second)
 		return
 	}
 
