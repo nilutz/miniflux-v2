@@ -583,8 +583,14 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 					// Per-entry latency, not the whole page's: a short,
 					// upTo-thinned, or mostly-backed-off-and-skipped page
 					// must not read as an artificially fast or slow
-					// batch (fix round 1, finding 6).
-					b.controller.Observe(elapsed / time.Duration(attempted))
+					// batch (fix round 1, finding 6). The worker count
+					// actually used is reported alongside it — runBatch
+					// clamps workers down to len(ids), so the controller's
+					// own figure is not always what ran — because the
+					// controller needs it to turn an inverse-throughput
+					// reading back into a per-worker service time
+					// comparable across worker counts (see Observe).
+					b.controller.Observe(elapsed/time.Duration(attempted), min(workers, len(ids)))
 					b.updateThroughputEWMA(float64(attempted) / elapsed.Seconds())
 				}
 			}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,12 +56,27 @@ type ControllerConfig struct {
 
 	Window Window // wall-clock hours the lane may run; zero value means "always"
 
-	LatencyMargin float64 // degradation factor (batch latency / baseline) that triggers backing off
-	LoadThreshold float64 // 1-minute load average above which to back off
+	LatencyMargin float64 // degradation factor (per-worker service time / baseline) that triggers backing off
+
+	// LoadThreshold is the PER-CORE 1-minute load average above which to
+	// back off: the raw load average divided by runtime.NumCPU() (see
+	// sampleLoadAverage, which does the division). 0.8 therefore means
+	// "the machine is 80% busy", not "0.8 runnable processes".
+	//
+	// Absolute would be unusable as a default. This lane deliberately runs
+	// two CPU-saturating embedding workers against an unconstrained ORT
+	// session (spec §6.7); on any machine that pushes the raw 1-minute
+	// average past 0.8 within a minute and holds it there, so an absolute
+	// 0.8 made every Observe after the baseline take the load branch and
+	// step down, with the condition never clearing again — a one-way
+	// ratchet to MinWorkers for the whole run (whole-branch review,
+	// finding 2).
+	LoadThreshold float64
 }
 
 // DefaultControllerConfig returns MinWorkers: 1, MaxWorkers: 2,
-// LatencyMargin: 1.5, LoadThreshold: 0.8. MaxWorkers 2 matches the measured
+// LatencyMargin: 1.5, LoadThreshold: 0.8 (per core — see
+// ControllerConfig.LoadThreshold). MaxWorkers 2 matches the measured
 // optimum (spec §6.7: 2 workers, batch 8, unconstrained ORT threading,
 // 33.9 passages/sec) -- higher is permitted but was not faster on the
 // spike machine.
@@ -88,10 +104,12 @@ func (cfg ControllerConfig) withDefaults() ControllerConfig {
 	return cfg
 }
 
-// LoadAverage reports the current 1-minute system load average. Production
-// controllers sample the real host (see sampleLoadAverage); tests inject a
-// fake so a controller test never depends on the real machine's load --
-// see throttle_test.go's fixedLoad.
+// LoadAverage reports the current 1-minute system load average NORMALISED
+// PER CORE: 1.0 means "as many runnable tasks as this machine has cores".
+// Production controllers sample the real host (see sampleLoadAverage,
+// which divides by runtime.NumCPU()); tests inject a fake so a controller
+// test never depends on the real machine's load -- see throttle_test.go's
+// fixedLoad.
 type LoadAverage func() (float64, error)
 
 // Controller decides how many worker goroutines the backfill lane should
@@ -210,17 +228,32 @@ func (c *Controller) Reason() string {
 	return c.reason
 }
 
-// Observe records one batch's latency, samples system load, and adjusts
-// the worker count by at most one step, all within [MinWorkers,
-// MaxWorkers]. The backfill lane calls this once per batch, between
-// batches, never mid-batch (spec §9.2) -- Observe itself does no I/O other
-// than the load sample, so it returns quickly.
+// Observe records one batch's per-entry latency measured at the given
+// worker count, samples system load, and adjusts the worker count by at
+// most one step, all within [MinWorkers, MaxWorkers]. The backfill lane
+// calls this once per batch, between batches, never mid-batch (spec §9.2)
+// -- Observe itself does no I/O other than the load sample, so it returns
+// quickly.
+//
+// workers is why this takes two arguments. perEntryLatency is elapsed
+// wall-clock divided by entries attempted, so it is an inverse THROUGHPUT
+// and falls as workers are added even when nothing improved per worker.
+// Comparing it directly against a baseline captured at MinWorkers, as this
+// did before, made every multi-worker sample read as roughly workers-times
+// healthier than the baseline no matter what the machine was doing: the
+// latency arm could then only ever vote "step up" (whole-branch review,
+// finding 2, folding in the deferred baseline finding). Multiplying it
+// back out by the worker count in effect recovers the per-worker service
+// time -- how long one worker takes for one entry -- which is flat under
+// perfect scaling, rises under contention, and is therefore comparable
+// across worker counts. That is what the baseline records and what
+// LatencyMargin is measured against.
 //
 // While the controller is outside its schedule window, Observe still
 // records the reason but leaves the worker count and baseline untouched,
 // so that when the window reopens the controller resumes from where it
 // left off rather than restarting its baseline.
-func (c *Controller) Observe(batchLatency time.Duration) {
+func (c *Controller) Observe(perEntryLatency time.Duration, workers int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -228,6 +261,11 @@ func (c *Controller) Observe(batchLatency time.Duration) {
 		c.reason = "outside the scheduled backfill window"
 		return
 	}
+
+	if workers < 1 {
+		workers = 1
+	}
+	serviceTime := perEntryLatency * time.Duration(workers)
 
 	load, loadErr := 0.0, error(nil)
 	if c.load != nil {
@@ -238,7 +276,7 @@ func (c *Controller) Observe(batchLatency time.Duration) {
 		c.baselineSamples++
 		// Running average, so one noisy first sample does not fully
 		// determine the baseline.
-		c.baseline += (batchLatency - c.baseline) / time.Duration(c.baselineSamples)
+		c.baseline += (serviceTime - c.baseline) / time.Duration(c.baselineSamples)
 		c.workers = c.cfg.MinWorkers
 		c.reason = fmt.Sprintf("establishing latency baseline (%d/%d batches)", c.baselineSamples, controllerBaselineSamples)
 		return
@@ -246,11 +284,11 @@ func (c *Controller) Observe(batchLatency time.Duration) {
 
 	switch {
 	case loadErr == nil && load > c.cfg.LoadThreshold:
-		c.stepDown(fmt.Sprintf("1-minute load average %.2f exceeds threshold %.2f", load, c.cfg.LoadThreshold))
-	case c.baseline > 0 && float64(batchLatency) > float64(c.baseline)*c.cfg.LatencyMargin:
-		c.stepDown(fmt.Sprintf("batch latency %s exceeds %.1fx baseline %s", batchLatency, c.cfg.LatencyMargin, c.baseline))
+		c.stepDown(fmt.Sprintf("per-core load average %.2f exceeds threshold %.2f", load, c.cfg.LoadThreshold))
+	case c.baseline > 0 && float64(serviceTime) > float64(c.baseline)*c.cfg.LatencyMargin:
+		c.stepDown(fmt.Sprintf("per-worker service time %s exceeds %.1fx baseline %s", serviceTime, c.cfg.LatencyMargin, c.baseline))
 	default:
-		c.stepUp("batch latency and load average within bounds")
+		c.stepUp("per-worker service time and load average within bounds")
 	}
 }
 
@@ -278,13 +316,38 @@ func (c *Controller) stepUp(reason string) {
 	c.reason = reason
 }
 
-// sampleLoadAverage is the production LoadAverage: it reads the 1-minute
-// load average from /proc/loadavg on Linux, falling back to `sysctl -n
-// vm.loadavg` on platforms (macOS/BSD) that have no /proc. It is never
-// exercised by the controller unit tests (throttle_test.go), which inject
-// a fixed LoadAverage instead -- per the task-6 brief, "a controller test
-// that samples the host's real load average is not a test".
+// sampleLoadAverage is the production LoadAverage: it reads the raw
+// 1-minute load average from the host and divides it by the core count,
+// so what the Controller compares against LoadThreshold is a per-core
+// figure (see ControllerConfig.LoadThreshold for why an absolute one was
+// unusable). It is never exercised by the controller unit tests
+// (throttle_test.go), which inject a fixed LoadAverage instead -- per the
+// task-6 brief, "a controller test that samples the host's real load
+// average is not a test".
 func sampleLoadAverage() (float64, error) {
+	raw, err := rawLoadAverage()
+	if err != nil {
+		return 0, err
+	}
+	return normalizeLoad(raw), nil
+}
+
+// normalizeLoad divides a raw 1-minute load average by the number of
+// usable cores, so 1.0 means "fully busy" on any machine. runtime.NumCPU
+// cannot return less than 1, but the floor costs nothing and makes a
+// division by zero impossible.
+func normalizeLoad(raw float64) float64 {
+	cores := runtime.NumCPU()
+	if cores < 1 {
+		cores = 1
+	}
+	return raw / float64(cores)
+}
+
+// rawLoadAverage reads the host's unnormalised 1-minute load average from
+// /proc/loadavg on Linux, falling back to `sysctl -n vm.loadavg` on
+// platforms (macOS/BSD) that have no /proc.
+func rawLoadAverage() (float64, error) {
 	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
 		fields := strings.Fields(string(data))
 		if len(fields) > 0 {
