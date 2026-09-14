@@ -197,6 +197,42 @@ func (r *retryTracker) hasOutstanding() bool {
 	return len(r.state) > 0
 }
 
+// isTracked reports whether id currently has recorded retry state.
+func (r *retryTracker) isTracked(id int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.state[id]
+	return ok
+}
+
+// pruneNotIn removes every tracked entry whose id is not a key of seen —
+// entries that were NOT observed anywhere in the sweep that just
+// completed.
+//
+// This exists to fix a real regression (fix round 3, finding 1): without
+// it, an entry's retry state is cleared only by recordSuccess (it was
+// re-attempted and worked) or a fresh Start (a whole new run). If a
+// tracked entry stops being returned by PendingEntryIDs at all — its row
+// was deleted (a feed removed, retention cleanup — both real, ordinary
+// events during a backfill run that can last 4-41 hours), not fixed —
+// process is never called for it again, so neither recordSuccess nor
+// another recordFailure ever runs, and hasOutstanding stays true forever.
+// Start would then never return, and Stats().Done would never become
+// true, indistinguishable from a lane that is still genuinely working.
+// Pruning after every completed sweep against what that sweep actually
+// saw closes this: an id no longer returned by the database at all is
+// removed from retry tracking exactly like a fixed one, letting Done
+// become true once nothing genuinely outstanding remains.
+func (r *retryTracker) pruneNotIn(seen map[int64]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id := range r.state {
+		if !seen[id] {
+			delete(r.state, id)
+		}
+	}
+}
+
 // Stats is a snapshot of a Backfill lane's progress, for the admin page
 // (Task 7, spec §9.4): "progress and ETA, current throughput, live
 // concurrency with the controller's reason for it, error and skip counts
@@ -287,8 +323,11 @@ func NewBackfill(idx *Indexer, controller *Controller, cfg BackfillConfig) *Back
 	}
 }
 
-// SetPageSize live-edits the page size, taking effect on the next page
-// fetch (spec §9.2: "batch size ... live-editable without a restart").
+// SetPageSize live-edits the number of pending entry ids fetched per
+// pagination page, taking effect on the next page fetch. This is a
+// distinct quantity from the embedding batch size spec §9.2 names as its
+// third live-editable knob ("batch size — passages per forward pass; the
+// main lever on CPU efficiency") — that one is Indexer.SetBatchSize.
 // Values <= 0 are ignored.
 func (b *Backfill) SetPageSize(n int) {
 	b.mu.Lock()
@@ -411,6 +450,21 @@ func (b *Backfill) Start(ctx context.Context) error {
 // another sweep begins after a pollInterval pause; only a sweep that
 // reaches its end with nothing outstanding at all is declared Done.
 //
+// Before checking hasOutstanding, every completed sweep prunes retry
+// state for any tracked id it never once saw returned by
+// PendingEntryIDs (fix round 3, finding 1 — a regression against fix
+// round 1's own 21cd5600). Without this, an entry whose row is deleted
+// entirely — a feed removed, retention cleanup, both ordinary events
+// over this lane's 4-41 hour runtime — is never returned by
+// PendingEntryIDs again, so process is never called for it again, so
+// nothing ever clears its retry state: hasOutstanding stays true and
+// Start never returns, indistinguishable from a lane still genuinely
+// working. Pruning against what the sweep actually saw fixes this
+// without weakening the fix round 1 guarantee: an entry that is STILL
+// being returned (still genuinely failing, or merely cooling down under
+// its own backoff) is never pruned, only one the database has stopped
+// offering at all.
+//
 // Resetting the cursor every pollInterval does not mean re-embedding
 // every outstanding entry every pollInterval, though: retryTracker gates
 // each entry's own next attempt behind its individual, escalating backoff
@@ -459,6 +513,14 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 	}()
 
 	cursor := startAfter
+	// seenTrackedIDs accumulates, across every page fetched during the
+	// CURRENT sweep, which currently-tracked (retries.isTracked) ids the
+	// database actually returned. Deliberately not "every id fetched" —
+	// that could be the whole table's worth over a long sweep — only
+	// tracked ids are ever relevant to pruning (fix round 3, finding 1),
+	// and there should be few of those at once. Reset at the start of
+	// every new sweep, below.
+	seenTrackedIDs := make(map[int64]bool)
 
 	for {
 		select {
@@ -527,12 +589,31 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 				}
 			}
 
+			// Checked AFTER processing, not before: an entry that just
+			// failed for the very first time this batch only becomes
+			// tracked as a side effect of runBatch above, and one that
+			// just recovered stops being tracked the same way. Checking
+			// isTracked before processing would miss the former
+			// entirely, pruning a genuinely brand-new failure in the
+			// very sweep it was discovered in.
+			for _, id := range rawIDs {
+				if b.retries.isTracked(id) {
+					seenTrackedIDs[id] = true
+				}
+			}
+
 			if upTo != nil && cursor >= upTo.Load() {
 				sweepEnded = true
 			}
 		}
 
 		if sweepEnded {
+			// Prune before checking: any tracked id this sweep never
+			// once returned from the database is no longer genuinely
+			// pending (deleted, or otherwise resolved outside this
+			// lane's own retry path) and must stop pinning Done open
+			// (fix round 3, finding 1).
+			b.retries.pruneNotIn(seenTrackedIDs)
 			if !b.retries.hasOutstanding() {
 				b.markDone()
 				return nil
@@ -541,6 +622,7 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 				return nil
 			}
 			cursor = startAfter
+			seenTrackedIDs = make(map[int64]bool)
 			continue
 		}
 

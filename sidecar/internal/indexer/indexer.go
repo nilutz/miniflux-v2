@@ -78,7 +78,8 @@ func (idx *Indexer) BatchSize() int {
 // without calling the embedder — see spec §10, "entry unchanged"). Text is
 // extracted from the entry's HTML; an entry with no usable text is recorded
 // as skipped and is not treated as an error. Otherwise the text is split
-// into passages and embedded in batches of DefaultBatchSize; an embedding
+// into passages and embedded in batches of BatchSize() (DefaultBatchSize
+// unless SetBatchSize has live-edited it — spec §9.2); an embedding
 // failure records the entry as failed (retryable later) and IndexEntry
 // returns the error — unless the failure was ctx being cancelled mid-embed
 // (a caller shutting down or interrupting a batch, not a real embedder

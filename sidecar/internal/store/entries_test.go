@@ -447,13 +447,22 @@ func TestPendingEntryCountMatchesPendingEntryIDs(t *testing.T) {
 		}
 	}
 
-	// And the real exported PendingEntryCount(entryID-1), called
-	// non-transactionally as production always does, must at least run
-	// cleanly and return a non-negative value here too.
-	if n, err := s.PendingEntryCount(entryID - 1); err != nil {
+	// And the real exported methods, called non-transactionally as
+	// production always does, must still agree with each other here --
+	// the same immediate back-to-back comparison used above the first
+	// time, not a vacuous "count(*) is non-negative" check (which cannot
+	// fail regardless of whether the two methods agree on anything).
+	liveIDs, err := s.PendingEntryIDs(entryID-1, 1000)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	} else if n < 0 {
-		t.Fatalf("expected a non-negative PendingEntryCount, got %d", n)
+	}
+	liveCount, err := s.PendingEntryCount(entryID - 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if int64(len(liveIDs)) != liveCount {
+		t.Fatalf("expected PendingEntryCount(%d) (%d) to match len(PendingEntryIDs(%d, big)) (%d) after indexing",
+			entryID-1, liveCount, entryID-1, len(liveIDs))
 	}
 }
 

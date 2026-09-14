@@ -865,3 +865,66 @@ func TestBackfillThroughputReflectsRecentBatchesNotLifetimeAverage(t *testing.T)
 			slowThroughput, fastThroughput)
 	}
 }
+
+// 12. (Fix round 3, finding 1 -- regression against 21cd5600.) A tracked
+// failing entry that is later removed from the pending set ENTIRELY --
+// its row deleted, as by a feed removal or retention cleanup during this
+// lane's 4-41 hour runtime, not merely fixed -- must not pin Done open
+// forever. Before this fix, retryTracker state was cleared only by a
+// successful re-attempt or a fresh Start; an id that stops being
+// returned by PendingEntryIDs at all is never attempted again, so
+// nothing ever clears it, and hasOutstanding() stays true permanently.
+func TestBackfillPrunesRetryStateForEntryRemovedFromPendingSet(t *testing.T) {
+	s, db := testEnv(t)
+
+	okID := createTestEntry(t, db, "backfill-prune-ok", "<p>A perfectly normal entry, unaffected.</p>")
+	marker := "PRUNE-FAIL-MARKER-round3"
+	failID := createTestEntry(t, db, "backfill-prune-fail",
+		"<p>Entry containing "+marker+" that always fails to embed.</p>")
+
+	fe := &failMarkerEmbedder{failMarker: marker}
+	idx := New(s, fe)
+	ctrlCfg, bfCfg := backfillTestConfig()
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runStartAsync(b, ctx, okID-1, boundedUpTo(failID))
+
+	waitFor(t, 2*time.Second, "the failing entry recorded failed at least once", func() bool {
+		return entryStatus(t, db, failID) == "failed"
+	})
+	// Give it at least one more sweep to confirm it is genuinely tracked
+	// as outstanding (not a one-off race), matching the reviewer's own
+	// reproduction shape.
+	waitFor(t, 2*time.Second, "the lane is still running with retries outstanding", func() bool {
+		return !b.Stats().Done
+	})
+
+	// Simulate the entry disappearing from the pending set entirely --
+	// e.g. its feed was removed -- rather than being fixed. Deleting the
+	// row (and its search-schema rows, mirroring createTestEntry's own
+	// cleanup) is the simplest way to make PendingEntryIDs stop returning
+	// it without needing to fake an actual retention-cleanup code path.
+	if _, err := db.Exec(`DELETE FROM search.entry_index_state WHERE entry_id=$1`, failID); err != nil {
+		t.Fatalf("unable to delete index state: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM search.passages WHERE entry_id=$1`, failID); err != nil {
+		t.Fatalf("unable to delete passages: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM entries WHERE id=$1`, failID); err != nil {
+		t.Fatalf("unable to delete entry: %v", err)
+	}
+
+	// The lane must notice within a handful of sweeps and reach Done --
+	// not hang forever the way the un-pruned tracker did.
+	waitDone(t, done, 5*time.Second, "Backfill.start")
+
+	if !b.Stats().Done {
+		t.Fatal("expected Stats().Done to become true once the failing entry was removed from the pending set entirely")
+	}
+	if entryStatus(t, db, okID) != "ok" {
+		t.Fatal("expected the unrelated healthy entry to still have been indexed")
+	}
+}

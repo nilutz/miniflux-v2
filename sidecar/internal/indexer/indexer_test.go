@@ -461,9 +461,17 @@ func TestIndexerSetBatchSizeClampsAndTakesEffect(t *testing.T) {
 		t.Fatalf("expected SetBatchSize to clamp up to MinBatchSize=%d, got %d", MinBatchSize, got)
 	}
 
-	idx.SetBatchSize(MinBatchSize) // a valid in-range value takes effect exactly
-	if got := idx.BatchSize(); got != MinBatchSize {
-		t.Fatalf("expected SetBatchSize(%d) to take effect exactly, got %d", MinBatchSize, got)
+	// A distinct in-range value, not MinBatchSize (which the preceding
+	// clamp assertion already left it at) -- setting it to the SAME
+	// value it already holds would prove nothing about SetBatchSize
+	// actually taking effect versus just staying where it was.
+	const chosenBatchSize = 20
+	if chosenBatchSize == MinBatchSize || chosenBatchSize == MaxBatchSize {
+		t.Fatal("test setup invalid: chosenBatchSize must differ from both clamp bounds to prove SetBatchSize takes a real value, not just a bound")
+	}
+	idx.SetBatchSize(chosenBatchSize)
+	if got := idx.BatchSize(); got != chosenBatchSize {
+		t.Fatalf("expected SetBatchSize(%d) to take effect exactly, got %d", chosenBatchSize, got)
 	}
 
 	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
@@ -474,10 +482,17 @@ func TestIndexerSetBatchSizeClampsAndTakesEffect(t *testing.T) {
 	if len(sizes) < 2 {
 		t.Fatalf("test setup invalid: expected multiple embed batches with this much content, got %d", len(sizes))
 	}
+	sawChosenSize := false
 	for _, n := range sizes {
-		if n > MinBatchSize {
-			t.Fatalf("expected every Embed call to receive at most %d texts (the batch size in effect), got %d in %v",
-				MinBatchSize, n, sizes)
+		if n == chosenBatchSize {
+			sawChosenSize = true
 		}
+		if n > chosenBatchSize {
+			t.Fatalf("expected every Embed call to receive at most %d texts (the batch size in effect), got %d in %v",
+				chosenBatchSize, n, sizes)
+		}
+	}
+	if !sawChosenSize {
+		t.Fatalf("expected at least one full batch of exactly %d texts (the chosen batch size), got sizes %v", chosenBatchSize, sizes)
 	}
 }
