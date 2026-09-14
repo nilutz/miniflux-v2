@@ -4,6 +4,7 @@
 package store // import "miniflux.app/v2/sidecar/internal/store"
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -14,6 +15,18 @@ import (
 // read-only.
 type Store struct {
 	db *sql.DB
+}
+
+// Reader is the narrow read-only subset of *sql.DB that a package needs
+// to build its own dynamic queries — QueryContext and QueryRowContext
+// only. Exec and Begin are deliberately absent: store is meant to be the
+// sole writer to search.passages and the only thing that touches
+// public.entries beyond a plain SELECT, and a full *sql.DB handle would
+// hand any future consumer of Reader a way around that boundary. *sql.DB
+// already implements this interface, so Store.Reader needs no wrapper.
+type Reader interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 func New(dsn string) (*Store, error) {
@@ -28,16 +41,18 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Ping() error { return s.db.Ping() }
 
-// DB returns the underlying database handle for packages that need direct
-// SQL access beyond Store's own narrow, single-purpose methods.
+// Reader returns a read-only view of the underlying connection for
+// packages that need to build dynamic queries beyond Store's own
+// fixed-shape methods.
 //
 // package search is the motivating case: its retrieval queries build a
 // variable WHERE clause per call (an arbitrary combination of feed,
 // category, date-range, unread and starred filters, per search.Filters)
 // joined against a BM25 or HNSW candidate set — that doesn't fit the
 // fixed-shape query pattern the rest of this package's methods use for
-// passage writes and index-state bookkeeping. Exposing db directly here
-// keeps that query-building logic in the package that owns the retrieval
-// behaviour, rather than growing Store an ever-widening set of retrieval
-// methods it has no other reason to know about.
-func (s *Store) DB() *sql.DB { return s.db }
+// passage writes and index-state bookkeeping. Returning the narrow Reader
+// interface rather than *sql.DB keeps that query-building logic in the
+// package that owns the retrieval behaviour, without also handing it
+// Exec or Begin: store stays the only writer to search.passages, and the
+// only thing that writes to public.entries beyond a plain SELECT.
+func (s *Store) Reader() Reader { return s.db }

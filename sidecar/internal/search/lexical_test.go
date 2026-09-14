@@ -5,6 +5,7 @@ package search // import "miniflux.app/v2/sidecar/internal/search"
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"strconv"
 	"testing"
@@ -41,6 +42,30 @@ func testStore(t *testing.T) *store.Store {
 	return s
 }
 
+// testDB opens its own direct database connection for fixture setup that
+// needs to INSERT/UPDATE — creating users, feeds and entries, or flipping
+// an entry's status/starred/published_at. This is deliberately separate
+// from store.Store's own connection: production code reaches the
+// database only through store.Reader (QueryContext/QueryRowContext, no
+// Exec), so fixture writes get their own direct connection here rather
+// than routing through anything Searcher itself could use to write.
+func testDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	dsn := os.Getenv("SIDECAR_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SIDECAR_DATABASE_URL is not set, skipping database test")
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("unable to open database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	return db
+}
+
 // fixtureEntry is one entry this file's tests create, plus the ids of
 // everything it depends on (user, category, feed) so a caller can filter
 // on them.
@@ -55,12 +80,13 @@ type fixtureEntry struct {
 // that helper is package-private to store and search has no exported
 // entry-creation method of its own (by design: package store only reads
 // public.entries, per spec §4, it does not create test fixtures for other
-// packages). Status defaults to Miniflux's own default ('unread'); tests
-// that need 'read' or starred update it explicitly afterward.
-func createFixtureEntry(t *testing.T, s *store.Store, tag, title, content string) fixtureEntry {
+// packages). It takes a *sql.DB rather than a *store.Store because
+// fixture setup needs to INSERT, and store.Reader (what production code
+// uses) deliberately cannot — see testDB's doc comment. Status defaults
+// to Miniflux's own default ('unread'); tests that need 'read' or
+// starred update it explicitly afterward.
+func createFixtureEntry(t *testing.T, db *sql.DB, tag, title, content string) fixtureEntry {
 	t.Helper()
-
-	db := s.DB()
 
 	var userID int64
 	if err := db.QueryRow(
@@ -135,9 +161,10 @@ func hasEntryID(hits []PassageHit, entryID int64) bool {
 // title text is now indexed as its own passage.
 func TestLexicalFindsEntryByTitleOnly(t *testing.T) {
 	s := testStore(t)
+	db := testDB(t)
 	searcher := NewSearcher(s)
 
-	fx := createFixtureEntry(t, s, "title-only", "Zzyzxvorlon Frobnication Guide", "<p>This body never repeats the headline's own words.</p>")
+	fx := createFixtureEntry(t, db, "title-only", "Zzyzxvorlon Frobnication Guide", "<p>This body never repeats the headline's own words.</p>")
 	writePassages(t, s, fx.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "Zzyzxvorlon Frobnication Guide", CharStart: 0, CharEnd: 31, Source: "title", Embedding: zeroEmbedding()},
 		{Ordinal: 1, Text: "This body never repeats the headline's own words.", CharStart: 0, CharEnd: 50, Source: "content", Embedding: zeroEmbedding()},
@@ -169,9 +196,10 @@ func TestLexicalFindsEntryByTitleOnly(t *testing.T) {
 // query term.
 func TestLexicalExactPhraseReturnsThePassageContainingIt(t *testing.T) {
 	s := testStore(t)
+	db := testDB(t)
 	searcher := NewSearcher(s)
 
-	fx := createFixtureEntry(t, s, "exact-phrase", "Zzyzx Exact Phrase Fixture",
+	fx := createFixtureEntry(t, db, "exact-phrase", "Zzyzx Exact Phrase Fixture",
 		"<p>Zzyzx unrelated filler one.</p><p>Zzyzx unrelated filler two.</p>")
 	writePassages(t, s, fx.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "Zzyzx Exact Phrase Fixture", CharStart: 0, CharEnd: 26, Source: "title", Embedding: zeroEmbedding()},
@@ -210,9 +238,10 @@ func TestLexicalReturnsNoErrorAndNoHitsForNoMatch(t *testing.T) {
 // that Score is descending and that Rank is exactly 1,2,3 in that order.
 func TestLexicalOrdersByScoreDescendingWithConsistentRank(t *testing.T) {
 	s := testStore(t)
+	db := testDB(t)
 	searcher := NewSearcher(s)
 
-	fx := createFixtureEntry(t, s, "ranking", "Zzyzx Ranking Fixture", "<p>irrelevant</p>")
+	fx := createFixtureEntry(t, db, "ranking", "Zzyzx Ranking Fixture", "<p>irrelevant</p>")
 	writePassages(t, s, fx.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxrankterm appears exactly once here", CharStart: 0, CharEnd: 40, Source: "content", Embedding: zeroEmbedding()},
 		{Ordinal: 1, Text: "zzyzxrankterm zzyzxrankterm zzyzxrankterm repeated three times", CharStart: 40, CharEnd: 104, Source: "content", Embedding: zeroEmbedding()},
@@ -254,9 +283,10 @@ func TestLexicalOrdersByScoreDescendingWithConsistentRank(t *testing.T) {
 
 func TestLexicalHonoursLimit(t *testing.T) {
 	s := testStore(t)
+	db := testDB(t)
 	searcher := NewSearcher(s)
 
-	fx := createFixtureEntry(t, s, "limit", "Zzyzx Limit Fixture", "<p>irrelevant</p>")
+	fx := createFixtureEntry(t, db, "limit", "Zzyzx Limit Fixture", "<p>irrelevant</p>")
 	writePassages(t, s, fx.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxlimitterm one", CharStart: 0, CharEnd: 18, Source: "content", Embedding: zeroEmbedding()},
 		{Ordinal: 1, Text: "zzyzxlimitterm two", CharStart: 18, CharEnd: 36, Source: "content", Embedding: zeroEmbedding()},
@@ -277,14 +307,15 @@ func TestLexicalHonoursLimit(t *testing.T) {
 // that filtering to one feed's id excludes the other feed's entry.
 func TestLexicalFiltersNarrowResultsByFeed(t *testing.T) {
 	s := testStore(t)
+	db := testDB(t)
 	searcher := NewSearcher(s)
 
-	fxA := createFixtureEntry(t, s, "filter-feed-a", "Zzyzx Filter Feed A", "<p>irrelevant</p>")
+	fxA := createFixtureEntry(t, db, "filter-feed-a", "Zzyzx Filter Feed A", "<p>irrelevant</p>")
 	writePassages(t, s, fxA.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxfilterfeedterm in feed a", CharStart: 0, CharEnd: 30, Source: "content", Embedding: zeroEmbedding()},
 	})
 
-	fxB := createFixtureEntry(t, s, "filter-feed-b", "Zzyzx Filter Feed B", "<p>irrelevant</p>")
+	fxB := createFixtureEntry(t, db, "filter-feed-b", "Zzyzx Filter Feed B", "<p>irrelevant</p>")
 	writePassages(t, s, fxB.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxfilterfeedterm in feed b", CharStart: 0, CharEnd: 30, Source: "content", Embedding: zeroEmbedding()},
 	})
@@ -314,14 +345,14 @@ func TestLexicalFiltersNarrowResultsByFeed(t *testing.T) {
 func TestLexicalFiltersNarrowResultsByUnreadOnly(t *testing.T) {
 	s := testStore(t)
 	searcher := NewSearcher(s)
-	db := s.DB()
+	db := testDB(t)
 
-	fxUnread := createFixtureEntry(t, s, "filter-unread", "Zzyzx Filter Unread", "<p>irrelevant</p>")
+	fxUnread := createFixtureEntry(t, db, "filter-unread", "Zzyzx Filter Unread", "<p>irrelevant</p>")
 	writePassages(t, s, fxUnread.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxstatusterm still unread", CharStart: 0, CharEnd: 29, Source: "content", Embedding: zeroEmbedding()},
 	})
 
-	fxRead := createFixtureEntry(t, s, "filter-read", "Zzyzx Filter Read", "<p>irrelevant</p>")
+	fxRead := createFixtureEntry(t, db, "filter-read", "Zzyzx Filter Read", "<p>irrelevant</p>")
 	writePassages(t, s, fxRead.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxstatusterm already read", CharStart: 0, CharEnd: 29, Source: "content", Embedding: zeroEmbedding()},
 	})
@@ -346,14 +377,15 @@ func TestLexicalFiltersNarrowResultsByUnreadOnly(t *testing.T) {
 // filtering public.entries directly.
 func TestLexicalFiltersNarrowResultsByCategory(t *testing.T) {
 	s := testStore(t)
+	db := testDB(t)
 	searcher := NewSearcher(s)
 
-	fxA := createFixtureEntry(t, s, "filter-cat-a", "Zzyzx Filter Category A", "<p>irrelevant</p>")
+	fxA := createFixtureEntry(t, db, "filter-cat-a", "Zzyzx Filter Category A", "<p>irrelevant</p>")
 	writePassages(t, s, fxA.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxfiltercatterm in category a", CharStart: 0, CharEnd: 33, Source: "content", Embedding: zeroEmbedding()},
 	})
 
-	fxB := createFixtureEntry(t, s, "filter-cat-b", "Zzyzx Filter Category B", "<p>irrelevant</p>")
+	fxB := createFixtureEntry(t, db, "filter-cat-b", "Zzyzx Filter Category B", "<p>irrelevant</p>")
 	writePassages(t, s, fxB.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxfiltercatterm in category b", CharStart: 0, CharEnd: 33, Source: "content", Embedding: zeroEmbedding()},
 	})
@@ -374,9 +406,9 @@ func TestLexicalFiltersNarrowResultsByCategory(t *testing.T) {
 func TestLexicalFiltersNarrowResultsByStarred(t *testing.T) {
 	s := testStore(t)
 	searcher := NewSearcher(s)
-	db := s.DB()
+	db := testDB(t)
 
-	fxStarred := createFixtureEntry(t, s, "filter-starred-yes", "Zzyzx Filter Starred", "<p>irrelevant</p>")
+	fxStarred := createFixtureEntry(t, db, "filter-starred-yes", "Zzyzx Filter Starred", "<p>irrelevant</p>")
 	writePassages(t, s, fxStarred.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxstarredterm is starred", CharStart: 0, CharEnd: 28, Source: "content", Embedding: zeroEmbedding()},
 	})
@@ -384,7 +416,7 @@ func TestLexicalFiltersNarrowResultsByStarred(t *testing.T) {
 		t.Fatalf("unable to star fixture: %v", err)
 	}
 
-	fxUnstarred := createFixtureEntry(t, s, "filter-starred-no", "Zzyzx Filter Unstarred", "<p>irrelevant</p>")
+	fxUnstarred := createFixtureEntry(t, db, "filter-starred-no", "Zzyzx Filter Unstarred", "<p>irrelevant</p>")
 	writePassages(t, s, fxUnstarred.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxstarredterm is not starred", CharStart: 0, CharEnd: 32, Source: "content", Embedding: zeroEmbedding()},
 	})
@@ -406,9 +438,9 @@ func TestLexicalFiltersNarrowResultsByStarred(t *testing.T) {
 func TestLexicalFiltersNarrowResultsByDateRange(t *testing.T) {
 	s := testStore(t)
 	searcher := NewSearcher(s)
-	db := s.DB()
+	db := testDB(t)
 
-	fxOld := createFixtureEntry(t, s, "filter-date-old", "Zzyzx Filter Date Old", "<p>irrelevant</p>")
+	fxOld := createFixtureEntry(t, db, "filter-date-old", "Zzyzx Filter Date Old", "<p>irrelevant</p>")
 	writePassages(t, s, fxOld.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxdaterangeterm published long ago", CharStart: 0, CharEnd: 38, Source: "content", Embedding: zeroEmbedding()},
 	})
@@ -416,7 +448,7 @@ func TestLexicalFiltersNarrowResultsByDateRange(t *testing.T) {
 		t.Fatalf("unable to set old published_at: %v", err)
 	}
 
-	fxRecent := createFixtureEntry(t, s, "filter-date-recent", "Zzyzx Filter Date Recent", "<p>irrelevant</p>")
+	fxRecent := createFixtureEntry(t, db, "filter-date-recent", "Zzyzx Filter Date Recent", "<p>irrelevant</p>")
 	writePassages(t, s, fxRecent.EntryID, []store.PassageRow{
 		{Ordinal: 0, Text: "zzyzxdaterangeterm published recently", CharStart: 0, CharEnd: 38, Source: "content", Embedding: zeroEmbedding()},
 	})

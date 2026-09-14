@@ -35,17 +35,22 @@ const minCandidates = 50
 const maxCandidates = 2000
 
 // Searcher runs retrieval queries against search.passages and
-// public.entries through a *store.Store. It holds no state of its own
+// public.entries through a store.Reader. It holds no state of its own
 // beyond that connection, so a single Searcher is safe to share and reuse
 // across concurrent requests — every method opens its own query with its
 // own arguments.
+//
+// It holds store.Reader, not *store.Store: retrieval only ever reads, and
+// the narrower type keeps that true at compile time rather than by
+// convention — nothing in this package can Exec or Begin its way around
+// store's ownership of writes to search.passages.
 type Searcher struct {
-	store *store.Store
+	db store.Reader
 }
 
 // NewSearcher builds a Searcher over an already-migrated Store.
 func NewSearcher(s *store.Store) *Searcher {
-	return &Searcher{store: s}
+	return &Searcher{db: s.Reader()}
 }
 
 // Lexical ranks passages by BM25 (paradedb.score) against query, applying
@@ -66,6 +71,16 @@ func NewSearcher(s *store.Store) *Searcher {
 // hits and no error without touching the database: there is nothing a
 // blank search bar or a zero-result page size could usefully ask
 // ParadeDB for.
+//
+// Caveat for callers of a filtered search: f is applied after Lexical
+// pulls its BM25 candidate set (passages_bm25_idx covers only (id, text)
+// and cannot push a Filters predicate into its own scan), so a filter
+// narrow enough to exclude more than roughly the top candidateMultiplier
+// fraction of the unfiltered ranking can legitimately return fewer than
+// limit hits even when more matching passages exist further down BM25's
+// ranking. This is not a bug to chase — it is the accepted cost of an
+// index that cannot filter for itself — but it is worth knowing before
+// diagnosing a short result page as a retrieval defect.
 func (s *Searcher) Lexical(ctx context.Context, query string, limit int, f Filters) ([]PassageHit, error) {
 	if strings.TrimSpace(query) == "" || limit <= 0 {
 		return nil, nil
@@ -109,7 +124,7 @@ func (s *Searcher) Lexical(ctx context.Context, query string, limit int, f Filte
 	b.WriteString(fmt.Sprintf(" ORDER BY c.score DESC, c.id ASC LIMIT $%d", len(args)+1))
 	args = append(args, limit)
 
-	rows, err := s.store.DB().QueryContext(ctx, b.String(), args...)
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("search: lexical query failed: %w", err)
 	}
