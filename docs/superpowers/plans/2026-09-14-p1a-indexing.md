@@ -60,9 +60,9 @@ From spec §6.7 — these were measured, and two of them contradict the obvious 
 - Consumes: nothing
 - Produces: `store.New(dsn string) (*store.Store, error)`; `(*Store).Migrate() error`; the `search` schema; the test helper `testStore(t *testing.T) *Store`
 
-**Why ParadeDB:** stock Postgres has neither extension — verified, only `pg_trgm` is present. `paradedb/paradedb:latest` ships `vector` 0.8.4 and `pg_search` 0.25.9 on PostgreSQL 18, and both were confirmed working together on one table with a fused RRF query.
+**Why ParadeDB:** stock Postgres has neither extension — verified: a `postgres:17-alpine` lists 59 available extensions, and neither `vector` nor `pg_search` is among them. `paradedb/paradedb:latest` ships `vector` 0.8.4 and `pg_search` 0.25.9 on PostgreSQL 18, and both were confirmed working together on one table with a fused RRF query.
 
-- [ ] **Step 1: Create the dev database compose file**
+- [x] **Step 1: Create the dev database compose file**
 
 `sidecar/docker-compose.dev.yml`:
 
@@ -91,7 +91,7 @@ cd sidecar && docker compose -f docker-compose.dev.yml up -d
 until PGPASSWORD=postgres pg_isready -h 127.0.0.1 -p 5434 -U postgres; do sleep 2; done
 ```
 
-- [ ] **Step 2: Write the failing migration test**
+- [x] **Step 2: Write the failing migration test**
 
 `sidecar/internal/store/migrations_test.go`:
 
@@ -179,14 +179,14 @@ func TestMigrateIsIdempotent(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 ```bash
 cd sidecar && go test ./internal/store/ -run TestMigrate -v
 ```
 Expected: FAIL — `undefined: New`, `undefined: Store`.
 
-- [ ] **Step 4: Implement the store and migrations**
+- [x] **Step 4: Implement the store and migrations**
 
 `sidecar/internal/store/store.go`:
 
@@ -339,7 +339,7 @@ func (s *Store) Migrate() error {
 }
 ```
 
-- [ ] **Step 5: Initialise the module and run the tests**
+- [x] **Step 5: Initialise the module and run the tests**
 
 ```bash
 cd sidecar
@@ -356,7 +356,7 @@ Then confirm hermeticity — with the variable unset, the tests must SKIP:
 go test ./internal/store/ -v 2>&1 | grep -c SKIP
 ```
 
-- [ ] **Step 6: Write the Makefile and README**
+- [x] **Step 6: Write the Makefile and README**
 
 `sidecar/Makefile` must carry the build tag in every target, because omitting it is silent:
 
@@ -380,7 +380,7 @@ lint:
 
 `sidecar/README.md` documents: the ParadeDB requirement, the two native dependencies from spec §6.7 (ONNX Runtime dylib and `libtokenizers.a`), the mandatory build tag and what silently happens without it, and both test environment variables.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd sidecar && make lint
@@ -394,10 +394,14 @@ git commit -m "feat(sidecar): add module skeleton and the search schema"
 
 **Files:**
 - Create: `sidecar/internal/embed/embed.go` (the interface)
-- Create: `sidecar/internal/embed/onnx.go` (the ORT implementation)
-- Create: `sidecar/internal/embed/onnx_test.go`
-- Create: `sidecar/internal/embed/backend_ort.go`, `sidecar/internal/embed/backend_noort.go`
+- Create: `sidecar/internal/embed/onnx/onnx.go` (the ORT implementation)
+- Create: `sidecar/internal/embed/onnx/onnx_test.go`
+- Create: `sidecar/internal/embed/onnx/backend_ort.go`, `sidecar/internal/embed/onnx/backend_noort.go`
 - Modify: `sidecar/README.md`
+
+> **As built:** the ONNX implementation landed in `internal/embed/` first and
+> was moved to the leaf package `internal/embed/onnx/` by Task 4.5 (inserted
+> after Task 4). The paths above are the final ones; see Task 4.5 for why.
 
 **Interfaces:**
 - Consumes: nothing
@@ -405,7 +409,7 @@ git commit -m "feat(sidecar): add module skeleton and the search schema"
 
 **The footgun this task defends against:** `go build` without `-tags ORT` silently produces the pure-Go GoMLX backend, roughly 10× slower, with no error. A build that is accidentally 10× slow in production is the single most likely way this project quietly fails, so the guard is a test, not a comment.
 
-- [ ] **Step 1: Write the build-tag guard**
+- [x] **Step 1: Write the build-tag guard**
 
 `sidecar/internal/embed/backend_ort.go`:
 
@@ -440,7 +444,7 @@ package embed // import "miniflux.app/v2/sidecar/internal/embed"
 func BackendName() string { return "GoMLX" }
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 `sidecar/internal/embed/onnx_test.go`:
 
@@ -551,7 +555,7 @@ func TestEmbedRejectsEmptyBatch(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run to verify failure**
+- [x] **Step 3: Run to verify failure**
 
 ```bash
 cd sidecar && go test -tags ORT ./internal/embed/ -v
@@ -564,7 +568,7 @@ go test ./internal/embed/ -run TestBackendIsORT -v
 ```
 Expected: FAIL with "built with the \"GoMLX\" backend" — proving the guard bites.
 
-- [ ] **Step 4: Write the interface**
+- [x] **Step 4: Write the interface**
 
 `sidecar/internal/embed/embed.go`:
 
@@ -592,9 +596,9 @@ type Embedder interface {
 }
 ```
 
-- [ ] **Step 5: Implement the ONNX embedder**
+- [x] **Step 5: Implement the ONNX embedder**
 
-`sidecar/internal/embed/onnx.go` wraps hugot. Consult the spike's working code at
+`sidecar/internal/embed/onnx/onnx.go` wraps hugot. Consult the spike's working code at
 `/private/tmp/claude-501/-Users-nico-Dev-miniflux-v2/15940a9c-8c0f-45a5-b91c-1f83d1d2a02f/scratchpad/spike-embedding/`
 for the exact call sequence that was measured working — **read it before writing this file.** It is throwaway code, so copy the approach, not the structure.
 
@@ -608,7 +612,7 @@ Requirements the spike established:
 
 `ONNXConfig` carries `ModelPath` and `ONNXLibraryDir` and nothing else for now.
 
-- [ ] **Step 6: Fetch the native dependencies and the model**
+- [x] **Step 6: Fetch the native dependencies and the model**
 
 Document each in the README as you go — these are the steps most likely to trip up a future deployment:
 
@@ -618,7 +622,7 @@ brew install onnxruntime                      # native ORT v1.30.0
 # model: Xenova/bge-small-en-v1.5, onnx/model_quantized.onnx (~32MB)
 ```
 
-- [ ] **Step 7: Run the tests**
+- [x] **Step 7: Run the tests**
 
 ```bash
 cd sidecar
@@ -630,7 +634,7 @@ SIDECAR_ONNX_LIB_DIR=/opt/homebrew/opt/onnxruntime/lib \
 ```
 Expected: all PASS, with the paraphrase margin comfortably above 0.2.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd sidecar && make lint
@@ -652,7 +656,7 @@ git commit -m "feat(sidecar): add the ONNX embedder and a backend guard"
 
 **Why offsets matter:** P1b highlights matched passages inside the article. If `CharStart`/`CharEnd` do not index exactly into the string `ExtractText` returned, highlighting silently lands on the wrong words. Round-tripping is therefore a correctness test, not a nicety.
 
-- [ ] **Step 1: Write the failing extraction tests**
+- [x] **Step 1: Write the failing extraction tests**
 
 `sidecar/internal/passage/extract_test.go`:
 
@@ -709,7 +713,7 @@ func TestExtractTextReturnsEmptyForChromeOnly(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Write the failing splitting tests**
+- [x] **Step 2: Write the failing splitting tests**
 
 `sidecar/internal/passage/split_test.go`:
 
@@ -803,14 +807,14 @@ func TestSplitBreaksOnSentenceBoundaries(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run to verify failure**
+- [x] **Step 3: Run to verify failure**
 
 ```bash
 cd sidecar && go test -tags ORT ./internal/passage/ -v
 ```
 Expected: FAIL — undefined symbols.
 
-- [ ] **Step 4: Implement extraction**
+- [x] **Step 4: Implement extraction**
 
 `sidecar/internal/passage/extract.go` walks the HTML with `golang.org/x/net/html`, skipping `script`, `style`, `noscript` and comment nodes, emitting text nodes, and inserting a single space between block-level elements. Then collapse all runs of whitespace to one space and trim.
 
@@ -821,7 +825,7 @@ cd sidecar && go get golang.org/x/net@v0.58.0
 
 Do not pull in a Markdown or readability library — the input is already sanitised HTML from Miniflux, and the job here is text extraction, not article detection.
 
-- [ ] **Step 5: Implement splitting**
+- [x] **Step 5: Implement splitting**
 
 `sidecar/internal/passage/split.go`:
 
@@ -844,14 +848,14 @@ Algorithm: find sentence boundaries (`.`, `!`, `?` followed by whitespace, ignor
 
 **Offsets are the point:** track byte offsets into the original string throughout and never rebuild passage text by concatenation — slice it from the source, so `text[p.CharStart:p.CharEnd] == p.Text` holds by construction.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 ```bash
 cd sidecar && go test -tags ORT ./internal/passage/ -v
 ```
 Expected: all PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd sidecar && make lint
@@ -888,7 +892,7 @@ git commit -m "feat(sidecar): extract plaintext and split it into passages"
 | Entry content changed | `content_hash` mismatch triggers a full re-index |
 | Re-indexing | Replaces passages atomically — never leaves a half-indexed entry visible |
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `sidecar/internal/indexer/indexer_test.go` must cover, each as its own test:
 
@@ -926,14 +930,14 @@ func (f *fakeEmbedder) Close() error    { return nil }
 
 Fixtures insert into `public.entries` with raw SQL, mirroring the P0 fork's test fixtures, and clean up with `t.Cleanup`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd sidecar && go test -tags ORT ./internal/indexer/ -v
 ```
 Expected: FAIL — undefined symbols.
 
-- [ ] **Step 3: Implement the store queries**
+- [x] **Step 3: Implement the store queries**
 
 `PendingEntryIDs` selects entries needing indexing — either absent from `entry_index_state`, or present with a `content_hash` that no longer matches the entry's current content, or `status = 'failed'`. Ascending id, so the caller can checkpoint.
 
@@ -943,13 +947,13 @@ Expected: FAIL — undefined symbols.
 
 Use `pgvector`'s text format for the embedding parameter — `[0.1,0.2,...]` — or add `github.com/pgvector/pgvector-go`. Prefer the plain text format to avoid a dependency for one type.
 
-- [ ] **Step 4: Implement the indexer**
+- [x] **Step 4: Implement the indexer**
 
 `IndexEntry` sequence: load entry → compute content hash → if unchanged and `status='ok'`, return without work → `ExtractText` → if empty, `MarkEntrySkipped` and return → `Split` → `Embed` in batches of `DefaultBatchSize = 16` (inside the measured 8–32 sweet spot, spec §6.7) → `ReplacePassages`.
 
 On embedding error, mark `status='failed'` with the reason and return the error. Never mark `ok` on a partial result.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 ```bash
 cd sidecar
@@ -958,13 +962,45 @@ SIDECAR_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5434/miniflux2?sslm
 ```
 Expected: all PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd sidecar && make lint
 git add sidecar/
 git commit -m "feat(sidecar): index a single entry into passages and vectors"
 ```
+
+---
+
+### Task 4.5: Split the `Embedder` interface from its ONNX implementation
+
+**Inserted after Task 4**, in response to a task-4 review finding. Not in the
+original plan; recorded here because the plan is this phase's record.
+
+**Files:**
+- Create: `sidecar/internal/embed/onnx/` — move `onnx.go`, `onnx_test.go`,
+  `backend_ort.go`, `backend_noort.go`, `resolve_model_root_test.go` there
+- Keep: `sidecar/internal/embed/embed.go` (the interface, untouched)
+
+**Why:** `internal/indexer` imports `internal/embed` only for the
+`Embedder` interface, but the ONNX implementation sat in that same package,
+so every importer transitively pulled in hugot and CGO. The consequence was
+concrete and was reproduced before the change: `go test -tags ORT
+./internal/indexer/` failed at the **link** step with
+`ld: library 'tokenizers' not found` on any machine without
+`libtokenizers.a`, even though nothing in `internal/indexer` needs
+inference.
+
+Moving the implementation to a leaf package makes the native dependency
+reachable only from packages that actually want it. `cmd/sidecar` is the
+only importer of `internal/embed/onnx` in the module, and that is now an
+invariant worth keeping — it is what lets the rest of the suite run without
+native artifacts.
+
+- [x] **Step 1: Move the files, fix the package clauses and import comments**
+- [x] **Step 2: Prove the before/after** — the same `go test -tags ORT` command
+      failing to link before the move and passing after it
+- [x] **Step 3: Commit**
 
 ---
 
@@ -980,19 +1016,19 @@ git commit -m "feat(sidecar): index a single entry into passages and vectors"
 
 **Design (spec §9.1):** the live lane handles new entries — a few hundred a day, always on, one worker, effectively free. It is deliberately separate from the backfill lane so that pausing a multi-hour backfill never stops new articles becoming searchable.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Cover: that a newly inserted entry becomes indexed within a couple of poll intervals; that the lane survives a single entry failing (it logs, marks failed, and carries on to the next rather than aborting the loop); and that it exits cleanly on context cancellation.
 
 Use a short interval (50ms) so the test finishes quickly.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd sidecar && go test -tags ORT ./internal/indexer/ -run TestRunLive -v
 ```
 
-- [ ] **Step 3: Implement the live lane**
+- [x] **Step 3: Implement the live lane**
 
 A ticker loop: fetch a page of pending ids with a modest limit (say 50), index each, log a summary, sleep, repeat. Poll on `WHERE id > lastSeen` semantics as spec §4 prescribes — at a few hundred entries a day, `LISTEN/NOTIFY` is complexity without a payoff.
 
@@ -1000,20 +1036,20 @@ Per-entry failures are logged and skipped, never retried in a tight loop within 
 
 Respect `ctx.Done()` between every entry, not merely between polls, so shutdown during a long batch is prompt.
 
-- [ ] **Step 4: Write the binary**
+- [x] **Step 4: Write the binary**
 
 `sidecar/cmd/sidecar/main.go`: parse config from environment variables (`SIDECAR_DATABASE_URL`, `SIDECAR_MODEL_PATH`, `SIDECAR_ONNX_LIB_DIR`), run migrations, construct the embedder, start the live lane, and handle SIGINT/SIGTERM with graceful shutdown.
 
 Log `embed.BackendName()` at startup. In production, a line saying `GoMLX` is the only visible symptom of the silent build-tag mistake.
 
-- [ ] **Step 5: Run the tests and the binary**
+- [x] **Step 5: Run the tests and the binary**
 
 ```bash
 cd sidecar && go test -tags ORT ./internal/indexer/ -v
 make build && ./bin/sidecar --help
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd sidecar && make lint
@@ -1037,7 +1073,7 @@ git commit -m "feat(sidecar): add the live indexing lane and the binary"
 
 **Budget:** ~4.1 hours per 0.5M passages, ~41 hours per 5M. The lane must survive being interrupted at hour 30.
 
-- [ ] **Step 1: Write the failing controller tests**
+- [x] **Step 1: Write the failing controller tests**
 
 `throttle_test.go` — pure unit tests, no database, no model:
 
@@ -1050,7 +1086,7 @@ git commit -m "feat(sidecar): add the live indexing lane and the binary"
 
 Inject the load reading and the clock rather than sampling the real machine — a controller test that depends on the host's actual load average is not a test.
 
-- [ ] **Step 2: Write the failing backfill tests**
+- [x] **Step 2: Write the failing backfill tests**
 
 1. Processes every pending entry and terminates.
 2. **Resumes from its checkpoint**: interrupt after N entries, restart, and assert it neither reprocesses the first N nor skips any.
@@ -1058,13 +1094,13 @@ Inject the load reading and the clock rather than sampling the real machine — 
 4. Respects the schedule window: outside it, no work happens.
 5. `Stats()` reports progress, throughput, current worker count, and error/skip counts by cause — the admin page in Task 7 renders exactly this.
 
-- [ ] **Step 3: Run both to verify failure**
+- [x] **Step 3: Run both to verify failure**
 
 ```bash
 cd sidecar && go test -tags ORT ./internal/indexer/ -run 'TestController|TestBackfill' -v
 ```
 
-- [ ] **Step 4: Implement the controller**
+- [x] **Step 4: Implement the controller**
 
 ```go
 type ControllerConfig struct {
@@ -1087,13 +1123,13 @@ Sample load and per-batch latency every few seconds, establish a baseline from t
 
 Record *why* the current count was chosen — a short string — because Task 7 displays it and "why is it at 1?" is the first question an operator asks.
 
-- [ ] **Step 5: Implement the backfill lane**
+- [x] **Step 5: Implement the backfill lane**
 
 A worker pool sized by the controller, pulling entry ids from a channel fed by `PendingEntryIDs` pagination. Checkpointing is implicit: `entry_index_state` already records what is done, so a restart naturally resumes. Do not add a separate checkpoint table.
 
 Rechecking the worker count between batches (not mid-batch) keeps the adjustment simple and predictable.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 ```bash
 cd sidecar
@@ -1101,7 +1137,7 @@ SIDECAR_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5434/miniflux2?sslm
   go test -tags ORT ./internal/indexer/ -v
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd sidecar && make lint
@@ -1124,17 +1160,17 @@ git commit -m "feat(sidecar): add the throttled backfill lane"
 
 **Why it lives here, not in Miniflux (spec §9.4):** keeping it in the sidecar holds the fork's diff to reader-facing UI only, and indexing operations are a different concern from reading preferences even when the same person handles both.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Using `httptest`: `/api/status` returns JSON with progress, throughput, worker count and the controller's reason; pause then status shows paused; resume then status shows running; the HTML page renders without error and contains the progress figure.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd sidecar && go test -tags ORT ./internal/web/ -v
 ```
 
-- [ ] **Step 3: Implement the server**
+- [x] **Step 3: Implement the server**
 
 Plain `net/http` with `html/template`, matching Miniflux's own no-framework style. The page shows: entries indexed against total with an ETA derived from current throughput, current throughput, live worker count with the controller's stated reason, error and skip counts grouped by cause, and pause/resume controls.
 
@@ -1142,7 +1178,7 @@ No JavaScript framework. A meta refresh or a small inline fetch is sufficient.
 
 Bind to localhost by default — this page has no authentication and exposes operational control.
 
-- [ ] **Step 4: Wire it into the binary and run it**
+- [x] **Step 4: Wire it into the binary and run it**
 
 ```bash
 cd sidecar && make build && ./bin/sidecar
@@ -1150,7 +1186,7 @@ cd sidecar && make build && ./bin/sidecar
 ```
 Confirm the page renders and that pause and resume visibly change the reported state.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd sidecar && make lint
@@ -1172,11 +1208,11 @@ git commit -m "feat(sidecar): add the indexing status and admin page"
 
 **Why this is a task and not a footnote:** stock Postgres carries neither extension, and ParadeDB ships **PostgreSQL 18** while the existing instance runs 17. So P1 requires a major-version migration of live data with a dump and restore — scheduled downtime, and the one step in this plan that can lose data if botched.
 
-- [ ] **Step 1: Write the verification script**
+- [x] **Step 1: Write the verification script**
 
 `sidecar/scripts/verify-extensions.sh` takes a DSN and exits non-zero unless both `vector` and `pg_search` are available, printing their versions. It is the precondition check the runbook opens with and the smoke test it closes with.
 
-- [ ] **Step 2: Write the runbook**
+- [x] **Step 2: Write the runbook**
 
 `sidecar/docs/production-migration.md` covers, in order:
 
@@ -1188,13 +1224,13 @@ git commit -m "feat(sidecar): add the indexing status and admin page"
 6. **Run the sidecar migrations** and confirm the `search` schema exists.
 7. **Rollback** — how to return to the Postgres 17 volume if verification fails. Write this section as though you will need it at 2am.
 
-- [ ] **Step 3: Rehearse it**
+- [x] **Step 3: Rehearse it**
 
 Rehearse against a **copy**, never the live database: dump the existing dev Miniflux database (port 5432), restore it into the ParadeDB dev container (5434), and confirm Miniflux runs against the restored copy. Record in the runbook anything that differed from what you wrote.
 
 A runbook that has never been executed is a guess. This step is what makes it a procedure.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add sidecar/docs sidecar/scripts
@@ -1205,14 +1241,47 @@ git commit -m "docs(sidecar): add the production migration runbook"
 
 ## Done criteria
 
-- [ ] `cd sidecar && make test` passes; database and model tests SKIP when their environment variables are unset
-- [ ] `TestBackendIsORT` fails when built without `-tags ORT` — verify by running it once without the tag
-- [ ] A real entry indexes end to end: passages present with 384-dim embeddings, `status='ok'`
-- [ ] The backfill lane resumes correctly after interruption
-- [ ] The controller never exceeds its worker ceiling
-- [ ] The status page renders and pause/resume work
-- [ ] The migration runbook has been rehearsed against a copy
-- [ ] No file outside `sidecar/` was modified by this plan
+- [x] `cd sidecar && make test` passes; database and model tests SKIP when their environment variables are unset
+- [x] `TestBackendIsORT` fails when built without `-tags ORT` — verify by running it once without the tag
+- [x] A real entry indexes end to end: passages present with 384-dim embeddings, `status='ok'`
+- [x] The backfill lane resumes correctly after interruption
+- [x] The controller never exceeds its worker ceiling
+- [x] The status page renders and pause/resume work
+- [x] The migration runbook has been rehearsed against a copy
+- [x] No file outside `sidecar/` was modified by this plan — except this
+      plan document itself, updated after the whole-branch review to match
+      what was built (see below)
+
+## As built: where the branch diverged from this plan
+
+Recorded after the whole-branch review, because the plan is this phase's
+record and two of that review's findings were the plan's own fault rather
+than any implementer's.
+
+- **Task 4.5 was inserted** after Task 4 (see above).
+- **§9.2's three knobs were built but never wired.** Task 6's brief said
+  build the setters and Task 7's said build the admin surface; neither said
+  connect them, so `Controller.SetConfig`, `Controller.SetWindow`,
+  `Indexer.SetBatchSize`, `Backfill.SetPageSize` and
+  `Backfill.SetPollInterval` shipped with no non-test caller at all. The
+  fix wave added `SIDECAR_BACKFILL_*` startup variables and
+  `POST /api/backfill/config`, both going through one validator
+  (`indexer.ApplyConfig`).
+- **`LoadThreshold: 0.8` was written as a bare literal** with no statement
+  of whether it meant an absolute or a per-core load average. Only per-core
+  is meaningful as a default; as built it was absolute, which pinned the
+  lane at one worker for an entire run. The sampler now normalises by
+  `runtime.NumCPU()`. A future plan naming a threshold should name its
+  units.
+- **The backfill lane returned when it drained**, which the plan never
+  said it should not. Nothing else re-examines entries below the live
+  lane's cursor, so a content change there — exactly what P0's
+  scrape-backfill CLI produces — went unnoticed until a restart. The lane
+  now idles and re-sweeps.
+- **A pipeline version was added** to the content hash
+  (`store.PipelineVersion`). The plan stored `char_start`/`char_end`
+  offsets into a plaintext it never persisted, with nothing to invalidate
+  them when the derivation changed.
 
 ## Deferred to P1b
 
