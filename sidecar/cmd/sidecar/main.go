@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Command sidecar runs the search sidecar's always-on live indexing lane:
-// it connects to Postgres, runs migrations, constructs the ONNX embedder,
-// and indexes newly arrived entries until it receives SIGINT or SIGTERM.
+// Command sidecar runs the search sidecar: it connects to Postgres, runs
+// migrations, constructs the ONNX embedder, and runs three things
+// concurrently until it receives SIGINT or SIGTERM — the always-on live
+// indexing lane, the throttled backfill lane, and the status/admin HTTP
+// server (spec §9.4).
 //
 // This is the only place in the module that imports internal/embed/onnx —
 // everything else depends only on the embed.Embedder interface, so that
@@ -21,12 +23,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"miniflux.app/v2/sidecar/internal/embed/onnx"
 	"miniflux.app/v2/sidecar/internal/indexer"
 	"miniflux.app/v2/sidecar/internal/store"
+	"miniflux.app/v2/sidecar/internal/web"
 )
 
 // liveLanePollInterval is how often the live lane checks for newly
@@ -42,6 +46,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  SIDECAR_DATABASE_URL   Postgres DSN (required)\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_MODEL_PATH     path to the quantized ONNX model file (required)\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_ONNX_LIB_DIR   directory containing the native ONNX Runtime library (optional)\n")
+		fmt.Fprintf(os.Stderr, "  SIDECAR_ADMIN_ADDR     address for the status/admin HTTP server (optional, default %s)\n", web.DefaultAddr)
 	}
 	flag.Parse()
 
@@ -56,18 +61,27 @@ type config struct {
 	databaseURL string
 	modelPath   string
 	onnxLibDir  string
+	adminAddr   string
 }
 
 // loadConfig reads configuration from the environment. SIDECAR_DATABASE_URL
 // and SIDECAR_MODEL_PATH are required; SIDECAR_ONNX_LIB_DIR is optional —
 // ONNXConfig.ONNXLibraryDir is ignored when empty, and only matters on
 // platforms (macOS) where the native library isn't found at hugot's
-// Linux-only default search path.
+// Linux-only default search path. SIDECAR_ADMIN_ADDR is also optional and
+// defaults to web.DefaultAddr (loopback-only): the status/admin page has
+// no authentication, so binding it anywhere reachable off the local
+// machine is an operator's deliberate override, never this binary's
+// default.
 func loadConfig() (config, error) {
 	cfg := config{
 		databaseURL: os.Getenv("SIDECAR_DATABASE_URL"),
 		modelPath:   os.Getenv("SIDECAR_MODEL_PATH"),
 		onnxLibDir:  os.Getenv("SIDECAR_ONNX_LIB_DIR"),
+		adminAddr:   os.Getenv("SIDECAR_ADMIN_ADDR"),
+	}
+	if cfg.adminAddr == "" {
+		cfg.adminAddr = web.DefaultAddr
 	}
 
 	var missing []string
@@ -121,14 +135,86 @@ func run() error {
 
 	ix := indexer.New(s, embedder)
 
+	controller := indexer.NewController(indexer.DefaultControllerConfig())
+	backfill := indexer.NewBackfill(ix, controller, indexer.BackfillConfig{})
+
+	adminServer, err := web.New(backfill)
+	if err != nil {
+		return fmt.Errorf("sidecar: unable to build admin server: %w", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	slog.Info("sidecar: starting live indexing lane",
-		slog.Duration("poll_interval", liveLanePollInterval),
-	)
-	if err := indexer.RunLive(ctx, ix, liveLanePollInterval); err != nil {
-		return fmt.Errorf("sidecar: live lane exited with error: %w", err)
+	// The live lane and the backfill lane are started together, every
+	// process run, unconditionally — this is the coordination invariant
+	// documented on RunLive and Backfill.start: RunLive only ever covers
+	// entries created after THIS startup (its cursor seeds from the
+	// current max entry id), so it is safe only because Backfill always
+	// re-sweeps everything else from cursor 0 right here, on every start,
+	// regardless of what any earlier run's Stats() reported. Backfill
+	// keeps no cursor of its own across restarts and Start is never
+	// skipped because a previous Done was seen (there is nowhere such a
+	// thing is even recorded) — breaking either half of that would make
+	// an entry created during a previous shutdown's window invisible to
+	// both lanes, permanently and silently.
+	//
+	// All three goroutines share ctx, and any one of them returning an
+	// error calls stop() to cancel it — signal.NotifyContext's stop both
+	// unregisters the signal handler and cancels ctx (safe to call more
+	// than once, so this races harmlessly with the deferred call above
+	// and with SIGINT/SIGTERM arriving independently). Without this, an
+	// early failure in just one lane (the admin port already in use, say)
+	// would leave the healthy lanes running forever with nothing to
+	// surface the failure short of reading logs — the process would never
+	// exit non-zero, and an orchestrator would never know to restart it.
+	var wg sync.WaitGroup
+	errs := make(chan error, 3)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("sidecar: starting live indexing lane",
+			slog.Duration("poll_interval", liveLanePollInterval),
+		)
+		if err := indexer.RunLive(ctx, ix, liveLanePollInterval); err != nil {
+			errs <- fmt.Errorf("sidecar: live lane exited with error: %w", err)
+			stop()
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("sidecar: starting backfill lane")
+		if err := backfill.Start(ctx); err != nil {
+			errs <- fmt.Errorf("sidecar: backfill lane exited with error: %w", err)
+			stop()
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		slog.Info("sidecar: starting admin server", slog.String("addr", cfg.adminAddr))
+		if err := adminServer.ListenAndServe(ctx, cfg.adminAddr); err != nil {
+			errs <- fmt.Errorf("sidecar: admin server exited with error: %w", err)
+			stop()
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+
+	var firstErr error
+	for err := range errs {
+		slog.Error("sidecar: lane reported an error", slog.Any("error", err))
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return firstErr
 	}
 
 	slog.Info("sidecar: shutdown complete")

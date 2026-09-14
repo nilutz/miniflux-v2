@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sidecar indexing status</title>
+<meta http-equiv="refresh" content="10">
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.25rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  td, th { text-align: left; padding: 0.25rem 0.75rem 0.25rem 0; vertical-align: top; }
+  .progress { background: #eee; border-radius: 4px; height: 1rem; overflow: hidden; margin: 0.5rem 0; }
+  .progress-bar { background: #2b6cb0; height: 100%; }
+  .reason { color: #555; font-size: 0.9em; }
+  button { padding: 0.4rem 1rem; margin-right: 0.5rem; }
+  .stale { color: #a00; }
+</style>
+</head>
+<body>
+<h1>Sidecar indexing status</h1>
+
+<table>
+  <tr><th>Indexed</th><td>{{comma .Indexed}}{{if ge .Total 0}} of {{comma .Total}}{{end}}</td></tr>
+  {{if ge .PercentComplete 0.0}}
+  <tr><th>Progress</th><td>
+    {{printf "%.1f" .PercentComplete}}%
+    <div class="progress"><div class="progress-bar" style="width: {{printf "%.1f" .PercentComplete}}%"></div></div>
+  </td></tr>
+  {{end}}
+  <tr><th>ETA</th><td>{{.ETA}}</td></tr>
+  <tr><th>Throughput</th><td>{{printf "%.2f" .ThroughputPerSec}} entries/sec (current)</td></tr>
+  <tr><th>Workers</th><td>{{.Workers}}<div class="reason">{{.ControllerReason}}</div></td></tr>
+  <tr><th>Skipped</th><td>{{comma .Skipped}}</td></tr>
+  <tr><th>Failed</th><td>{{comma .Failed}}</td></tr>
+  <tr><th>Paused</th><td>{{if .Paused}}yes{{else}}no{{end}}</td></tr>
+  <tr><th>Done</th><td>{{if .Done}}yes{{else}}no{{end}}</td></tr>
+</table>
+
+{{if .SkippedByReason}}
+<h2>Skips by cause</h2>
+<table>
+  {{range $cause, $count := .SkippedByReason}}
+  <tr><td>{{$cause}}</td><td>{{comma $count}}</td></tr>
+  {{end}}
+</table>
+{{end}}
+
+{{if .FailedByReason}}
+<h2>Failures by cause</h2>
+<table>
+  {{range $cause, $count := .FailedByReason}}
+  <tr><td>{{$cause}}</td><td>{{comma $count}}</td></tr>
+  {{end}}
+</table>
+{{end}}
+
+<h2>Controls</h2>
+<button id="pause-btn" onclick="post('/api/backfill/pause')">Pause</button>
+<button id="resume-btn" onclick="post('/api/backfill/resume')">Resume</button>
+<span id="control-msg"></span>
+
+<p class="reason">Generated {{.GeneratedAt}}. This page refreshes every 10 seconds.</p>
+
+<script>
+  // A small inline fetch, not a JS framework (spec §9.4 / task-7 brief).
+  // Content-Type: application/json is set deliberately: per the Fetch
+  // spec it makes this a non-"simple" request, so a cross-origin caller
+  // must pass a CORS preflight this server never authorizes (no
+  // Access-Control-Allow-Origin is ever sent) — a browser blocks the
+  // actual request before it reaches the server. The server additionally
+  // checks the Origin header itself, since not every client is a browser
+  // honoring that preflight.
+  function post(path) {
+    fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+      .then(function (r) {
+        if (!r.ok) { throw new Error('request failed: ' + r.status); }
+        document.getElementById('control-msg').textContent = 'done, reloading...';
+        location.reload();
+      })
+      .catch(function (err) {
+        document.getElementById('control-msg').textContent = String(err);
+      });
+  }
+</script>
+</body>
+</html>
