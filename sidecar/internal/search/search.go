@@ -2,12 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package search implements retrieval over search.passages: BM25 lexical
-// ranking (task 2), vector similarity (task 3), and their fusion (task 4).
-// It reads Miniflux's public.entries read-only, alongside the sidecar-owned
-// search schema, and never writes to either.
+// ranking (task 2), vector similarity (task 3), and their Reciprocal Rank
+// Fusion plus entry-level aggregation (task 4, spec §6.3-6.4), tied
+// together behind (*Searcher).Search. It reads Miniflux's public.entries
+// read-only, alongside the sidecar-owned search schema, and never writes
+// to either.
 package search // import "miniflux.app/v2/sidecar/internal/search"
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // PassageHit is one retrieved passage, carrying enough of its own identity
 // and position for a caller to render, highlight, or re-rank it without a
@@ -74,4 +79,86 @@ func (f Filters) empty() bool {
 		f.Until.IsZero() &&
 		!f.UnreadOnly &&
 		!f.StarredOnly
+}
+
+// EntryHit is one entry-level search result (task 4, spec §6.4): an entry
+// ranked by its own best-scoring passage, which is carried both as Score
+// (what Search ranks entries by) and as Best (what a caller renders as the
+// result's snippet). Passages carries every one of that entry's passages
+// that also matched, best-first, including Best itself at index 0 — kept
+// for callers that need the full per-entry set rather than only the one
+// chosen as the snippet (see aggregate in fuse.go).
+type EntryHit struct {
+	EntryID  int64
+	Score    float64
+	Best     PassageHit
+	Passages []PassageHit
+}
+
+// Mode selects which retrieval channel(s) a Search call draws from and how
+// its results are aggregated — the search bar's mode picker "over the same
+// machinery" (spec §6.3). The zero value is ModeHybrid, so a Request built
+// without explicitly setting Mode gets the spec's own default rather than
+// silently running lexical-only.
+type Mode int
+
+const (
+	// ModeHybrid runs both Lexical and Semantic retrieval, fuses them with
+	// Fuse (Reciprocal Rank Fusion), and aggregates the result to entry
+	// level. Spec §6.3's default.
+	ModeHybrid Mode = iota
+
+	// ModeKeyword runs Lexical retrieval only ("BM25 only", spec §6.3).
+	ModeKeyword
+
+	// ModeSemantic runs Semantic retrieval only ("vector only", spec §6.3).
+	ModeSemantic
+
+	// ModePassages runs the same fused retrieval as ModeHybrid but returns
+	// a flat, passage-first ranked list instead of aggregating to entry
+	// level — "same retrieval, passage-first presentation" (spec §6.3),
+	// the extractive answer to "RAG" (spec §6.4).
+	ModePassages
+)
+
+// String names m for logging. An unrecognised value names itself
+// explicitly rather than silently formatting as a bare integer, so a
+// caller-constructed invalid Mode is visible in logs rather than looking
+// like a typo'd but valid one.
+func (m Mode) String() string {
+	switch m {
+	case ModeHybrid:
+		return "hybrid"
+	case ModeKeyword:
+		return "keyword"
+	case ModeSemantic:
+		return "semantic"
+	case ModePassages:
+		return "passages"
+	default:
+		return fmt.Sprintf("Mode(%d)", int(m))
+	}
+}
+
+// Request is one Search call's parameters. Query and Mode select what to
+// retrieve and how; Limit bounds how many entries (or, in ModePassages,
+// passages) come back, defaulting to defaultSearchLimit when left at its
+// zero value; Filters narrows the search to a subset of entries exactly
+// as it does for Lexical and Semantic.
+type Request struct {
+	Query   string
+	Mode    Mode
+	Limit   int
+	Filters Filters
+}
+
+// Response is one Search call's results. Mode echoes the Request's own
+// Mode so a caller can tell which of Entries or Passages was populated
+// without inspecting which is non-nil: Entries holds results for
+// ModeKeyword, ModeSemantic and ModeHybrid; Passages holds them for
+// ModePassages, and is nil for every other mode (and vice versa).
+type Response struct {
+	Mode     Mode
+	Entries  []EntryHit
+	Passages []PassageHit
 }
