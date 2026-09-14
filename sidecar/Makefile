@@ -24,8 +24,16 @@ build:
 # sidecar binary itself reads and what an operator points at their live
 # corpus. Set the test one to a throwaway database; internal/testdb fails
 # the run outright if the two name the same place.
+#
+# -p 1 runs one package at a time. Several packages' database-backed tests
+# create and delete fixture entries in the SAME database, and some of them
+# assert on whole-table counts (store's PendingEntryCount/…Approx pair):
+# run in parallel, one package's fixtures appear and disappear underneath
+# another package's count and the assertion fails at random. Serialising
+# packages is the fix; the database is the shared resource, and nothing in
+# the test suite can isolate itself from it.
 test:
-	go test -tags $(GO_TAGS) -race ./...
+	go test -tags $(GO_TAGS) -race -p 1 ./...
 
 # test-hermetic is the subset that needs neither native libraries nor a
 # database. Safe to run anywhere.

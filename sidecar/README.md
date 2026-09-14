@@ -253,6 +253,12 @@ Two separate things are optional here, and they fail in different ways:
   database-backed tests `t.Skip` and everything else still passes. What is
   *not* optional is that it must never be your live database: see the
   variable's own entry above.
+
+  With it set, run packages one at a time (`make test` already passes
+  `-p 1`). Several packages create and delete fixture entries in the same
+  database, and `internal/store`'s exact-vs-approximate pending counts
+  assert on whole-table numbers; run in parallel they fail at random on
+  another package's fixtures.
 - **`libtokenizers.a` is not.** `make test` passes `-tags ORT` and covers
   `./...`, which includes `internal/embed/onnx` and `cmd/sidecar`; both link
   the native tokenizer, so on a machine without it `make test` fails at the
