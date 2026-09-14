@@ -218,6 +218,21 @@ Expect `search.passages`, `search.entry_index_state`, and
 of migrations in `sidecar/internal/store/migrations.go` (2 as of this
 writing).
 
+**Budget for the backfill before you start the sidecar.** Once it is
+running, the backfill lane begins working through every entry that has no
+index state — on a first deployment, that is the entire corpus. At the
+measured 33.9 passages/sec (spec §6.7) expect roughly **4 hours per 0.5M
+passages and 41 hours per 5M**, at 4–6 passages per entry. It is
+CPU-bound and runs alongside Miniflux on the same machine.
+
+The same applies after any upgrade that bumps `pipelineVersion` in
+`sidecar/internal/indexer`. That constant is folded into each entry's
+recorded hash precisely so a change to text extraction or passage
+splitting invalidates stale offsets — which means **the next start after
+such an upgrade re-indexes everything**, at the same cost. Check the
+release notes for a version bump before upgrading, and use the admin
+page's schedule window to confine the work to hours you can spare.
+
 ## 7. Rollback
 
 Follow this if **any** check in §5 fails, or anything else about the new
