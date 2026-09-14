@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package embed // import "miniflux.app/v2/sidecar/internal/embed"
+// Package onnx implements embed.Embedder using hugot and ONNX Runtime. It
+// requires CGO and the native libtokenizers.a / libonnxruntime; see the
+// sidecar README for build requirements. Kept separate from the pure-Go
+// embed package so consumers that only need the Embedder interface (such as
+// internal/indexer's tests) never link the native library.
+package onnx // import "miniflux.app/v2/sidecar/internal/embed/onnx"
 
 import (
 	"context"
@@ -14,6 +19,8 @@ import (
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/options"
 	"github.com/knights-analytics/hugot/pipelines"
+
+	"miniflux.app/v2/sidecar/internal/embed"
 )
 
 // dimensions is the fixed output width of the pinned bge-small-en-v1.5
@@ -66,7 +73,7 @@ type onnxEmbedder struct {
 // substituting a different backend — the silent-substitution case this
 // package guards against is a plain, tagless `go build` of the *sidecar*
 // binary, which BackendName and TestBackendIsORT catch (spec §6.7).
-func NewONNX(cfg ONNXConfig) (Embedder, error) {
+func NewONNX(cfg ONNXConfig) (embed.Embedder, error) {
 	modelRoot, onnxFilename := resolveModelRoot(cfg.ModelPath)
 
 	var sessionOpts []options.WithOption

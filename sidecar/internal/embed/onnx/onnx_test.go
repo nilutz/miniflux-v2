@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package embed // import "miniflux.app/v2/sidecar/internal/embed"
+package onnx // import "miniflux.app/v2/sidecar/internal/embed/onnx"
 
 import (
 	"context"
 	"math"
 	"os"
 	"testing"
+
+	"miniflux.app/v2/sidecar/internal/embed"
 )
 
 // TestBackendIsORT fails when the binary was built without -tags ORT, which
@@ -18,7 +20,7 @@ func TestBackendIsORT(t *testing.T) {
 	}
 }
 
-func testEmbedder(t *testing.T) Embedder {
+func testEmbedder(t *testing.T) embed.Embedder {
 	t.Helper()
 
 	modelPath := os.Getenv("SIDECAR_MODEL_PATH")

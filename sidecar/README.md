@@ -44,15 +44,20 @@ default `search_path` ever excludes `public`, the fix is to either add
 `public` to the search path for the migration session or schema-qualify the
 column as `public.vector(384)` — not to restructure the `search` schema.
 
-## The embedder (`internal/embed`)
+## The embedder (`internal/embed`, `internal/embed/onnx`)
 
-`internal/embed` wraps [hugot](https://github.com/knights-analytics/hugot)
-(v0.7.8, build tag `ORT`) around [ONNX Runtime](https://onnxruntime.ai/)
-(native v1.30.0) to embed text with a pinned model,
+`internal/embed` holds the small, pure-Go `Embedder` interface
+(`Embed`/`Dimensions`/`Close`) with no CGO and no native dependencies.
+`internal/embed/onnx` implements it: it wraps
+[hugot](https://github.com/knights-analytics/hugot) (v0.7.8, build tag
+`ORT`) around [ONNX Runtime](https://onnxruntime.ai/) (native v1.30.0) to
+embed text with a pinned model,
 [`Xenova/bge-small-en-v1.5`](https://huggingface.co/Xenova/bge-small-en-v1.5)
 (int8-quantized ONNX export, 384 dimensions). This is the exact stack a spike
-measured end to end — see `NewONNX` in `internal/embed/onnx.go` for the
-call sequence and the reasoning behind it.
+measured end to end — see `NewONNX` in `internal/embed/onnx/onnx.go` for the
+call sequence and the reasoning behind it. The split keeps consumers that
+only need the interface (such as `internal/indexer`'s tests) from linking
+the native `libtokenizers.a`.
 
 Building or running the sidecar with this package requires three native
 dependencies that are **not** Go modules and are **not** vendored into this
@@ -85,7 +90,7 @@ repository:
    `config.json`, `tokenizer_config.json`, `special_tokens_map.json`), which
    hugot expects to find next to (one directory up from) the `.onnx` file.
 
-`ONNXConfig` (in `internal/embed/onnx.go`) takes two fields:
+`ONNXConfig` (in `internal/embed/onnx/onnx.go`) takes two fields:
 
 - `ModelPath` — the path to `model_quantized.onnx` itself; the surrounding
   model directory is located automatically by walking up from it looking for
@@ -105,7 +110,7 @@ SIDECAR_ONNX_LIB_DIR=/opt/homebrew/opt/onnxruntime/lib \
 ```
 
 `CGO_LDFLAGS` and `DYLD_LIBRARY_PATH` are needed to build and link at all
-once `internal/embed` is in the build (with `-tags ORT`, which `make`
+once `internal/embed/onnx` is in the build (with `-tags ORT`, which `make`
 already passes). `SIDECAR_MODEL_PATH` and `SIDECAR_ONNX_LIB_DIR` are only
 needed to run the embedder tests against the real model instead of skipping
 them — see "Environment variables used by tests" below.
