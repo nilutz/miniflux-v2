@@ -10,6 +10,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"miniflux.app/v2/sidecar/internal/embed"
 	"miniflux.app/v2/sidecar/internal/store"
 )
 
@@ -35,22 +36,47 @@ const minCandidates = 50
 const maxCandidates = 2000
 
 // Searcher runs retrieval queries against search.passages and
-// public.entries through a store.Reader. It holds no state of its own
-// beyond that connection, so a single Searcher is safe to share and reuse
-// across concurrent requests — every method opens its own query with its
-// own arguments.
+// public.entries through a store.Reader. Beyond that connection, its only
+// state is what Semantic needs to embed a query — an embed.Embedder and
+// its query cache, both optional (nil when NewSearcher is called without
+// WithEmbedder) — so a single Searcher is safe to share and reuse across
+// concurrent requests: Lexical opens its own query with its own arguments
+// every call, and Semantic's cache is itself safe for concurrent use.
 //
 // It holds store.Reader, not *store.Store: retrieval only ever reads, and
 // the narrower type keeps that true at compile time rather than by
 // convention — nothing in this package can Exec or Begin its way around
 // store's ownership of writes to search.passages.
 type Searcher struct {
-	db store.Reader
+	db       store.Reader
+	embedder embed.Embedder
+	cache    *queryCache
 }
 
-// NewSearcher builds a Searcher over an already-migrated Store.
-func NewSearcher(s *store.Store) *Searcher {
-	return &Searcher{db: s.Reader()}
+// SearcherOption configures a Searcher with dependencies beyond the store
+// every retrieval method needs. WithEmbedder is the only option today.
+type SearcherOption func(*Searcher)
+
+// WithEmbedder attaches e as the Searcher's query embedder, backed by a
+// query cache of defaultQueryCacheSize entries (spec §6.5), so that
+// Semantic has something to embed a query with. A Searcher built without
+// this option can still run Lexical; calling Semantic on it fails with a
+// clear error rather than a nil-pointer panic.
+func WithEmbedder(e embed.Embedder) SearcherOption {
+	return func(s *Searcher) {
+		s.embedder = e
+		s.cache = newQueryCache(defaultQueryCacheSize)
+	}
+}
+
+// NewSearcher builds a Searcher over an already-migrated Store. Pass
+// WithEmbedder to also enable Semantic; Lexical needs no options.
+func NewSearcher(s *store.Store, opts ...SearcherOption) *Searcher {
+	searcher := &Searcher{db: s.Reader()}
+	for _, opt := range opts {
+		opt(searcher)
+	}
+	return searcher
 }
 
 // Lexical ranks passages by BM25 (paradedb.score) against query, applying
