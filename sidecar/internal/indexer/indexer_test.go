@@ -20,6 +20,20 @@ import (
 	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
+// testModelIdentity is the Identity() every fake Embedder in this package's
+// tests returns. These fakes stand in for one configured model across a
+// test — including across a simulated process restart, where a test
+// deliberately swaps one fake Go type for another (e.g.
+// TestBackfillResumesFromCheckpointAfterInterruption's blockOnMarkerEmbedder
+// then countingEmbedder) purely for orchestration, not to represent an
+// actual model change. Giving every fake a distinct identity would make
+// New's store.SetModelIdentity call (spec §13.1) see that swap as a real
+// model change and mark already-indexed entries pending again — exactly
+// the mechanism these tests are not exercising. Model-change behavior
+// itself is covered at the store level, where the test controls modelIdentity
+// directly (see internal/store's TestModelIdentityChangeMakesIndexedEntriesPendingAgain).
+const testModelIdentity = "fake-embedder@test#384"
+
 // fakeEmbedder is a deterministic, call-counting stand-in for the real ONNX
 // Embedder (Task 2). This task tests pipeline wiring, not inference: the
 // call count is what makes "an unchanged/skipped entry is not re-embedded"
@@ -47,8 +61,9 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 	return out, nil
 }
 
-func (f *fakeEmbedder) Dimensions() int { return 384 }
-func (f *fakeEmbedder) Close() error    { return nil }
+func (f *fakeEmbedder) Dimensions() int  { return 384 }
+func (f *fakeEmbedder) Identity() string { return testModelIdentity }
+func (f *fakeEmbedder) Close() error     { return nil }
 
 // batchRecordingEmbedder records how many texts each Embed call received,
 // so a test can observe the actual runtime batch size IndexEntry used
@@ -70,8 +85,9 @@ func (b *batchRecordingEmbedder) Embed(_ context.Context, texts []string) ([][]f
 	return out, nil
 }
 
-func (b *batchRecordingEmbedder) Dimensions() int { return 384 }
-func (b *batchRecordingEmbedder) Close() error    { return nil }
+func (b *batchRecordingEmbedder) Dimensions() int  { return 384 }
+func (b *batchRecordingEmbedder) Identity() string { return testModelIdentity }
+func (b *batchRecordingEmbedder) Close() error     { return nil }
 
 func (b *batchRecordingEmbedder) sizes() []int {
 	b.mu.Lock()

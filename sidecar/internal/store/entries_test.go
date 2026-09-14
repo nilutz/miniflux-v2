@@ -381,6 +381,11 @@ func pendingSnapshot(t *testing.T, s *Store, afterID int64) (count int64, ids []
 	}
 	defer tx.Rollback()
 
+	// Deliberately excludes "AND NOT e.hidden" or any equivalent: spec
+	// §13.3 requires a hidden entry (an article a reader marked "not
+	// interested") to stay searchable, so it stays fully eligible for
+	// (re-)indexing here too. Do not add a hidden filter to this
+	// predicate, or to production's copies below.
 	const pendingWhere = `
 		FROM entries e
 		LEFT JOIN search.entry_index_state s ON s.entry_id = e.id
@@ -388,15 +393,15 @@ func pendingSnapshot(t *testing.T, s *Store, afterID int64) (count int64, ids []
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5($2 || coalesce(e.title, '') || coalesce(e.content, ''))
+		    OR s.content_hash <> md5($2 || $3 || coalesce(e.title, '') || coalesce(e.content, ''))
 		  )
 	`
 
-	if err := tx.QueryRow(`SELECT count(*) `+pendingWhere, afterID, pipelineVersion).Scan(&count); err != nil {
+	if err := tx.QueryRow(`SELECT count(*) `+pendingWhere, afterID, pipelineVersion, modelIdentity).Scan(&count); err != nil {
 		t.Fatalf("unable to count pending entries: %v", err)
 	}
 
-	rows, err := tx.Query(`SELECT e.id `+pendingWhere, afterID, pipelineVersion)
+	rows, err := tx.Query(`SELECT e.id `+pendingWhere, afterID, pipelineVersion, modelIdentity)
 	if err != nil {
 		t.Fatalf("unable to list pending entries: %v", err)
 	}
@@ -587,6 +592,195 @@ func TestPipelineVersionBumpMakesIndexedEntriesPendingAgain(t *testing.T) {
 	}
 	if count < 1 {
 		t.Fatalf("expected PendingEntryCount to count the bumped entry, got %d", count)
+	}
+}
+
+// TestModelIdentityChangeMakesIndexedEntriesPendingAgain is
+// TestPipelineVersionBumpMakesIndexedEntriesPendingAgain's counterpart for
+// the embedding model (spec §13.1). contentHash did not used to cover the
+// configured model at all: switching from one embedding model to another
+// changed no hash, marked nothing pending, and left search.passages holding
+// vectors from two different models in one HNSW graph, where cosine
+// similarity is meaningless. Folding the model's identity into the hash
+// exactly like PipelineVersion closes that gap the same way a pipeline
+// change already does.
+func TestModelIdentityChangeMakesIndexedEntriesPendingAgain(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntry(t, s, "model-identity-bump", "<p>Content that never changes at all.</p>")
+
+	original := modelIdentity
+	t.Cleanup(func() { modelIdentity = original })
+	modelIdentity = "model-a@rev1#384"
+
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("EntryForIndexing failed: %v", err)
+	}
+	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
+		Ordinal: 0, Text: "Content that never changes at all.", CharStart: 0, CharEnd: 34,
+		Source: "content", Embedding: make([]float32, 384),
+	}}); err != nil {
+		t.Fatalf("ReplacePassages failed: %v", err)
+	}
+
+	if containsID(pendingIDsFrom(t, s, entryID-1), entryID) {
+		t.Fatalf("entry #%d should not be pending right after being indexed under model A", entryID)
+	}
+
+	// Switch to model B: same pipeline version, same entry content, only
+	// the configured model's identity changes.
+	modelIdentity = "model-b@rev1#384"
+
+	if !containsID(pendingIDsFrom(t, s, entryID-1), entryID) {
+		t.Fatalf("entry #%d should be pending again after the configured model changed, but PendingEntryIDs did not return it", entryID)
+	}
+
+	// The Go-side hash must move with it too, or a re-index under model B
+	// would write back model A's hash and the entry would be re-offered
+	// forever.
+	rehashed, err := s.EntryForIndexing(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("EntryForIndexing after model change failed: %v", err)
+	}
+	if rehashed.ContentHash == entry.ContentHash {
+		t.Fatalf("expected EntryForIndexing to compute a different hash after the model changed, got %q both times", entry.ContentHash)
+	}
+
+	count, err := s.PendingEntryCount(entryID - 1)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	if count < 1 {
+		t.Fatalf("expected PendingEntryCount to count the entry after the model changed, got %d", count)
+	}
+}
+
+// TestModelIdentityUnchangedLeavesIndexedEntryNotPending is the negative
+// case spec §13.1 requires alongside the bump test above: an entry indexed
+// under the currently configured model must NOT be re-offered just because
+// PendingEntryIDs/PendingEntryCount were asked again with nothing having
+// changed. Without this check, a hash formula that folded in something
+// unstable (e.g. depended on map iteration order, or on anything besides
+// the model's own name/revision/dimensions) could pass the bump test above
+// while still spuriously re-queuing every already-indexed entry on every
+// call.
+func TestModelIdentityUnchangedLeavesIndexedEntryNotPending(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntry(t, s, "model-identity-unchanged", "<p>Stable content, stable model.</p>")
+
+	original := modelIdentity
+	t.Cleanup(func() { modelIdentity = original })
+	modelIdentity = "model-a@rev1#384"
+
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("EntryForIndexing failed: %v", err)
+	}
+	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
+		Ordinal: 0, Text: "Stable content, stable model.", CharStart: 0, CharEnd: 30,
+		Source: "content", Embedding: make([]float32, 384),
+	}}); err != nil {
+		t.Fatalf("ReplacePassages failed: %v", err)
+	}
+
+	if containsID(pendingIDsFrom(t, s, entryID-1), entryID) {
+		t.Fatalf("entry #%d should not be pending right after indexing", entryID)
+	}
+
+	// Re-check with the same model configured (nothing changed): the
+	// entry must still be absent from the pending set, and its hash must
+	// still compute the same.
+	if containsID(pendingIDsFrom(t, s, entryID-1), entryID) {
+		t.Fatalf("entry #%d became pending again with the model unchanged", entryID)
+	}
+
+	rehashed, err := s.EntryForIndexing(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("EntryForIndexing failed: %v", err)
+	}
+	if rehashed.ContentHash != entry.ContentHash {
+		t.Fatalf("hash changed with nothing but re-checking: %q vs %q", entry.ContentHash, rehashed.ContentHash)
+	}
+
+	count, err := s.PendingEntryCount(entryID - 1)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected PendingEntryCount to be 0 for this scope with the model unchanged, got %d", count)
+	}
+}
+
+// TestPendingEntryIDsAndPendingEntryCountAgreeAfterModelIdentityChange is
+// the model-identity counterpart of TestPendingEntryCountMatchesPendingEntryIDs,
+// deliberately calling the two real exported methods directly rather than
+// a third hand-copied SQL fragment: PendingEntryIDs and PendingEntryCount
+// each carry their own copy of the "pending" predicate in production code,
+// and an earlier task in this project already had to fix a drift between
+// exactly those two copies. Comparing the actual methods, not a test-side
+// re-derivation of the query, is what would have caught that drift.
+func TestPendingEntryIDsAndPendingEntryCountAgreeAfterModelIdentityChange(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntry(t, s, "model-identity-ids-count-agree", "<p>Content for the agreement check.</p>")
+	afterID := entryID - 1
+
+	original := modelIdentity
+	t.Cleanup(func() { modelIdentity = original })
+	modelIdentity = "model-a@rev1#384"
+
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("EntryForIndexing failed: %v", err)
+	}
+	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
+		Ordinal: 0, Text: "Content for the agreement check.", CharStart: 0, CharEnd: 33,
+		Source: "content", Embedding: make([]float32, 384),
+	}}); err != nil {
+		t.Fatalf("ReplacePassages failed: %v", err)
+	}
+
+	// Before a model change: both methods must agree the entry is not
+	// pending.
+	ids, err := s.PendingEntryIDs(afterID, 100)
+	if err != nil {
+		t.Fatalf("PendingEntryIDs failed: %v", err)
+	}
+	count, err := s.PendingEntryCount(afterID)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	if containsID(ids, entryID) || count != 0 {
+		t.Fatalf("expected both methods to agree the entry is not pending before a model change; PendingEntryIDs=%v PendingEntryCount=%d", ids, count)
+	}
+
+	// After a model change: both methods must agree the entry IS pending.
+	modelIdentity = "model-b@rev1#384"
+
+	ids, err = s.PendingEntryIDs(afterID, 100)
+	if err != nil {
+		t.Fatalf("PendingEntryIDs failed: %v", err)
+	}
+	count, err = s.PendingEntryCount(afterID)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	if !containsID(ids, entryID) {
+		t.Fatalf("expected PendingEntryIDs to include #%d after the model changed, got %v", entryID, ids)
+	}
+	if count != int64(len(ids)) {
+		t.Fatalf("expected PendingEntryCount (%d) to equal len(PendingEntryIDs) (%d) after the model changed", count, len(ids))
 	}
 }
 

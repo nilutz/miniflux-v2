@@ -127,7 +127,20 @@ type Indexer struct {
 
 // New builds an Indexer over the given store and embedder, with the
 // embedding batch size starting at DefaultBatchSize.
+//
+// It records e's Identity() with the store (store.SetModelIdentity) before
+// returning, so that contentHash folds in the model actually configured
+// (spec §13.1) from the first call onward — an Indexer whose embedder's
+// identity was never recorded would leave every entry's expected hash
+// computed as if no model, or the wrong one, were configured. e may be
+// nil for a config-only Backfill built solely to exercise live-editable
+// settings (ApplyConfig/RuntimeConfig), which never calls IndexEntry and
+// so never needs a real embedder; that path leaves the recorded identity
+// untouched rather than overwriting it with one derived from nothing.
 func New(s *store.Store, e embed.Embedder) *Indexer {
+	if e != nil {
+		store.SetModelIdentity(e.Identity())
+	}
 	return &Indexer{store: s, embedder: e, batchSize: DefaultBatchSize}
 }
 

@@ -28,8 +28,9 @@ func (f *countingFakeEmbedder) Embed(_ context.Context, texts []string) ([][]flo
 	return out, nil
 }
 
-func (f *countingFakeEmbedder) Dimensions() int { return 3 }
-func (f *countingFakeEmbedder) Close() error    { return nil }
+func (f *countingFakeEmbedder) Dimensions() int  { return 3 }
+func (f *countingFakeEmbedder) Identity() string { return "counting-fake-embedder@test#3" }
+func (f *countingFakeEmbedder) Close() error     { return nil }
 
 // TestEmbedCachedEmbedsRepeatedQueryOnce is the cache's whole reason to
 // exist (spec §6.5): the same query text embedded twice must invoke the

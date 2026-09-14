@@ -162,8 +162,9 @@ func (f *fixedVectorEmbedder) Embed(_ context.Context, texts []string) ([][]floa
 	return out, nil
 }
 
-func (f *fixedVectorEmbedder) Dimensions() int { return 384 }
-func (f *fixedVectorEmbedder) Close() error    { return nil }
+func (f *fixedVectorEmbedder) Dimensions() int  { return 384 }
+func (f *fixedVectorEmbedder) Identity() string { return "fixed-vector-embedder@test#384" }
+func (f *fixedVectorEmbedder) Close() error     { return nil }
 
 // erroringEmbedder always fails, simulating an inference backend that is
 // down or misconfigured.
@@ -172,8 +173,9 @@ type erroringEmbedder struct{ err error }
 func (e *erroringEmbedder) Embed(_ context.Context, _ []string) ([][]float32, error) {
 	return nil, e.err
 }
-func (e *erroringEmbedder) Dimensions() int { return 384 }
-func (e *erroringEmbedder) Close() error    { return nil }
+func (e *erroringEmbedder) Dimensions() int  { return 384 }
+func (e *erroringEmbedder) Identity() string { return "erroring-embedder@test#384" }
+func (e *erroringEmbedder) Close() error     { return nil }
 
 // countingReader is a store.Reader whose QueryContext/QueryRowContext
 // count how many times they were invoked and then fail, so a test can

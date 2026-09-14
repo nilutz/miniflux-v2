@@ -65,8 +65,9 @@ func (f *failMarkerEmbedder) Embed(_ context.Context, texts []string) ([][]float
 	return out, nil
 }
 
-func (f *failMarkerEmbedder) Dimensions() int { return 384 }
-func (f *failMarkerEmbedder) Close() error    { return nil }
+func (f *failMarkerEmbedder) Dimensions() int  { return 384 }
+func (f *failMarkerEmbedder) Identity() string { return testModelIdentity }
+func (f *failMarkerEmbedder) Close() error     { return nil }
 
 // flippableEmbedder fails Embed for any batch containing the marker text
 // until healthy is set true, and succeeds otherwise (marked or not). Used
@@ -98,8 +99,9 @@ func (f *flippableEmbedder) Embed(_ context.Context, texts []string) ([][]float3
 	return out, nil
 }
 
-func (f *flippableEmbedder) Dimensions() int { return 384 }
-func (f *flippableEmbedder) Close() error    { return nil }
+func (f *flippableEmbedder) Dimensions() int  { return 384 }
+func (f *flippableEmbedder) Identity() string { return testModelIdentity }
+func (f *flippableEmbedder) Close() error     { return nil }
 
 // blockingEmbedder deliberately ignores ctx — it just sleeps for delay,
 // unconditionally, before returning success. This is what a slow but
@@ -127,8 +129,9 @@ func (b *blockingEmbedder) Embed(_ context.Context, texts []string) ([][]float32
 	return out, nil
 }
 
-func (b *blockingEmbedder) Dimensions() int { return 384 }
-func (b *blockingEmbedder) Close() error    { return nil }
+func (b *blockingEmbedder) Dimensions() int  { return 384 }
+func (b *blockingEmbedder) Identity() string { return testModelIdentity }
+func (b *blockingEmbedder) Close() error     { return nil }
 
 // boundedUpTo returns an *atomic.Int64 initialized to id, for runLive's
 // upTo parameter. Every test below except TestRunLiveExitsOnContext-

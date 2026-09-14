@@ -67,23 +67,62 @@ const PipelineVersion = "3"
 // changes it.
 var pipelineVersion = PipelineVersion
 
+// modelIdentity is the identity (embed.Embedder.Identity(), per spec
+// §13.1) of the embedding model currently configured to produce vectors,
+// folded into contentHash exactly like pipelineVersion. Before this
+// existed, contentHash covered only the pipeline version, title and
+// content — switching embedding models changed no hash, marked nothing
+// pending, and left search.passages holding vectors from two different
+// models in one HNSW graph, where cosine similarity between them is
+// meaningless. This is the same mechanism PipelineVersion already uses,
+// extended to cover the component that actually produces the vectors.
+//
+// A package-level var, not a parameter threaded through EntryForIndexing,
+// PendingEntryIDs and PendingEntryCount, for the same reason
+// pipelineVersion is one: exactly one value compared on both the Go side
+// and the SQL side, set once via SetModelIdentity by whoever constructs
+// the configured Embedder (indexer.New), and otherwise left alone.
+// Production sets it once at startup and never mutates it afterwards;
+// this package's own tests bump it directly, exactly like
+// pipelineVersion, to exercise the "model changed" path.
+//
+// Deliberately not exported as a var itself (SetModelIdentity is the only
+// way to change it from outside this package) so that nothing outside
+// this file can set it to something that does not actually come from an
+// Embedder's own Identity().
+var modelIdentity string
+
+// SetModelIdentity records the identity of the embedding model currently
+// configured to produce vectors (embed.Embedder.Identity()), so that
+// switching models — a different remote host, a different revision, a
+// different width entirely — marks every entry pending on its own,
+// exactly as a PipelineVersion bump already does (spec §13.1). Call it
+// once at startup with the configured Embedder's Identity(); leaving it
+// unset is indistinguishable from every configured model sharing the same
+// (empty) identity, which reintroduces the exact gap this exists to close.
+func SetModelIdentity(identity string) {
+	modelIdentity = identity
+}
+
 // contentHash returns the hash recorded in
 // search.entry_index_state.content_hash for a given entry title and
-// content. It covers the pipeline version, the title and the content, so a
-// pipeline change, a title edit, or a content edit each invalidate stored
-// passages exactly like one another (see PipelineVersion) — a title-only
-// edit must re-offer the entry too, since it changes what the (task 1.5)
-// title passage should contain.
+// content. It covers the pipeline version, the configured embedding
+// model's identity, the title and the content, so a pipeline change, a
+// model change, a title edit, or a content edit each invalidate stored
+// passages exactly like one another (see PipelineVersion and
+// modelIdentity) — a title-only edit must re-offer the entry too, since it
+// changes what the (task 1.5) title passage should contain.
 //
-// It must agree, byte for byte, with the hash PendingEntryIDs computes in
-// SQL, md5(pipeline version || coalesce(entry title, ”) || coalesce(entry
-// content, ”)) — both sides hash the empty string for a NULL/absent
-// column — or a changed entry could be silently missed, or an unchanged one
-// endlessly re-queued. Title is never NULL in practice (public.entries.title
-// is NOT NULL), but coalescing it on the SQL side costs nothing and keeps
-// the two sides symmetric with how content is already handled.
+// It must agree, byte for byte, with the hash PendingEntryIDs and
+// PendingEntryCount compute in SQL, md5(pipeline version || model identity
+// || coalesce(entry title, ”) || coalesce(entry content, ”)) — both sides
+// hash the empty string for a NULL/absent column — or a changed entry
+// could be silently missed, or an unchanged one endlessly re-queued. Title
+// is never NULL in practice (public.entries.title is NOT NULL), but
+// coalescing it on the SQL side costs nothing and keeps the two sides
+// symmetric with how content is already handled.
 func contentHash(title, content string) string {
-	sum := md5.Sum([]byte(pipelineVersion + title + content))
+	sum := md5.Sum([]byte(pipelineVersion + modelIdentity + title + content))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -116,8 +155,16 @@ func (s *Store) EntryForIndexing(ctx context.Context, entryID int64) (*Entry, er
 // PendingEntryIDs returns up to limit entry ids greater than afterID that
 // need (re-)indexing: entries absent from entry_index_state, entries whose
 // last attempt failed, or entries whose title or content has changed since
-// they were last indexed. Ascending id order lets the caller checkpoint on
-// the last id it processed.
+// they were last indexed (which also covers a pipeline or model-identity
+// change — see contentHash — since that changes every entry's expected
+// hash without touching the entry itself). Ascending id order lets the
+// caller checkpoint on the last id it processed.
+//
+// Deliberately has no "AND NOT e.hidden" or equivalent: spec §13.3 requires
+// a hidden entry (one a reader marked "not interested") to remain
+// searchable, so it must remain eligible for (re-)indexing here too. Do
+// not add a hidden filter to this predicate or to PendingEntryCount's copy
+// below.
 func (s *Store) PendingEntryIDs(afterID int64, limit int) ([]int64, error) {
 	query := `
 		SELECT e.id
@@ -127,13 +174,13 @@ func (s *Store) PendingEntryIDs(afterID int64, limit int) ([]int64, error) {
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5($3 || coalesce(e.title, '') || coalesce(e.content, ''))
+		    OR s.content_hash <> md5($3 || $4 || coalesce(e.title, '') || coalesce(e.content, ''))
 		  )
 		ORDER BY e.id ASC
 		LIMIT $2
 	`
 
-	rows, err := s.db.Query(query, afterID, limit, pipelineVersion)
+	rows, err := s.db.Query(query, afterID, limit, pipelineVersion, modelIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("store: unable to fetch pending entry ids: %w", err)
 	}
@@ -180,6 +227,10 @@ func (s *Store) PendingEntryIDs(afterID int64, limit int) ([]int64, error) {
 // against in the tests — an approximation with no exact counterpart to
 // check it is an approximation of nothing. Progress and ETA display go
 // through PendingEntryCountApprox instead.
+//
+// Deliberately has no "AND NOT e.hidden" or equivalent — see
+// PendingEntryIDs' doc comment; the same spec §13.3 requirement applies
+// here too.
 func (s *Store) PendingEntryCount(afterID int64) (int64, error) {
 	var count int64
 	err := s.db.QueryRow(`
@@ -190,9 +241,9 @@ func (s *Store) PendingEntryCount(afterID int64) (int64, error) {
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5($2 || coalesce(e.title, '') || coalesce(e.content, ''))
+		    OR s.content_hash <> md5($2 || $3 || coalesce(e.title, '') || coalesce(e.content, ''))
 		  )
-	`, afterID, pipelineVersion).Scan(&count)
+	`, afterID, pipelineVersion, modelIdentity).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("store: unable to count pending entries: %w", err)
 	}

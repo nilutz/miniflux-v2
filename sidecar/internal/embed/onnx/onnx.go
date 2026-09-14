@@ -10,8 +10,11 @@ package onnx // import "miniflux.app/v2/sidecar/internal/embed/onnx"
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -63,6 +66,7 @@ type ONNXConfig struct {
 type onnxEmbedder struct {
 	session  *hugot.Session
 	pipeline *pipelines.FeatureExtractionPipeline
+	identity string
 }
 
 // NewONNX creates an Embedder that runs the bge-small-en-v1.5 model through
@@ -75,6 +79,12 @@ type onnxEmbedder struct {
 // binary, which BackendName and TestBackendIsORT catch (spec §6.7).
 func NewONNX(cfg ONNXConfig) (embed.Embedder, error) {
 	modelRoot, onnxFilename := resolveModelRoot(cfg.ModelPath)
+
+	revision, err := modelRevision(cfg.ModelPath)
+	if err != nil {
+		return nil, fmt.Errorf("embed: determine model revision: %w", err)
+	}
+	identity := embed.Identity(filepath.Base(modelRoot), revision, dimensions)
 
 	var sessionOpts []options.WithOption
 	if cfg.ONNXLibraryDir != "" {
@@ -113,9 +123,36 @@ func NewONNX(cfg ONNXConfig) (embed.Embedder, error) {
 		slog.String("model_root", modelRoot),
 		slog.String("onnx_filename", onnxFilename),
 		slog.Int("dimensions", dimensions),
+		slog.String("identity", identity),
 	)
 
-	return &onnxEmbedder{session: session, pipeline: pipeline}, nil
+	return &onnxEmbedder{session: session, pipeline: pipeline, identity: identity}, nil
+}
+
+// modelRevision derives Identity's "revision" component from the actual
+// model weights file's contents — its sha256, shortened like a git short
+// hash — rather than trusting the model directory's name or the path
+// alone. This is the ONNX implementation's answer to "where is the
+// model's revision knowable from": nothing in this package's configured
+// inputs names a Hugging Face revision explicitly (ONNXConfig is just a
+// filesystem path), but the file's own bytes are always available and are
+// the one thing that is guaranteed to change if a different checkpoint or
+// a re-quantization is dropped in under the same path, and guaranteed NOT
+// to change if the operator merely moves or renames it (spec §13.1 — a
+// same-model swap must not falsely mark the corpus pending, and a real
+// model swap must never go undetected).
+func modelRevision(onnxPath string) (string, error) {
+	f, err := os.Open(onnxPath)
+	if err != nil {
+		return "", fmt.Errorf("embed: open model file for revision hash: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("embed: hash model file: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12], nil
 }
 
 // resolveModelRoot walks up from an ONNX model file to the directory hugot
@@ -158,6 +195,9 @@ func (e *onnxEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, 
 
 // Dimensions implements Embedder.
 func (e *onnxEmbedder) Dimensions() int { return dimensions }
+
+// Identity implements Embedder.
+func (e *onnxEmbedder) Identity() string { return e.identity }
 
 // Close implements Embedder.
 func (e *onnxEmbedder) Close() error { return e.session.Destroy() }

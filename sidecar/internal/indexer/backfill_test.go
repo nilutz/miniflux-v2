@@ -77,8 +77,9 @@ func (e *countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32
 	}
 	return out, nil
 }
-func (e *countingEmbedder) Dimensions() int { return 384 }
-func (e *countingEmbedder) Close() error    { return nil }
+func (e *countingEmbedder) Dimensions() int  { return 384 }
+func (e *countingEmbedder) Identity() string { return testModelIdentity }
+func (e *countingEmbedder) Close() error     { return nil }
 
 // blockOnMarkerEmbedder behaves like countingEmbedder, except that while
 // block is true, a call whose text contains marker blocks on ctx.Done()
@@ -119,8 +120,9 @@ func (e *blockOnMarkerEmbedder) Embed(ctx context.Context, texts []string) ([][]
 	}
 	return out, nil
 }
-func (e *blockOnMarkerEmbedder) Dimensions() int { return 384 }
-func (e *blockOnMarkerEmbedder) Close() error    { return nil }
+func (e *blockOnMarkerEmbedder) Dimensions() int  { return 384 }
+func (e *blockOnMarkerEmbedder) Identity() string { return testModelIdentity }
+func (e *blockOnMarkerEmbedder) Close() error     { return nil }
 
 // variableDelayEmbedder always succeeds, sleeping delay (settable live,
 // via an atomic so a test can change it between phases without racing the
@@ -141,8 +143,9 @@ func (d *variableDelayEmbedder) Embed(_ context.Context, texts []string) ([][]fl
 	}
 	return out, nil
 }
-func (d *variableDelayEmbedder) Dimensions() int { return 384 }
-func (d *variableDelayEmbedder) Close() error    { return nil }
+func (d *variableDelayEmbedder) Dimensions() int  { return 384 }
+func (d *variableDelayEmbedder) Identity() string { return testModelIdentity }
+func (d *variableDelayEmbedder) Close() error     { return nil }
 
 // runStartAsync runs a Backfill's start in a goroutine and returns a
 // channel that receives its error when it returns.
