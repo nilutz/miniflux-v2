@@ -1,5 +1,10 @@
 module miniflux.app/v2/sidecar
 
+// Forced to 1.27.0 (from 1.26.0) by github.com/knights-analytics/hugot
+// v0.7.8, which itself declares go 1.27.0 — Go's module graph rules make a
+// dependency's go directive a hard floor on this module's own, so pinning
+// that hugot version and holding this at 1.26.0 are mutually exclusive.
+// Do not lower this while hugot v0.7.8 is required.
 go 1.27.0
 
 require (

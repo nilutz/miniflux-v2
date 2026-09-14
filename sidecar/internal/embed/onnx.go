@@ -5,6 +5,7 @@ package embed // import "miniflux.app/v2/sidecar/internal/embed"
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -39,11 +40,19 @@ type ONNXConfig struct {
 
 // onnxEmbedder is an Embedder backed by a hugot ONNX Runtime session running
 // the pinned bge-small-en-v1.5 model. One session and one pipeline are
-// shared across every Embed call: the spike measured its best throughput
-// (33.9 passages/sec) with two goroutines calling RunPipeline concurrently
-// against a single unconstrained session, so Embed is safe to call from
-// multiple goroutines and deliberately does no additional locking of its
-// own — the controller in a later task depends on that.
+// shared across every Embed call, and Embed deliberately does no additional
+// locking of its own — the controller in a later task depends on that.
+//
+// This is safe, not merely fast: hugot's RunPipeline allocates a fresh
+// PipelineBatch and a fresh set of input/output tensors on every call, so
+// concurrent calls share no mutable per-call state, only the read-mostly
+// model weights and the ORT session — and ONNX Runtime documents
+// Session.Run as thread-safe under exactly that condition (no tensors
+// shared across concurrent calls). The spike separately measured that
+// sharing one session across two goroutines with ORT's default threading
+// unconstrained also happens to be the fastest configuration (33.9
+// passages/sec, against 11.7 when pinning threads per hugot's own README
+// advice) — a performance result, not the safety argument.
 type onnxEmbedder struct {
 	session  *hugot.Session
 	pipeline *pipelines.FeatureExtractionPipeline
@@ -86,8 +95,10 @@ func NewONNX(cfg ONNXConfig) (Embedder, error) {
 	}
 	pipeline, err := hugot.NewPipeline(session, pipelineConfig)
 	if err != nil {
-		_ = session.Destroy()
-		return nil, fmt.Errorf("embed: create feature-extraction pipeline: %w", err)
+		return nil, errors.Join(
+			fmt.Errorf("embed: create feature-extraction pipeline: %w", err),
+			session.Destroy(),
+		)
 	}
 
 	slog.Info("sidecar: embedder ready",
