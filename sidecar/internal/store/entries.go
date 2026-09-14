@@ -150,8 +150,14 @@ func (s *Store) PendingEntryIDs(afterID int64, limit int) ([]int64, error) {
 // index, rather than scanning and hashing the whole table on every call.
 // Passing 0 still scans and hashes everything, same as before — this is a
 // partial mitigation for callers that can bound themselves, not a fix for
-// the worst case (a caller must still not call this on every request; see
-// indexer.Backfill.Stats' own TTL-memoised use of it).
+// the worst case.
+//
+// Nothing on a hot path calls this. It is deliberately kept as the
+// REFERENCE definition of "pending", sharing its predicate with
+// PendingEntryIDs, and it is what PendingEntryCountApprox is pinned
+// against in the tests — an approximation with no exact counterpart to
+// check it is an approximation of nothing. Progress and ETA display go
+// through PendingEntryCountApprox instead.
 func (s *Store) PendingEntryCount(afterID int64) (int64, error) {
 	var count int64
 	err := s.db.QueryRow(`
