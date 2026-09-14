@@ -47,7 +47,7 @@ func longFixtureBody() string {
 // hash and re-offers the whole corpus for re-indexing, then update the
 // digest below.
 func TestPipelineOutputDigestIsStable(t *testing.T) {
-	const wantDigest = "4313cf3924a01760af583f6e43f913d7982d34f93d4ee364b16f039a188b1ecf"
+	const wantDigest = "2da0a12371619d2f8b8d50e50bdd7f59b5ffa1096221d82153262604922c3806"
 
 	h := sha256.New()
 	for _, input := range pipelineFixtures {

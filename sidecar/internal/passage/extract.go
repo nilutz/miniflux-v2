@@ -32,13 +32,26 @@ var skippedElements = map[string]bool{
 	"script": true, "style": true, "noscript": true,
 }
 
-var whitespaceRun = regexp.MustCompile(`\s+`)
+// whitespaceRun matches a run of whitespace to collapse. Go's RE2 \s is
+// ASCII-only ([\t\n\f\r ]), which is not enough for article HTML: a
+// sanitised entry routinely contains &nbsp;, which the HTML parser decodes
+// to U+00A0, and U+00A0 would survive collapsing as a literal character —
+// landing inside passage text, inside the BM25 index, and inside the
+// char_start/char_end offsets derived from it. \p{Z} covers U+00A0 and
+// every other Unicode space separator; U+FEFF (a zero-width no-break
+// space, category Cf) is added explicitly because it is a common BOM
+// leftover in scraped content and is not in \p{Z}.
+//
+// strings.TrimSpace already trims all of these — unicode.IsSpace includes
+// U+00A0 and U+0085 — so trimming and collapsing now agree.
+var whitespaceRun = regexp.MustCompile(`[\s\p{Z}\x{feff}]+`)
 
 // ExtractText converts sanitised article HTML into plain text. Block-level
 // elements are separated by a space so adjacent blocks never run their words
 // together; script, style and noscript subtrees and comments are dropped
 // entirely; entities are decoded by the HTML parser itself. All whitespace
-// runs collapse to a single space and the result is trimmed.
+// runs — Unicode included, see whitespaceRun — collapse to a single ASCII
+// space and the result is trimmed.
 func ExtractText(input string) string {
 	doc, err := html.Parse(strings.NewReader(input))
 	if err != nil {

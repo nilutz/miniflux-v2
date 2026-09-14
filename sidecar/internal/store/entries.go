@@ -45,7 +45,9 @@ type Entry struct {
 // exists to fail loudly and remind you.
 //
 //	1 — initial pipeline (task 3).
-const PipelineVersion = "1"
+//	2 — ExtractText collapses Unicode whitespace (U+00A0, the rest of
+//	    \p{Z}, and U+FEFF), not only ASCII \s.
+const PipelineVersion = "2"
 
 // pipelineVersion is the value actually used by contentHash and by the
 // pending-set predicate. It is a var, not the constant directly, purely so
