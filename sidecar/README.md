@@ -45,6 +45,58 @@ installs whose default `search_path` excludes `public`. `pg_search` needs no
 such qualification: its control file always installs it into the `paradedb`
 schema regardless of `search_path`.
 
+### Keep `search.passages` vacuumed, or the HNSW index quietly under-returns
+
+`passages_embedding_idx` is an HNSW index, and an HNSW scan returns *at
+most* `hnsw.ef_search` tuples — dead ones included. Every dead tuple the
+scan walks past is one row the query does not get back, with no error and
+no warning: the result is simply short.
+
+Re-indexing churns this table hard (a full re-index deletes and reinserts
+every passage), so the deficit accumulates fast if autovacuum falls behind.
+Measured directly against this corpus after several re-index cycles — 5,681
+live passages, 1,066 dead tuples, autovacuum two hours stale — a forced
+index scan returned a constant **31 rows fewer than asked for at every
+`ef_search`**:
+
+| `ef_search` | rows returned, before `VACUUM` | after `VACUUM` |
+|---|---|---|
+| 40 | 9 | 40 |
+| 250 | 219 | 250 |
+| 1000 | 969 | 1000 |
+
+A plain `VACUUM search.passages` (not `VACUUM FULL`, no `REINDEX`) restored
+exact counts at every width. The index itself was healthy the whole time —
+`indisvalid`, `indisready`, correctly ordered results — it was only ever
+returning a truncated prefix of them.
+
+So: after any bulk re-index, vacuum the table.
+
+```sql
+VACUUM (VERBOSE) search.passages;
+```
+
+Two related knobs, and why neither is the answer here:
+
+- **`REINDEX`** is not needed. The graph was never corrupt; rebuilding it
+  costs minutes and fixes nothing a vacuum does not.
+- **`hnsw.iterative_scan = 'relaxed_order'`** *does* mask the symptom (it
+  makes the scan keep going until the `LIMIT` is satisfied, so the same
+  query returned a full 40 rows at `ef_search = 40` even un-vacuumed). It is
+  the wrong instrument for this: it hides an under-returning index behind
+  extra scan work rather than fixing the cause, and it trades away the
+  strict distance ordering the `relaxed_order` name is warning about. Vacuum
+  first; reach for iterative scan only if a genuinely narrow `Filters`
+  predicate — not dead tuples — is starving the candidate set.
+
+At the current corpus size the index is not actually load-bearing: with
+5,681 passages (~9 MB of heap) the planner prefers a sequential scan plus a
+top-N sort for anything past a very small `LIMIT`, and measures about the
+same as the index either way (~7-11 ms warm, both paths). That is a
+reasonable planner choice at this scale, not a misconfiguration — the 22 MB
+index earns its keep as the corpus grows, and the vacuum discipline above is
+what keeps it correct when it does.
+
 ## The embedder (`internal/embed`, `internal/embed/onnx`)
 
 `internal/embed` holds the small, pure-Go `Embedder` interface
