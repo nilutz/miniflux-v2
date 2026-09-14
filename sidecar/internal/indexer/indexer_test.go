@@ -89,6 +89,32 @@ func (b *batchRecordingEmbedder) Dimensions() int  { return 384 }
 func (b *batchRecordingEmbedder) Identity() string { return testModelIdentity }
 func (b *batchRecordingEmbedder) Close() error     { return nil }
 
+// distinctIdentityEmbedder is a minimal Embedder whose Identity() is
+// whatever the test sets, unlike every other fake in this package (which
+// deliberately share testModelIdentity so a simulated restart doesn't look
+// like a model change). It exists solely for
+// TestNewWiresEmbedderIdentityIntoContentHash, which needs two fakes with
+// genuinely different identities to prove that New's
+// store.SetModelIdentity(e.Identity()) call -- the only production path
+// connecting a configured embedder to contentHash (spec §13.1) -- actually
+// runs, rather than assuming it does because the store-level tests already
+// exercise the hash math by setting the unexported var directly.
+type distinctIdentityEmbedder struct {
+	identity string
+}
+
+func (d *distinctIdentityEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, 384)
+	}
+	return out, nil
+}
+
+func (d *distinctIdentityEmbedder) Dimensions() int  { return 384 }
+func (d *distinctIdentityEmbedder) Identity() string { return d.identity }
+func (d *distinctIdentityEmbedder) Close() error     { return nil }
+
 func (b *batchRecordingEmbedder) sizes() []int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -659,6 +685,74 @@ func TestIndexEntryUnchangedIsNotReembedded(t *testing.T) {
 	}
 	if fe.calls.Load() != callsAfterFirst {
 		t.Fatalf("expected no additional embed calls for an unchanged entry, got %d -> %d", callsAfterFirst, fe.calls.Load())
+	}
+}
+
+// TestNewWiresEmbedderIdentityIntoContentHash proves the production wiring
+// that connects a configured Embedder to contentHash (spec §13.1), rather
+// than assuming it: New's call to store.SetModelIdentity(e.Identity()) is
+// the ONLY place in production code that ever does this, and every other
+// test in this package deliberately shares one testModelIdentity constant
+// across its fakes (see distinctIdentityEmbedder's doc comment) — so
+// nothing else here would notice if that call were deleted, reordered to
+// run too late, or a second Indexer were built without updating the
+// identity. This test builds two Indexers, via New, over two embedders
+// with genuinely different identities, and checks the result through the
+// exported store.PendingEntryIDs/PendingEntryCount — never by poking the
+// unexported modelIdentity var directly, which is exactly what would keep
+// passing if the wiring were broken.
+func TestNewWiresEmbedderIdentityIntoContentHash(t *testing.T) {
+	s, db := testEnv(t)
+
+	entryID := createTestEntry(t, db, "identity-wiring",
+		"<p>Content for the New-wires-identity test, held fixed throughout.</p>")
+	afterID := entryID - 1
+
+	idxA := New(s, &distinctIdentityEmbedder{identity: "model-a@rev1#384"})
+	if err := idxA.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry under model A failed: %v", err)
+	}
+	if entryStatus(t, db, entryID) != "ok" {
+		t.Fatalf("expected entry #%d to be 'ok' after indexing under model A, got %q", entryID, entryStatus(t, db, entryID))
+	}
+
+	idsBefore, err := s.PendingEntryIDs(afterID, 100)
+	if err != nil {
+		t.Fatalf("PendingEntryIDs failed: %v", err)
+	}
+	for _, id := range idsBefore {
+		if id == entryID {
+			t.Fatalf("entry #%d should not be pending right after being indexed under model A", entryID)
+		}
+	}
+
+	// Constructing a second Indexer, via New, with a genuinely different
+	// embedder identity -- and doing nothing else -- must be what marks
+	// the entry pending again. Nothing here calls IndexEntry a second
+	// time, and nothing here touches store.modelIdentity directly: if
+	// this passes, New's wiring did the work.
+	New(s, &distinctIdentityEmbedder{identity: "model-b@rev1#384"})
+
+	idsAfter, err := s.PendingEntryIDs(afterID, 100)
+	if err != nil {
+		t.Fatalf("PendingEntryIDs failed: %v", err)
+	}
+	found := false
+	for _, id := range idsAfter {
+		if id == entryID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected entry #%d to be pending after constructing a new Indexer with a different embedder identity via New, got %v", entryID, idsAfter)
+	}
+
+	count, err := s.PendingEntryCount(afterID)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	if count < 1 {
+		t.Fatalf("expected PendingEntryCount to count the entry after the embedder identity changed via New, got %d", count)
 	}
 }
 

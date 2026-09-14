@@ -52,6 +52,14 @@ type Embedder interface {
 // vector(384) column would then reject one of them at insert time with a
 // confusing type error, rather than this being caught as the model change
 // it is.
+//
+// The format has no escaping of "@" or "#" within name/revision, so two
+// distinct (name, revision) pairs could in principle format identically if
+// one embedded the other's separator. Not reachable today — the ONNX
+// implementation's name is a resolved directory basename and its revision
+// a hex digest — but a remote implementation reporting a name string the
+// far end supplies is a less controlled input, and would need to sanitise
+// or otherwise guarantee uniqueness before calling this.
 func Identity(name, revision string, dimensions int) string {
 	return fmt.Sprintf("%s@%s#%d", name, revision, dimensions)
 }
