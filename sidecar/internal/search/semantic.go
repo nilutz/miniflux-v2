@@ -5,10 +5,31 @@ package search // import "miniflux.app/v2/sidecar/internal/search"
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
 )
+
+// txBeginner is the one capability Semantic needs beyond store.Reader's
+// plain QueryContext/QueryRowContext: a real, explicit transaction, so
+// that "raise hnsw.ef_search" and "run the query it configures" are two
+// ordered round trips on the same connection, guaranteed by the wire
+// protocol rather than by planner behaviour (see the SET LOCAL comment
+// inside Semantic for why that distinction is the whole fix).
+//
+// This is intentionally not added to store.Reader itself, which stays
+// exactly the narrow QueryContext/QueryRowContext surface it always was
+// (see that interface's own doc comment in package store): every
+// production Searcher's db is in fact backed by *sql.DB — store.Store.Reader
+// returns it directly — which already implements BeginTx, so the type
+// assertion in Semantic succeeds for every real caller. Only a hand-rolled
+// store.Reader fake without BeginTx (as this package's own hermetic tests
+// use for the empty-query and embedder-failure cases) fails it, and
+// those tests return before Semantic ever reaches this code path.
+type txBeginner interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
 
 // Semantic ranks passages by cosine distance (embedding <=> query vector,
 // public.vector_cosine_ops — the same operator class passages_embedding_idx
@@ -69,33 +90,13 @@ func (s *Searcher) Semantic(ctx context.Context, query string, limit int, f Filt
 	var b strings.Builder
 	args := []any{vectorLiteral(vec), candidates}
 
-	// The ef_search CTE raises pgvector's HNSW search-time candidate list
-	// (hnsw.ef_search, default 40 — well under any candidates value this
-	// package computes) to at least candidates before the index scan
-	// below runs, via set_config's session-scoped, transaction-local
-	// form (is_local=true is safe on a pooled connection: it reverts at
-	// the end of this single implicit-transaction query, never leaking
-	// to whatever query the connection serves next).
-	//
-	// This is not a defensive nicety: measured directly against this
-	// package's own overfetch pattern, a LIMIT above the default
-	// ef_search made the HNSW index scan return far fewer rows than
-	// asked for — in one measurement, only the 3 rows of a small test
-	// fixture out of an expected 50, with the rest of a 5,681-row corpus
-	// silently missing — not an error, just quietly short candidates.
-	// MATERIALIZED forces set_config to run exactly once, before
-	// candidates' index scan, regardless of how the planner would
-	// otherwise inline an unreferenced-looking CTE.
 	b.WriteString(`
-		WITH ef_search AS MATERIALIZED (
-			SELECT set_config('hnsw.ef_search', $2::text, true)
-		),
-		candidates AS (
+		WITH candidates AS (
 			SELECT id, entry_id, ordinal, text, char_start, char_end, source,
 			       (embedding <=> $1::public.vector) AS distance
-			FROM search.passages, ef_search
+			FROM search.passages
 			ORDER BY embedding <=> $1::public.vector
-			LIMIT $2::bigint
+			LIMIT $2
 		)
 		SELECT c.id, c.entry_id, c.ordinal, c.text, c.char_start, c.char_end, c.source, c.distance
 		FROM candidates c
@@ -115,7 +116,43 @@ func (s *Searcher) Semantic(ctx context.Context, query string, limit int, f Filt
 	b.WriteString(fmt.Sprintf(" ORDER BY c.distance ASC, c.id ASC LIMIT $%d", len(args)+1))
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	beginner, ok := s.db.(txBeginner)
+	if !ok {
+		return nil, fmt.Errorf("search: Semantic requires a transaction-capable database connection (got %T), so hnsw.ef_search can be raised as its own statement ahead of the query it configures", s.db)
+	}
+
+	tx, err := beginner.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("search: unable to begin semantic query transaction: %w", err)
+	}
+	// Read-only transaction: Rollback is always a safe way to end it,
+	// whether the query below succeeds or fails, and there is never a
+	// data change here to lose by not committing.
+	defer tx.Rollback()
+
+	// hnsw.ef_search (pgvector's HNSW search-time candidate list, default
+	// 40) must be raised to at least candidates — the LIMIT the query
+	// below asks its own index scan for — or the scan silently returns
+	// fewer rows than requested, not an error, just quietly short. This
+	// has to be its own statement, executed strictly before the query it
+	// configures, on the same connection: an earlier version folded
+	// set_config into a MATERIALIZED CTE inside the same query, which
+	// looked right but did not take effect (found in review) — EXPLAIN
+	// ANALYZE showed the planner was free to place that CTE on the
+	// *inner* side of a nested loop whose *outer* side was the very
+	// index scan it was meant to configure, so it ran *after* the scan,
+	// once per already-produced outer row, never before it.
+	// MATERIALIZED stops a CTE being inlined away; it does not order
+	// execution. SET LOCAL, run here as its own round trip inside this
+	// explicit transaction, is ordered by the wire protocol instead:
+	// this statement completes before the next one is even sent. It is
+	// also scoped to this transaction alone (never leaks to whatever
+	// query the pooled connection serves next once this one ends).
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL hnsw.ef_search = %d", candidates)); err != nil {
+		return nil, fmt.Errorf("search: unable to raise hnsw.ef_search: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, b.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("search: semantic query failed: %w", err)
 	}

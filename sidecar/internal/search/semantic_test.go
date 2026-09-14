@@ -436,3 +436,44 @@ func TestSemanticFiltersNarrowResultsByFeed(t *testing.T) {
 		}
 	}
 }
+
+// TestSemanticRaisesEfSearchForTheOverfetchWindow is a regression guard
+// for a real bug found in review: pgvector's default hnsw.ef_search (40)
+// silently truncates the HNSW index scan's result set once a query asks
+// for more candidates than that — not an error, just quietly fewer rows
+// than LIMIT asked for.
+//
+// A first fix attempt (a MATERIALIZED CTE calling set_config, joined
+// into the candidates CTE so the planner couldn't inline it away) looked
+// right but did not take effect: EXPLAIN ANALYZE against this exact query
+// showed the planner was free to put that CTE on the *inner* side of a
+// nested loop whose *outer* side was the very index scan it was meant to
+// configure, so it only ran *after* the scan — once per outer row a
+// nested loop had already produced, never before it. MATERIALIZED
+// prevents inlining; it does not order execution.
+//
+// This test reproduces the bug's own repro directly: a real,
+// already-indexed embedding as the query (anchorEmbedding — see its own
+// doc comment for why an arbitrary or adversarial vector doesn't
+// reproduce this cleanly), unfiltered, with limit=40 so the computed
+// candidate count is candidateMultiplier(5)*40 = 200 — comfortably above
+// the default ef_search of 40. The live corpus has 5,681 passages, far
+// more than 200, so a correctly configured search has no reason to
+// return fewer than the full limit; a scan whose ef_search elevation
+// silently didn't take effect does.
+func TestSemanticRaisesEfSearchForTheOverfetchWindow(t *testing.T) {
+	s := testStore(t)
+	db := testDB(t)
+	anchor := anchorEmbedding(t, db)
+	searcher := NewSearcher(s, WithEmbedder(semanticEmbedder(anchor)))
+
+	const limit = 40 // candidateMultiplier(5) * 40 = 200 candidates requested, well above the default ef_search of 40
+
+	hits, err := searcher.Semantic(context.Background(), semanticQuery, limit, Filters{})
+	if err != nil {
+		t.Fatalf("Semantic: unexpected error: %v", err)
+	}
+	if len(hits) != limit {
+		t.Fatalf("expected exactly %d hits from a 5,681-passage corpus with hnsw.ef_search actually raised to cover the %d-candidate overfetch window, got %d — this is exactly the silent-truncation failure mode: ef_search defaults to 40, and a scan that never actually raised it returns far fewer rows than requested without erroring", limit, limit*candidateMultiplier, len(hits))
+	}
+}
