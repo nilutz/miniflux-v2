@@ -59,16 +59,39 @@ type retryState struct {
 // justify LISTEN/NOTIFY (spec §9.1); a short poll interval is simpler and
 // cheap enough.
 //
-// A single entry's indexing failure is logged and the loop moves on to the
-// next id, never aborting the pass; the failed entry is added to an
-// in-memory, backoff-gated retry set (see retryState) so it is retried on
-// a later pass without blocking forward progress on newer entries — the
-// lastSeen cursor advances past a failed id exactly as it does past a
-// succeeded one. ctx.Done() is checked before every entry — both freshly
-// fetched and retried ones — not merely between polls, so shutdown during
-// a long pass is prompt.
+// Its starting cursor is the highest entry id that already exists at
+// startup (store.MaxEntryID), not 0. This is deliberate coordination with
+// the Backfill lane (Task 6 fix round 1, finding 3): both lanes' default
+// starting point was 0, so on a freshly deployed instance with an existing
+// backlog, RunLive's very first ticks would fetch and attempt to index the
+// OLDEST pending entries — exactly the rows Backfill is, separately and
+// concurrently, also working through from the beginning. Both calling
+// IndexEntry on the same id is not corrupting (ReplacePassages is a single
+// transaction; the loser's insert aborts on the ordinal unique constraint
+// and its error is logged and retried, self-healing per spec §10), but it
+// wastes duplicate embedding work and fills Stats() with unique-violation
+// noise on every cold start over any nontrivial backlog.
+//
+// Starting at the current max id instead makes the two lanes' domains
+// disjoint by construction: RunLive only ever attempts entries created
+// AFTER it started (id > startup snapshot) — genuinely new arrivals, which
+// is exactly its job per spec §9.1 ("the live lane handles new entries") —
+// while every pre-existing entry, at any id, is left entirely to Backfill.
+// A rare residual overlap is still possible (an entry created in the
+// narrow window around the snapshot query, or one Backfill's slow-moving
+// cursor reaches before the live lane got to it) but is no longer the
+// routine, guaranteed collision over the entire historical backlog; it
+// falls back to the same safe, self-healing behaviour described above. If
+// the snapshot query itself fails, RunLive logs the error and falls back
+// to starting at 0 rather than refusing to start the live lane at all.
 func RunLive(ctx context.Context, ix *Indexer, interval time.Duration) error {
-	return runLive(ctx, ix, interval, 0, nil)
+	startAfter, err := ix.store.MaxEntryID()
+	if err != nil {
+		slog.Error("live lane: unable to determine starting cursor, starting from the beginning of the table instead",
+			slog.Any("error", err))
+		startAfter = 0
+	}
+	return runLive(ctx, ix, interval, startAfter, nil)
 }
 
 // runLive is RunLive's implementation, parameterised by the starting

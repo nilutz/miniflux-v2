@@ -39,9 +39,12 @@ func New(s *store.Store, e embed.Embedder) *Indexer {
 // as skipped and is not treated as an error. Otherwise the text is split
 // into passages and embedded in batches of DefaultBatchSize; an embedding
 // failure records the entry as failed (retryable later) and IndexEntry
-// returns the error. Passages are written, and the entry recorded ok, in a
-// single atomic replace — IndexEntry never marks an entry ok on a partial
-// result.
+// returns the error — unless the failure was ctx being cancelled mid-embed
+// (a caller shutting down or interrupting a batch, not a real embedder
+// failure), in which case entry_index_state is left untouched entirely, so
+// a graceful shutdown never manufactures a spurious "failed" row. Passages
+// are written, and the entry recorded ok, in a single atomic replace —
+// IndexEntry never marks an entry ok on a partial result.
 func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	entry, err := idx.store.EntryForIndexing(entryID)
 	if err != nil {
@@ -83,6 +86,17 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 
 		vectors, err := idx.embedder.Embed(ctx, texts)
 		if err != nil {
+			if ctx.Err() != nil {
+				// ctx was cancelled (shutdown, or a backfill/live lane
+				// interruption) rather than the embedder genuinely
+				// failing. The entry was never attempted to completion,
+				// so recording it as a retryable failure would be
+				// misleading and would pollute entry_index_state with a
+				// "failed" row on every graceful shutdown — leave it
+				// exactly as it was; PendingEntryIDs offers it again next
+				// time, identical to an entry that was never attempted.
+				return fmt.Errorf("indexer: embedding entry #%d interrupted: %w", entryID, err)
+			}
 			reason := fmt.Sprintf("embedding failed: %v", err)
 			if markErr := idx.store.MarkEntryFailed(entryID, entry.ContentHash, reason); markErr != nil {
 				return fmt.Errorf("indexer: entry #%d failed to embed (%w) and could not be marked failed: %v", entryID, err, markErr)

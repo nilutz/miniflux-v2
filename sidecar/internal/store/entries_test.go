@@ -4,6 +4,8 @@
 package store // import "miniflux.app/v2/sidecar/internal/store"
 
 import (
+	"context"
+	"database/sql"
 	"testing"
 )
 
@@ -253,6 +255,150 @@ func TestPendingEntryIDsIncludesFailedEntry(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected failed entry #%d to be pending, got %v", entryID, ids)
+	}
+}
+
+// TestPendingEntryCountMatchesPendingEntryIDs checks that PendingEntryCount
+// uses the exact same "pending" criteria as PendingEntryIDs. Two separate,
+// non-transactional queries computing "the same thing" moments apart are
+// NOT safe to compare for exact equality here: this module's own tests
+// (this file's own createTestEntry, and every other concurrently running
+// package's) mutate the very same shared entries table throughout, and an
+// earlier version of this test comparing PendingEntryCount() against a
+// separately-fetched len(PendingEntryIDs(...)) flaked under exactly that
+// interference (a concurrent insert or ReplacePassages landing between
+// the two round trips changes one snapshot but not the other) -- the same
+// class of risk live.go's own doc comment documents at length. The fix
+// is not a tighter race but no race at all: both queries run inside one
+// REPEATABLE READ transaction, so Postgres guarantees they observe the
+// identical MVCC snapshot regardless of what any other connection commits
+// meanwhile.
+func TestPendingEntryCountMatchesPendingEntryIDs(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	// A fixture of our own guarantees the pending set is never empty,
+	// regardless of what any other concurrently running package's tests
+	// are doing to the shared table.
+	entryID := createTestEntry(t, s, "pending-count-agree", "<p>a</p>")
+
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("unable to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	const pendingWhere = `
+		FROM entries e
+		LEFT JOIN search.entry_index_state s ON s.entry_id = e.id
+		WHERE (
+		  s.entry_id IS NULL
+		  OR s.status = 'failed'
+		  OR s.content_hash <> md5(coalesce(e.content, ''))
+		)
+	`
+
+	var count int64
+	if err := tx.QueryRow(`SELECT count(*) ` + pendingWhere).Scan(&count); err != nil {
+		t.Fatalf("unable to count pending entries: %v", err)
+	}
+
+	rows, err := tx.Query(`SELECT e.id ` + pendingWhere)
+	if err != nil {
+		t.Fatalf("unable to list pending entries: %v", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	var foundOurs bool
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("unable to scan pending id: %v", err)
+		}
+		ids = append(ids, id)
+		if id == entryID {
+			foundOurs = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("unable to read pending ids: %v", err)
+	}
+
+	if int64(len(ids)) != count {
+		t.Fatalf("expected count(*) (%d) to exactly match the number of listed pending ids (%d) within the same "+
+			"snapshot -- this is what PendingEntryCount and PendingEntryIDs must each also individually agree with", count, len(ids))
+	}
+	if !foundOurs {
+		t.Fatalf("expected our own fixture #%d to be among the pending ids counted", entryID)
+	}
+
+	if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+		t.Fatalf("unable to roll back snapshot transaction: %v", err)
+	}
+
+	// Now confirm the actual exported method at least runs cleanly and
+	// returns a sane value. It is deliberately NOT compared against the
+	// snapshot count above by any inequality: unlike the pending set
+	// visible within one transaction, the live global count is not
+	// monotonic across two separate points in time under concurrent
+	// load -- another connection can just as easily have completed
+	// indexing something (decreasing it) as inserted something new
+	// (increasing it) in between, so neither ">=" nor "<=" holds in
+	// general. (An earlier version of this test asserted such an
+	// inequality and flaked for exactly that reason.)
+	if _, err := s.PendingEntryCount(); err != nil {
+		t.Fatalf("unexpected error calling PendingEntryCount: %v", err)
+	}
+
+	// PendingEntryCount must also actually react to OUR entry leaving the
+	// pending set -- scoped to this one id via PendingEntryIDs' own
+	// afterID bound, so this half needs no snapshot over the whole shared
+	// table either.
+	entry, err := s.EntryForIndexing(entryID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
+		{Ordinal: 0, Text: "a", CharStart: 0, CharEnd: 1, Embedding: make([]float32, 384)},
+	}); err != nil {
+		t.Fatalf("unable to replace passages: %v", err)
+	}
+
+	afterIDs, err := s.PendingEntryIDs(entryID-1, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, id := range afterIDs {
+		if id == entryID {
+			t.Fatalf("expected entry #%d to no longer be pending after indexing", entryID)
+		}
+	}
+}
+
+func TestMaxEntryIDReflectsHighestEntry(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	before, err := s.MaxEntryID()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	entryID := createTestEntry(t, s, "maxid-a", "<p>a</p>")
+
+	after, err := s.MaxEntryID()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if after < entryID {
+		t.Fatalf("expected MaxEntryID to be at least the just-created entry #%d, got %d", entryID, after)
+	}
+	if after < before {
+		t.Fatalf("expected MaxEntryID to never decrease: was %d, now %d", before, after)
 	}
 }
 

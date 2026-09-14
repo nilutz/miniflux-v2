@@ -157,6 +157,69 @@ func TestControllerOutsideWindowReportsZeroWorkers(t *testing.T) {
 	}
 }
 
+// A zero-value ControllerConfig must not stall the lane forever. Before
+// withDefaults existed, ControllerConfig{} set MinWorkers=MaxWorkers=0,
+// which workersLocked clamped right back to 0 -- Backfill.start reads any
+// workers<=0 exactly like "outside the schedule window" and polls
+// forever, silently, since Reason() would still claim "starting at the
+// configured minimum worker count" (fix round 1, finding 1).
+func TestControllerZeroValueConfigDoesNotStall(t *testing.T) {
+	c := newController(ControllerConfig{}, fixedClock(time.Now()), fixedLoad(0.1))
+
+	if got := c.Workers(); got < 1 {
+		t.Fatalf("expected a zero-value ControllerConfig to still report at least 1 worker, got %d", got)
+	}
+
+	// And it must keep working, not just report a healthy-looking number
+	// once and then stall.
+	establishBaseline(c)
+	for i := 0; i < 5; i++ {
+		c.Observe(healthyBaselineLatency)
+		if got := c.Workers(); got < 1 {
+			t.Fatalf("expected at least 1 worker after Observe, got %d", got)
+		}
+	}
+}
+
+// A misconfigured MaxWorkers below MinWorkers must not leave the
+// controller permanently wedged below its own stated floor either.
+func TestControllerMaxBelowMinIsClampedUpToMin(t *testing.T) {
+	c := newController(ControllerConfig{MinWorkers: 3, MaxWorkers: 1}, fixedClock(time.Now()), fixedLoad(0.1))
+
+	if got := c.Workers(); got < 3 {
+		t.Fatalf("expected MaxWorkers below MinWorkers=3 to be raised to match, got %d workers", got)
+	}
+}
+
+// SetConfig takes effect immediately -- both lowering the ceiling (which
+// must re-clamp the current count right away) and changing the window.
+func TestControllerSetConfigTakesEffectLive(t *testing.T) {
+	cfg := ControllerConfig{MinWorkers: 1, MaxWorkers: 4, LatencyMargin: 1.5, LoadThreshold: 0.8}
+	now := time.Now()
+	c := newController(cfg, fixedClock(now), fixedLoad(0.1))
+
+	establishBaseline(c)
+	for i := 0; i < 10; i++ {
+		c.Observe(healthyBaselineLatency)
+	}
+	if got := c.Workers(); got != 4 {
+		t.Fatalf("setup failed: expected to reach MaxWorkers=4, got %d", got)
+	}
+
+	c.SetConfig(ControllerConfig{MinWorkers: 1, MaxWorkers: 2, LatencyMargin: 1.5, LoadThreshold: 0.8})
+	if got := c.Workers(); got != 2 {
+		t.Fatalf("expected SetConfig to immediately re-clamp the worker count to the new MaxWorkers=2, got %d", got)
+	}
+
+	c.SetWindow(Window{Start: 2, End: 7})
+	outsideWindow := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	c2 := newController(cfg, fixedClock(outsideWindow), fixedLoad(0.1))
+	c2.SetWindow(Window{Start: 2, End: 7})
+	if got := c2.Workers(); got != 0 {
+		t.Fatalf("expected SetWindow to take effect immediately, got %d workers outside the new window", got)
+	}
+}
+
 // The zero value of Window must mean "always", never "never" -- a
 // freshly-constructed ControllerConfig{} (as any caller might build
 // incrementally) must not silently make Workers() report zero forever.

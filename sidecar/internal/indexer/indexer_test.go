@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -19,14 +20,18 @@ import (
 // fakeEmbedder is a deterministic, call-counting stand-in for the real ONNX
 // Embedder (Task 2). This task tests pipeline wiring, not inference: the
 // call count is what makes "an unchanged/skipped entry is not re-embedded"
-// assertions possible at all.
+// assertions possible at all. calls is an atomic.Int64, not a plain int:
+// Backfill's worker pool can call Embed from multiple goroutines
+// concurrently, and an unsynchronised counter there is only safe by
+// accident of whatever MaxWorkers a given test happens to pin (fix round
+// 1, finding 12).
 type fakeEmbedder struct {
-	calls int
+	calls atomic.Int64
 	err   error
 }
 
 func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	f.calls++
+	f.calls.Add(1)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -218,15 +223,15 @@ func TestIndexEntryWithNoUsableTextIsSkipped(t *testing.T) {
 	if reason == "" {
 		t.Fatal("expected a non-empty reason")
 	}
-	if fe.calls != 0 {
-		t.Fatalf("expected the embedder not to be called, got %d calls", fe.calls)
+	if fe.calls.Load() != 0 {
+		t.Fatalf("expected the embedder not to be called, got %d calls", fe.calls.Load())
 	}
 
 	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
 		t.Fatalf("second IndexEntry failed: %v", err)
 	}
-	if fe.calls != 0 {
-		t.Fatalf("expected the embedder still not to be called after a second run, got %d calls", fe.calls)
+	if fe.calls.Load() != 0 {
+		t.Fatalf("expected the embedder still not to be called after a second run, got %d calls", fe.calls.Load())
 	}
 
 	ids, err := s.PendingEntryIDs(entryID-1, 100)
@@ -320,7 +325,7 @@ func TestIndexEntryUnchangedIsNotReembedded(t *testing.T) {
 	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
 		t.Fatalf("first IndexEntry failed: %v", err)
 	}
-	callsAfterFirst := fe.calls
+	callsAfterFirst := fe.calls.Load()
 	if callsAfterFirst == 0 {
 		t.Fatal("expected the embedder to be called on the first run")
 	}
@@ -328,8 +333,8 @@ func TestIndexEntryUnchangedIsNotReembedded(t *testing.T) {
 	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
 		t.Fatalf("second IndexEntry failed: %v", err)
 	}
-	if fe.calls != callsAfterFirst {
-		t.Fatalf("expected no additional embed calls for an unchanged entry, got %d -> %d", callsAfterFirst, fe.calls)
+	if fe.calls.Load() != callsAfterFirst {
+		t.Fatalf("expected no additional embed calls for an unchanged entry, got %d -> %d", callsAfterFirst, fe.calls.Load())
 	}
 }
 

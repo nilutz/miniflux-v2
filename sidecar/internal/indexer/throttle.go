@@ -68,6 +68,26 @@ func DefaultControllerConfig() ControllerConfig {
 	return ControllerConfig{MinWorkers: 1, MaxWorkers: 2, LatencyMargin: 1.5, LoadThreshold: 0.8}
 }
 
+// withDefaults fills in a floor for MinWorkers and MaxWorkers so a
+// zero-value (or otherwise under-specified) ControllerConfig can never
+// make the lane stall forever. Without this, ControllerConfig{} sets
+// MinWorkers=MaxWorkers=0: workersLocked clamps any value into [0, 0] and
+// returns 0, which Backfill.start reads exactly like "outside the
+// schedule window" and polls forever -- silently, since Reason() would
+// still say "starting at the configured minimum worker count". MinWorkers
+// is floored at 1 (the same floor the brief requires: "at least 1 so
+// progress never stops"), and MaxWorkers is raised to match if it was left
+// below MinWorkers (whether zero or simply misconfigured).
+func (cfg ControllerConfig) withDefaults() ControllerConfig {
+	if cfg.MinWorkers < 1 {
+		cfg.MinWorkers = 1
+	}
+	if cfg.MaxWorkers < cfg.MinWorkers {
+		cfg.MaxWorkers = cfg.MinWorkers
+	}
+	return cfg
+}
+
 // LoadAverage reports the current 1-minute system load average. Production
 // controllers sample the real host (see sampleLoadAverage); tests inject a
 // fake so a controller test never depends on the real machine's load --
@@ -109,6 +129,7 @@ func NewController(cfg ControllerConfig) *Controller {
 // clock and the load sampler so tests can inject both (see throttle_test.go)
 // rather than depending on real wall-clock time or the real host's load.
 func newController(cfg ControllerConfig, now func() time.Time, load LoadAverage) *Controller {
+	cfg = cfg.withDefaults()
 	return &Controller{
 		cfg:     cfg,
 		now:     now,
@@ -116,6 +137,41 @@ func newController(cfg ControllerConfig, now func() time.Time, load LoadAverage)
 		workers: cfg.MinWorkers,
 		reason:  "starting at the configured minimum worker count",
 	}
+}
+
+// SetConfig atomically replaces the controller's configuration, taking
+// effect on the very next Workers()/Reason()/Observe() call — spec §9.2:
+// "window, concurrency and batch size are all live-editable without a
+// restart." The current worker count is immediately re-clamped into the
+// new [MinWorkers, MaxWorkers] bounds rather than waiting for the next
+// Observe to notice, so a lowered ceiling takes visible effect at once.
+func (c *Controller) SetConfig(cfg ControllerConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg = cfg.withDefaults()
+	if c.workers < c.cfg.MinWorkers {
+		c.workers = c.cfg.MinWorkers
+	}
+	if c.workers > c.cfg.MaxWorkers {
+		c.workers = c.cfg.MaxWorkers
+	}
+}
+
+// SetWindow live-edits just the schedule window, leaving every other
+// setting untouched — the common case of an operator changing the
+// backfill's allowed hours without wanting to also respecify concurrency
+// and latency settings.
+func (c *Controller) SetWindow(w Window) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg.Window = w
+}
+
+// Config returns the controller's current configuration.
+func (c *Controller) Config() ControllerConfig {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg
 }
 
 // Workers returns the number of workers that should be in flight right

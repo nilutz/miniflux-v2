@@ -140,16 +140,21 @@ func waitDone(t *testing.T, done chan error, timeout time.Duration, what string)
 func TestBackfillProcessesEveryPendingEntryAndTerminates(t *testing.T) {
 	s, db := testEnv(t)
 
-	var firstID, lastID int64
+	// Track the actual ids created, rather than assuming they are
+	// consecutive (firstID, firstID+1, ...): under Go's default
+	// cross-package test parallelism, another concurrently running
+	// package can consume an id from the same shared entries sequence in
+	// between these calls, leaving a gap. Checking firstID+i against that
+	// gap silently checks a foreign row (or no row at all) instead of one
+	// of ours, which is exactly what caused this test to flake — see this
+	// fix round's report.
 	const n = 4
+	ids := make([]int64, n)
 	for i := 0; i < n; i++ {
-		id := createTestEntry(t, db, "backfill-drain-"+string(rune('a'+i)),
+		ids[i] = createTestEntry(t, db, "backfill-drain-"+string(rune('a'+i)),
 			"<p>Backfill drain test entry number "+string(rune('a'+i))+" with some plain content.</p>")
-		if i == 0 {
-			firstID = id
-		}
-		lastID = id
 	}
+	firstID, lastID := ids[0], ids[n-1]
 
 	idx := New(s, &fakeEmbedder{})
 	ctrlCfg, bfCfg := backfillTestConfig()
@@ -162,8 +167,7 @@ func TestBackfillProcessesEveryPendingEntryAndTerminates(t *testing.T) {
 	done := runStartAsync(b, ctx, firstID-1, boundedUpTo(lastID))
 	waitDone(t, done, 5*time.Second, "Backfill.start")
 
-	for i := 0; i < n; i++ {
-		id := firstID + int64(i)
+	for _, id := range ids {
 		if entryStatus(t, db, id) != "ok" {
 			t.Fatalf("expected entry #%d to be indexed (status='ok'), got %q", id, entryStatus(t, db, id))
 		}
@@ -173,8 +177,12 @@ func TestBackfillProcessesEveryPendingEntryAndTerminates(t *testing.T) {
 	if !stats.Done {
 		t.Fatal("expected Stats().Done to be true after draining every pending entry")
 	}
-	if stats.Indexed != n {
-		t.Fatalf("expected Stats().Indexed=%d, got %d", n, stats.Indexed)
+	// At least n: a lower bound, not exact equality, in case a
+	// concurrently running package's own fixture landed at an id inside
+	// [firstID, lastID] and got swept up too (see the ids-tracking fix
+	// above; the same underlying, precedent-accepted residual risk).
+	if stats.Indexed < n {
+		t.Fatalf("expected Stats().Indexed>=%d, got %d", n, stats.Indexed)
 	}
 }
 
@@ -238,8 +246,13 @@ func TestBackfillResumesFromCheckpointAfterInterruption(t *testing.T) {
 	cancel1() // interrupts the blocked embed call and, with it, the whole lane
 	waitDone(t, done1, 5*time.Second, "phase 1 Backfill.start")
 
-	if entryStatus(t, db, ids[3]) != "failed" {
-		t.Fatalf("expected the interrupted entry #%d to be recorded as 'failed' (retryable), got %q",
+	// Interrupted by cancellation, not a genuine embedding failure: fix
+	// round 1, finding 8 changed IndexEntry to leave entry_index_state
+	// untouched in this case rather than writing status='failed', so a
+	// graceful shutdown never manufactures a spurious failed row. The
+	// entry is exactly as untouched as one that was never attempted.
+	if entryStatus(t, db, ids[3]) != "" {
+		t.Fatalf("expected the interrupted entry #%d to be left untouched (no status), got %q",
 			ids[3], entryStatus(t, db, ids[3]))
 	}
 	for i := 0; i < 3; i++ {
@@ -375,6 +388,14 @@ func TestBackfillRespectsScheduleWindow(t *testing.T) {
 
 // 5. Stats() reports progress, throughput, current worker count, and
 // error/skip counts by cause.
+//
+// The failing entry here is durably, permanently broken (failMarkerEmbedder
+// never recovers), so — per fix round 1, finding 2 — Backfill.start will
+// legitimately never declare itself Done on its own: every sweep that
+// reaches its end having retried that entry resets and tries again. This
+// test therefore does not wait for natural termination; it polls Stats()
+// until the three outcomes it wants to observe have all happened at least
+// once, then cancels.
 func TestBackfillStatsReportsProgressAndCauses(t *testing.T) {
 	s, db := testEnv(t)
 
@@ -394,19 +415,29 @@ func TestBackfillStatsReportsProgressAndCauses(t *testing.T) {
 	b := NewBackfill(idx, controller, bfCfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := runStartAsync(b, ctx, okID-1, boundedUpTo(failID))
-	waitDone(t, done, 5*time.Second, "Backfill.start")
+
+	waitFor(t, 2*time.Second, "at least one indexed, one skipped and one failure observed", func() bool {
+		s := b.Stats()
+		return s.Indexed >= 1 && s.Skipped >= 1 && s.Failed >= 1
+	})
+
+	cancel()
+	waitDone(t, done, 2*time.Second, "Backfill.start")
 
 	stats := b.Stats()
-	if stats.Indexed != 1 {
-		t.Fatalf("expected Stats().Indexed=1, got %d", stats.Indexed)
+	// At least 1, not exactly 1: a lower bound, in case a concurrently
+	// running package's own fixture landed at an id inside [okID,
+	// failID] and got swept up and processed too (the same
+	// precedent-accepted residual risk noted throughout this file).
+	if stats.Indexed < 1 {
+		t.Fatalf("expected Stats().Indexed>=1, got %d", stats.Indexed)
 	}
-	if stats.Skipped != 1 {
-		t.Fatalf("expected Stats().Skipped=1, got %d", stats.Skipped)
+	if stats.Skipped < 1 {
+		t.Fatalf("expected Stats().Skipped>=1, got %d", stats.Skipped)
 	}
-	if stats.Failed != 1 {
-		t.Fatalf("expected Stats().Failed=1, got %d", stats.Failed)
+	if stats.Failed < 1 {
+		t.Fatalf("expected Stats().Failed>=1, got %d", stats.Failed)
 	}
 	if len(stats.SkippedByReason) == 0 {
 		t.Fatal("expected at least one skip cause recorded in Stats().SkippedByReason")
@@ -436,8 +467,15 @@ func TestBackfillStatsReportsProgressAndCauses(t *testing.T) {
 	if stats.ThroughputPerSec < 0 {
 		t.Fatalf("expected a non-negative Stats().ThroughputPerSec, got %f", stats.ThroughputPerSec)
 	}
-	if !stats.Done {
-		t.Fatal("expected Stats().Done to be true after draining")
+	if stats.Remaining < 0 {
+		t.Fatalf("expected a non-negative Stats().Remaining, got %d (a negative value means the count itself failed)", stats.Remaining)
+	}
+	// The permanently-broken entry means the backlog never actually
+	// drains: Done must stay false, not falsely report success while a
+	// failure is still pending (fix round 1, finding 2 — this is the
+	// exact assertion that used to encode the bug).
+	if stats.Done {
+		t.Fatal("expected Stats().Done to remain false while a permanently-failing entry is still pending")
 	}
 
 	if entryStatus(t, db, okID) != "ok" {
@@ -471,7 +509,7 @@ func TestBackfillReindexesEntryWithChangedContent(t *testing.T) {
 	if entryStatus(t, db, entryID) != "ok" {
 		t.Fatal("expected the entry to be indexed after the first pass")
 	}
-	callsAfterFirst := fe.calls
+	callsAfterFirst := fe.calls.Load()
 	if callsAfterFirst == 0 {
 		t.Fatal("expected at least one embed call on the first pass")
 	}
@@ -484,8 +522,8 @@ func TestBackfillReindexesEntryWithChangedContent(t *testing.T) {
 		t.Fatalf("second pass failed: %v", err)
 	}
 
-	if fe.calls <= callsAfterFirst {
-		t.Fatalf("expected additional embed calls after the content changed, got %d -> %d", callsAfterFirst, fe.calls)
+	if fe.calls.Load() <= callsAfterFirst {
+		t.Fatalf("expected additional embed calls after the content changed, got %d -> %d", callsAfterFirst, fe.calls.Load())
 	}
 
 	rows, err := db.Query(`SELECT text FROM search.passages WHERE entry_id=$1 ORDER BY ordinal`, entryID)
@@ -521,4 +559,114 @@ func TestBackfillReindexesEntryWithChangedContent(t *testing.T) {
 	if state == nil || state.ContentHash != entry.ContentHash {
 		t.Fatalf("expected the recorded content_hash to match the new content's hash")
 	}
+}
+
+// 7. (Fix round 1, finding 2.) Stats().Done must not go true while a
+// failed entry is still pending, and must become true once that entry is
+// genuinely retried and recovers. Before this fix, the cursor only ever
+// moved forward within one sweep: an entry that failed early in a pass
+// sat below the cursor, permanently un-retried within that run, while the
+// pass still reported Done=true the moment its last page came up empty —
+// even though the failure was never looked at again. This test uses a
+// TRANSIENT failure (flippableEmbedder, from live_test.go, same package)
+// specifically so it can observe both halves: Done stays false across
+// several sweep-and-retry cycles while unhealthy, then becomes true once
+// the entry starts succeeding — proving the retry is genuine, not that
+// Done is simply never computed correctly at all.
+func TestBackfillDoneWaitsForFailedEntryRetry(t *testing.T) {
+	s, db := testEnv(t)
+
+	okID := createTestEntry(t, db, "backfill-done-ok",
+		"<p>A perfectly normal entry, unaffected by the other one's trouble.</p>")
+	marker := "TRANSIENT-FAIL-MARKER-backfill-done"
+	failID := createTestEntry(t, db, "backfill-done-fail",
+		"<p>Entry containing "+marker+" that fails until nudged healthy.</p>")
+
+	fe := &flippableEmbedder{marker: marker}
+	idx := New(s, fe)
+	ctrlCfg, bfCfg := backfillTestConfig()
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runStartAsync(b, ctx, okID-1, boundedUpTo(failID))
+
+	waitFor(t, 2*time.Second, "the failing entry recorded as failed at least once", func() bool {
+		return entryStatus(t, db, failID) == "failed"
+	})
+	if entryStatus(t, db, okID) != "ok" {
+		t.Fatal("expected the healthy entry to be indexed regardless of the other one's failure")
+	}
+
+	// Let several sweep-and-retry cycles happen while still unhealthy.
+	// hadFailureThisSweep's pollInterval pause between sweeps (see
+	// start's doc comment) means this is not a tight loop; the assertion
+	// itself is on the final state after waiting a generous, bounded
+	// window, the same "prove a negative" pattern already established in
+	// live_test.go's own backoff test.
+	time.Sleep(bfCfg.PollInterval * 8)
+	if b.Stats().Done {
+		t.Fatal("expected Stats().Done to remain false while the failed entry has not yet been retried successfully")
+	}
+	callsWhileUnhealthy := fe.callsForMarker.Load()
+	if callsWhileUnhealthy == 0 {
+		t.Fatal("expected at least one retry attempt while unhealthy")
+	}
+
+	fe.healthy.Store(true)
+
+	waitDone(t, done, 3*time.Second, "Backfill.start")
+
+	if entryStatus(t, db, failID) != "ok" {
+		t.Fatal("expected the entry to recover to 'ok' once the embedder became healthy")
+	}
+	if fe.callsForMarker.Load() <= callsWhileUnhealthy {
+		t.Fatal("expected at least one additional embed call after becoming healthy, proving a genuine retry")
+	}
+	if !b.Stats().Done {
+		t.Fatal("expected Stats().Done to become true once the retried entry succeeded and nothing remains pending")
+	}
+}
+
+// 8. (Fix round 1, finding 10.) Start is not re-entrant: calling it again
+// while a previous call on the same Backfill is still running returns an
+// error immediately, rather than running two overlapping worker pools
+// against the same counters.
+func TestBackfillStartIsNotReentrant(t *testing.T) {
+	s, db := testEnv(t)
+
+	marker := "REENTRANT-MARKER"
+	entryID := createTestEntry(t, db, "backfill-reentrant",
+		"<p>Entry containing "+marker+" for the re-entrancy test.</p>")
+
+	// A blocking embedder keeps the first start() call busy long enough
+	// for the second call to observe it as still running -- no polling or
+	// timing race, since the very first Embed call blocks on ctx.Done()
+	// and signals blocked (closed) right before it starts waiting.
+	be := &blockOnMarkerEmbedder{marker: marker, counts: newMarkerCallCounts(), markers: []string{marker}, blocked: make(chan struct{})}
+	be.block.Store(true)
+	idx := New(s, be)
+
+	ctrlCfg, bfCfg := backfillTestConfig()
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := runStartAsync(b, ctx, entryID-1, boundedUpTo(entryID))
+
+	select {
+	case <-be.blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the first start() call to begin processing")
+	}
+
+	if err := b.start(context.Background(), entryID-1, boundedUpTo(entryID)); err == nil {
+		t.Fatal("expected a second, concurrent start() call to return an error")
+	}
+
+	cancel() // unblocks the first call's blocked embed call too
+	waitDone(t, done, 2*time.Second, "first Backfill.start")
 }

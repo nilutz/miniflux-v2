@@ -5,6 +5,7 @@ package indexer // import "miniflux.app/v2/sidecar/internal/indexer"
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -21,14 +22,16 @@ const DefaultBackfillPageSize = 20
 
 // DefaultBackfillPollInterval is how long Backfill waits before checking
 // again when it currently cannot do any work — outside the schedule
-// window. It is unrelated to how fast entries are actually processed once
-// work is allowed.
+// window, a PendingEntryIDs query itself errored, or a just-finished sweep
+// needs to pause briefly before retrying entries that failed during it
+// (see start's hadFailureThisSweep). It is unrelated to how fast entries
+// are actually processed once work is allowed.
 const DefaultBackfillPollInterval = 5 * time.Second
 
 // BackfillConfig configures a Backfill lane.
 type BackfillConfig struct {
 	PageSize     int           // pending entry ids fetched per page/batch
-	PollInterval time.Duration // wait between checks while the schedule window is closed
+	PollInterval time.Duration // wait between checks while idle (schedule window closed, a fetch error, or between retry sweeps)
 }
 
 func (cfg BackfillConfig) withDefaults() BackfillConfig {
@@ -57,6 +60,12 @@ func (c *causeCounts) add(cause string) {
 	c.m[cause]++
 }
 
+func (c *causeCounts) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m = make(map[string]int64)
+}
+
 func (c *causeCounts) snapshot() map[string]int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -76,15 +85,22 @@ type Stats struct {
 	Skipped int64 // entries with no usable text (status='skipped')
 	Failed  int64 // entries that failed to index (status='failed', retryable)
 
+	// Remaining is how many entries currently still need (re-)indexing,
+	// by the same criteria PendingEntryIDs uses — the denominator Task 7
+	// needs to render "N indexed of M" and derive an ETA from
+	// ThroughputPerSec. It is -1 if the count could not be read (logged,
+	// not fatal to the snapshot).
+	Remaining int64
+
 	SkippedByReason map[string]int64 // skip reason -> count
 	FailedByReason  map[string]int64 // failure cause (the returned error's message) -> count
 
 	Workers          int     // the controller's current worker count right now
 	ControllerReason string  // the controller's reason for that count
-	ThroughputPerSec float64 // (Indexed+Skipped+Failed) / elapsed seconds since Start
+	ThroughputPerSec float64 // (Indexed+Skipped+Failed) / time actually spent running batches -- excludes paused and outside-window time
 
 	Paused bool // true between Pause() and the matching Resume()
-	Done   bool // true once a full pass found nothing left to do
+	Done   bool // true once a full sweep processed nothing at all, including no retries
 }
 
 // Backfill is the throttled backfill lane (spec §9.1, §9.2): a worker pool
@@ -101,17 +117,19 @@ type Stats struct {
 type Backfill struct {
 	idx        *Indexer
 	controller *Controller
-	cfg        BackfillConfig
 
 	mu        sync.Mutex
+	cfg       BackfillConfig // PageSize/PollInterval are live-editable (spec §9.2); always read through pageSize()/pollInterval()
 	paused    bool
 	resumeCh  chan struct{}
 	done      bool
+	running   bool
 	startedAt time.Time
 
 	indexed         atomic.Int64
 	skipped         atomic.Int64
 	failed          atomic.Int64
+	activeNanos     atomic.Int64 // cumulative wall-clock time spent inside runBatch, across every batch -- the ThroughputPerSec denominator
 	skippedByReason *causeCounts
 	failedByReason  *causeCounts
 }
@@ -126,6 +144,39 @@ func NewBackfill(idx *Indexer, controller *Controller, cfg BackfillConfig) *Back
 		skippedByReason: newCauseCounts(),
 		failedByReason:  newCauseCounts(),
 	}
+}
+
+// SetPageSize live-edits the page size, taking effect on the next page
+// fetch (spec §9.2: "batch size ... live-editable without a restart").
+// Values <= 0 are ignored.
+func (b *Backfill) SetPageSize(n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n > 0 {
+		b.cfg.PageSize = n
+	}
+}
+
+// SetPollInterval live-edits the idle poll interval. Values <= 0 are
+// ignored.
+func (b *Backfill) SetPollInterval(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if d > 0 {
+		b.cfg.PollInterval = d
+	}
+}
+
+func (b *Backfill) pageSize() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cfg.PageSize
+}
+
+func (b *Backfill) pollInterval() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cfg.PollInterval
 }
 
 // Pause requests that the lane stop starting new batches. A batch already
@@ -173,13 +224,18 @@ func (b *Backfill) waitWhilePaused(ctx context.Context) bool {
 
 // Start runs the backfill lane: it pages through pending entry ids and
 // indexes them with a worker pool sized by the Controller, until either
-// ctx is cancelled or a full pass finds no pending work left at all.
-// Draining the backlog to completion is this lane's job — unlike the
-// always-on live lane, "nothing left pending" is an expected, successful
-// way for it to stop, not an error to retry past. It never idles forever
-// waiting for new entries to arrive; that is RunLive's job. Start returns
-// nil in every case, mirroring RunLive: cancellation is the expected way
-// to stop it early, not a failure.
+// ctx is cancelled or a full sweep finds no pending work left at all —
+// including no entries left to retry (see start's doc comment for what
+// "a full sweep" means). Draining the backlog to completion is this
+// lane's job — unlike the always-on live lane, "nothing left pending" is
+// an expected, successful way for it to stop, not an error to retry past.
+// It never idles forever waiting for new entries to arrive; that is
+// RunLive's job. Start returns nil in every case, mirroring RunLive:
+// cancellation is the expected way to stop it early, not a failure.
+//
+// Start is not re-entrant: calling it while a previous call on the same
+// Backfill is still running returns an error immediately rather than
+// running two overlapping worker pools against the same counters.
 func (b *Backfill) Start(ctx context.Context) error {
 	return b.start(ctx, 0, nil)
 }
@@ -192,20 +248,56 @@ func (b *Backfill) Start(ctx context.Context) error {
 // that an unbounded lane can and did do exactly that under Go's default
 // cross-package test parallelism).
 //
-// Pagination itself is never skipped for ids above upTo — they are simply
-// excluded from processing — so a page straddling the bound still advances
-// the cursor past every id it fetched. Once the cursor reaches or passes
-// upTo, everything at or below it has necessarily already been seen (ids
-// are fetched in ascending order with no gaps), so the scoped run is
-// declared done immediately rather than continuing to fetch pages that can
-// only ever be filtered to empty — which would otherwise busy-loop forever
-// if some other, unrelated backlog exists above the bound.
+// A "sweep" is one linear pass of pagination from startAfter up to the
+// current end of the table (or, when upTo is set, up to the bound).
+// Because the cursor only ever moves forward within a sweep, an entry that
+// fails partway through is never revisited again within that same sweep —
+// it sits below the cursor, still status='failed' and therefore still
+// matched by PendingEntryIDs, but never fetched again until something
+// resets the cursor. Declaring the whole lane "done" the instant a sweep's
+// last page comes back empty is therefore wrong whenever that sweep saw
+// any failure: the backlog is not actually drained, just not visible from
+// where the cursor happens to be sitting (fix round 1, finding 2). So: if
+// a sweep that reaches its end had at least one failure during it, the
+// cursor resets to startAfter and another sweep begins (after a
+// pollInterval pause, so a durably broken entry is retried once per sweep
+// rather than in a tight loop across sweeps — spec §10's "never retried in
+// a tight loop" is lane-agnostic). Only a sweep that reaches its end
+// having had zero failures is declared Done. For a corpus containing an
+// entry that fails forever, this means Start legitimately never returns
+// on its own (Stats().Done stays false, Stats().Failed keeps climbing by
+// one per sweep) until the caller cancels ctx or the entry starts
+// succeeding — which is the accurate state of the world, not a bug: the
+// backlog genuinely never reaches zero while something in it is stuck.
 func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int64) error {
 	b.mu.Lock()
+	if b.running {
+		b.mu.Unlock()
+		return fmt.Errorf("backfill: already running")
+	}
+	b.running = true
 	b.startedAt = time.Now()
+	b.done = false
 	b.mu.Unlock()
 
+	// A fresh run's Stats() should reflect only this run's progress, not
+	// accumulate across an earlier Start/cancel/Start cycle on the same
+	// Backfill (fix round 1, finding 10).
+	b.indexed.Store(0)
+	b.skipped.Store(0)
+	b.failed.Store(0)
+	b.activeNanos.Store(0)
+	b.skippedByReason.reset()
+	b.failedByReason.reset()
+
+	defer func() {
+		b.mu.Lock()
+		b.running = false
+		b.mu.Unlock()
+	}()
+
 	cursor := startAfter
+	hadFailureThisSweep := false
 
 	for {
 		select {
@@ -224,48 +316,72 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 			// treating "no workers allowed right now" as "done" — the
 			// backlog can be paused for a week without being considered
 			// finished (spec §9.1).
-			if !sleepCtx(ctx, b.cfg.PollInterval) {
+			if !sleepCtx(ctx, b.pollInterval()) {
 				return nil
 			}
 			continue
 		}
 
-		rawIDs, err := b.idx.store.PendingEntryIDs(cursor, b.cfg.PageSize)
+		rawIDs, err := b.idx.store.PendingEntryIDs(cursor, b.pageSize())
 		if err != nil {
 			slog.Error("backfill lane: unable to fetch pending entries", slog.Any("error", err))
-			if !sleepCtx(ctx, b.cfg.PollInterval) {
+			if !sleepCtx(ctx, b.pollInterval()) {
 				return nil
 			}
 			continue
 		}
 
-		if len(rawIDs) == 0 {
-			b.markDone()
-			return nil
-		}
-		cursor = rawIDs[len(rawIDs)-1]
+		sweepEnded := len(rawIDs) == 0
 
-		ids := rawIDs
-		if upTo != nil {
-			bound := upTo.Load()
-			kept := rawIDs[:0:0]
-			for _, id := range rawIDs {
-				if id <= bound {
-					kept = append(kept, id)
+		if !sweepEnded {
+			cursor = rawIDs[len(rawIDs)-1]
+
+			ids := rawIDs
+			if upTo != nil {
+				bound := upTo.Load()
+				kept := rawIDs[:0:0]
+				for _, id := range rawIDs {
+					if id <= bound {
+						kept = append(kept, id)
+					}
+				}
+				ids = kept
+			}
+
+			if len(ids) > 0 {
+				failedBefore := b.failed.Load()
+
+				batchStart := time.Now()
+				b.runBatch(ctx, ids, workers)
+				elapsed := time.Since(batchStart)
+				b.activeNanos.Add(int64(elapsed))
+				// Per-entry latency, not the whole page's: a short or
+				// upTo-thinned page must not read as an artificially fast
+				// batch, nor a full page after short ones as a degraded
+				// one (fix round 1, finding 6).
+				b.controller.Observe(elapsed / time.Duration(len(ids)))
+
+				if b.failed.Load() > failedBefore {
+					hadFailureThisSweep = true
 				}
 			}
-			ids = kept
+
+			if upTo != nil && cursor >= upTo.Load() {
+				sweepEnded = true
+			}
 		}
 
-		if len(ids) > 0 {
-			start := time.Now()
-			b.runBatch(ctx, ids, workers)
-			b.controller.Observe(time.Since(start))
-		}
-
-		if upTo != nil && cursor >= upTo.Load() {
-			b.markDone()
-			return nil
+		if sweepEnded {
+			if !hadFailureThisSweep {
+				b.markDone()
+				return nil
+			}
+			if !sleepCtx(ctx, b.pollInterval()) {
+				return nil
+			}
+			cursor = startAfter
+			hadFailureThisSweep = false
+			continue
 		}
 
 		select {
@@ -335,9 +451,19 @@ func (b *Backfill) runBatch(ctx context.Context, ids []int64, workers int) {
 // "skipped" in its return value (both return nil), so process reads back
 // the just-written index state to tell them apart and to recover the skip
 // reason for SkippedByReason.
+//
+// An error caused by ctx being cancelled (a shutdown or interruption, not
+// a real embedding failure — see IndexEntry's own doc comment) is not
+// counted as a failure here either, mirroring IndexEntry's choice not to
+// write entry_index_state for it: a cancelled attempt was never actually
+// finished, so counting it would inflate Stats().Failed on every graceful
+// shutdown (fix round 1, finding 8).
 func (b *Backfill) process(ctx context.Context, id int64) {
 	err := b.idx.IndexEntry(ctx, id)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		b.failed.Add(1)
 		b.failedByReason.add(err.Error())
 		slog.Error("backfill lane: unable to index entry", slog.Int64("entry_id", id), slog.Any("error", err))
@@ -374,7 +500,6 @@ func (b *Backfill) Stats() Stats {
 	b.mu.Lock()
 	paused := b.paused
 	done := b.done
-	startedAt := b.startedAt
 	b.mu.Unlock()
 
 	indexed := b.indexed.Load()
@@ -382,16 +507,21 @@ func (b *Backfill) Stats() Stats {
 	failed := b.failed.Load()
 
 	var throughput float64
-	if !startedAt.IsZero() {
-		if elapsed := time.Since(startedAt).Seconds(); elapsed > 0 {
-			throughput = float64(indexed+skipped+failed) / elapsed
-		}
+	if active := time.Duration(b.activeNanos.Load()); active > 0 {
+		throughput = float64(indexed+skipped+failed) / active.Seconds()
+	}
+
+	remaining, err := b.idx.store.PendingEntryCount()
+	if err != nil {
+		slog.Error("backfill lane: unable to count remaining pending entries for Stats()", slog.Any("error", err))
+		remaining = -1
 	}
 
 	return Stats{
 		Indexed:          indexed,
 		Skipped:          skipped,
 		Failed:           failed,
+		Remaining:        remaining,
 		SkippedByReason:  b.skippedByReason.snapshot(),
 		FailedByReason:   b.failedByReason.snapshot(),
 		Workers:          b.controller.Workers(),
