@@ -28,6 +28,7 @@ type PassageRow struct {
 type IndexState struct {
 	ContentHash string
 	Status      string
+	Reason      string // empty for status="ok"; a skip or failure reason otherwise
 }
 
 // EntryIndexState returns the currently recorded index state for an entry,
@@ -35,16 +36,18 @@ type IndexState struct {
 // search.entry_index_state yet).
 func (s *Store) EntryIndexState(entryID int64) (*IndexState, error) {
 	var st IndexState
+	var reason sql.NullString
 	err := s.db.QueryRow(
-		`SELECT content_hash, status FROM search.entry_index_state WHERE entry_id=$1`,
+		`SELECT content_hash, status, reason FROM search.entry_index_state WHERE entry_id=$1`,
 		entryID,
-	).Scan(&st.ContentHash, &st.Status)
+	).Scan(&st.ContentHash, &st.Status, &reason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: unable to fetch index state for entry #%d: %w", entryID, err)
 	}
+	st.Reason = reason.String
 
 	return &st, nil
 }
