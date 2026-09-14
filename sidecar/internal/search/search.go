@@ -41,14 +41,47 @@ type PassageHit struct {
 // constraint from this field". Filters are plain predicates against
 // public.entries, per spec §6.4, applied to a passage's owning entry.
 //
-// Both passages_bm25_idx and passages_embedding_idx cover only the
-// passage's own columns (id/text, and embedding respectively) — neither
-// can push a Filters predicate into its index scan. Every retrieval
-// method in this package therefore over-fetches a generous candidate set
-// from its index first and applies Filters afterward, in a join against
-// public.entries; see each method's own candidateMultiplier for the
-// factor used and why.
+// Neither passages_bm25_idx nor passages_embedding_idx can evaluate a
+// Filters predicate itself — they cover only the passage's own columns
+// (id/text, and embedding respectively) — so every retrieval method here
+// joins public.entries to apply one.
+//
+// That join is INSIDE the candidates CTE, above the index scan but below
+// the CTE's own LIMIT, not applied to the CTE's output afterwards. The
+// distinction is the whole point and it was got wrong once: a filter
+// applied after the candidate LIMIT lets non-matching rows consume the
+// candidate budget, so a narrow predicate can return nothing at all while
+// plenty of matching passages exist. Inside the CTE, the LIMIT counts only
+// rows that already passed the filter. Verified on the real corpus:
+// EXPLAIN ANALYZE puts the Limit node above the join for the BM25 path,
+// and the vector path's planner picks an exact filtered scan.
+//
+// The over-fetch (candidateMultiplier) is still there and still useful —
+// retrieval is passage-level and results are entry-level — but it is no
+// longer load-bearing for correctness under a filter.
 type Filters struct {
+	// UserID restricts results to entries owned by that Miniflux user.
+	// Zero means no restriction — every user's passages are eligible.
+	//
+	// This one is not like the others. The rest of this struct is a
+	// convenience: a reader narrowing their own results to one feed, one
+	// category, a date range. UserID is a correctness requirement on a
+	// multi-user instance, and leaving it unset there is a silent bug
+	// rather than a wider search.
+	//
+	// search.passages is global — one row per passage of every entry of
+	// every user — so an unscoped retrieval fills its top-N from the
+	// whole corpus. A caller that then applies its own ownership filter
+	// downstream (the fork's search page hydrates hits through
+	// NewEntryQueryBuilder(user.ID), so it never *displays* another
+	// user's entry) is still left with a result page that other users'
+	// content already consumed the slots of: the reader silently gets
+	// fewer results than exist for their own query, potentially none.
+	// Setting UserID pushes the ownership predicate down to where the
+	// candidate set is formed, which is the only place it can decide
+	// what the top-N is made of.
+	UserID int64
+
 	// FeedIDs restricts results to entries from these feeds. Empty means
 	// no restriction.
 	FeedIDs []int64
@@ -73,7 +106,8 @@ type Filters struct {
 // skip the join to public.entries entirely rather than filtering against
 // an always-true predicate.
 func (f Filters) empty() bool {
-	return len(f.FeedIDs) == 0 &&
+	return f.UserID == 0 &&
+		len(f.FeedIDs) == 0 &&
 		len(f.CategoryIDs) == 0 &&
 		f.Since.IsZero() &&
 		f.Until.IsZero() &&

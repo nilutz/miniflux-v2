@@ -22,7 +22,7 @@ import (
 
 // fakeSearcher is a hermetic stand-in for *search.Searcher: it satisfies
 // SearchService with no store, no embedder and no database connection, so
-// these tests never need SIDECAR_DATABASE_URL. It records the last
+// these tests never need a database at all. It records the last
 // request/call it received so a test can assert query parameters were
 // parsed and threaded through to the Searcher correctly (the "filters
 // round-trip" requirement), and that an invalid request never reaches it
@@ -472,5 +472,160 @@ func TestSimilarErrorIs500WithNoInternalDetailLeaked(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "10.0.0.5") {
 		t.Fatalf("response body leaked internal detail: %s", rec.Body.String())
+	}
+}
+
+// --- user scoping (whole-branch review, finding 3) ------------------------
+
+// countingEntries is an EntryLookup that records how many times it was
+// consulted, so a test can assert that a handler did no snippet work at
+// all rather than merely that the snippet came out empty.
+type countingEntries struct {
+	entryCalls int
+	stateCalls int
+}
+
+func (c *countingEntries) EntryForIndexing(entryID int64) (*store.Entry, error) {
+	c.entryCalls++
+	return &store.Entry{ID: entryID, Title: "t", Content: "<p>body</p>"}, nil
+}
+
+func (c *countingEntries) EntryIndexState(entryID int64) (*store.IndexState, error) {
+	c.stateCalls++
+	return nil, nil
+}
+
+// TestSearchUserParameterReachesTheSearcher is the fix for the review's
+// finding 3 at the API boundary: search.passages is global, so unless the
+// caller's user id reaches search.Filters the top-N is drawn from every
+// user's content and the caller silently gets a short page of their own.
+func TestSearchUserParameterReachesTheSearcher(t *testing.T) {
+	fs := &fakeSearcher{}
+	handler := newTestSearchServer(t, fs, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=widgets&user=7", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fs.lastRequest.Filters.UserID != 7 {
+		t.Fatalf("Filters.UserID sent to Search = %d, want 7", fs.lastRequest.Filters.UserID)
+	}
+}
+
+// TestSearchWithoutUserParameterIsUnscoped pins the documented default:
+// an absent "user" still means "every user's content", for the operator
+// and eval callers that legitimately want that.
+func TestSearchWithoutUserParameterIsUnscoped(t *testing.T) {
+	fs := &fakeSearcher{}
+	handler := newTestSearchServer(t, fs, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=widgets", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fs.lastRequest.Filters.UserID != 0 {
+		t.Fatalf("Filters.UserID = %d, want 0 (unscoped)", fs.lastRequest.Filters.UserID)
+	}
+}
+
+func TestSimilarUserParameterReachesTheSearcher(t *testing.T) {
+	fs := &fakeSearcher{}
+	handler := newTestSearchServer(t, fs, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/similar?entry_id=42&user=7", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fs.lastFilters.UserID != 7 {
+		t.Fatalf("Filters.UserID sent to Similar = %d, want 7", fs.lastFilters.UserID)
+	}
+}
+
+// TestBadUserParameterIsBadRequest proves a caller that meant to scope
+// and got it wrong is told so, rather than quietly answered with the
+// whole corpus.
+func TestBadUserParameterIsBadRequest(t *testing.T) {
+	for _, target := range []string{
+		"/api/search?q=widgets&user=nope",
+		"/api/search?q=widgets&user=0",
+		"/api/search?q=widgets&user=-3",
+		"/api/similar?entry_id=42&user=nope",
+		"/api/similar?entry_id=42&user=0",
+	} {
+		fs := &fakeSearcher{}
+		handler := newTestSearchServer(t, fs, nil)
+
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("GET %s: status = %d, body = %s, want 400", target, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// --- no snippet work on the similar path (finding 2) ----------------------
+
+// TestSimilarDoesNoSnippetWork is the fix for the review's finding 2: the
+// fork's entry page renders a similar article's title, feed and category
+// from its own database and never reads a snippet, so /api/similar must
+// not pay for one. Asserting on the EntryLookup call count rather than on
+// the response body is deliberate — an empty snippet field would look the
+// same either way; only the call count proves the round trips and the
+// HTML extraction did not happen.
+func TestSimilarDoesNoSnippetWork(t *testing.T) {
+	fs := &fakeSearcher{similarHits: []search.EntryHit{
+		{EntryID: 100, Score: 0.1, Best: search.PassageHit{Text: "a"}},
+		{EntryID: 200, Score: 0.2, Best: search.PassageHit{Text: "b"}},
+	}}
+	lookup := &countingEntries{}
+	handler := newTestSearchServer(t, fs, lookup)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/similar?entry_id=42", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if lookup.entryCalls != 0 || lookup.stateCalls != 0 {
+		t.Fatalf("EntryLookup consulted %d/%d times building a similar-article response; want 0 — no snippets there",
+			lookup.entryCalls, lookup.stateCalls)
+	}
+	if strings.Contains(rec.Body.String(), "snippet") {
+		t.Fatalf("/api/similar response still carries a snippet field: %s", rec.Body.String())
+	}
+}
+
+// TestSearchStillBuildsSnippets is the counterweight: dropping snippets
+// from /api/similar must not drop them from /api/search, where they are
+// what explains the match.
+func TestSearchStillBuildsSnippets(t *testing.T) {
+	fs := &fakeSearcher{response: search.Response{
+		Mode:    search.ModeHybrid,
+		Entries: []search.EntryHit{{EntryID: 100, Best: search.PassageHit{Text: "a"}}},
+	}}
+	lookup := &countingEntries{}
+	handler := newTestSearchServer(t, fs, lookup)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=widgets", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if lookup.entryCalls == 0 {
+		t.Fatal("/api/search built no snippet: EntryLookup was never consulted")
 	}
 }

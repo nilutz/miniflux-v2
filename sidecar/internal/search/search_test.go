@@ -33,7 +33,7 @@ func hasEntryIDInEntries(hits []EntryHit, entryID int64) bool {
 //
 // ModeKeyword is used deliberately so this test needs no embedder and no
 // ONNX runtime, matching this package's own "hermetic where possible"
-// posture — it still requires SIDECAR_DATABASE_URL, like every other
+// posture — it still requires SIDECAR_TEST_DATABASE_URL, like every other
 // fixture-backed test in this package, and skips cleanly without it.
 func TestSearchFiltersNarrowResultsThroughFullRequestPath(t *testing.T) {
 	s := testStore(t)
@@ -150,7 +150,7 @@ func TestSearchPassageModeFiltersToo(t *testing.T) {
 // --- corpus-scale regression tests ---------------------------------------
 //
 // The two tests below run against whatever real corpus
-// SIDECAR_DATABASE_URL points at, rather than against a hand-written
+// SIDECAR_TEST_DATABASE_URL points at, rather than against a hand-written
 // fixture, because both bugs they guard are bugs of *scale*: one needs a
 // large Limit, the other needs an entry that owns several matching
 // passages. A two-passage fixture cannot exhibit either.

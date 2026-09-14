@@ -15,6 +15,7 @@ import (
 	"miniflux.app/v2/sidecar/internal/search"
 	"miniflux.app/v2/sidecar/internal/search/eval"
 	"miniflux.app/v2/sidecar/internal/store"
+	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
 // This file, not internal/search, is deliberately where the task 4
@@ -34,12 +35,12 @@ import (
 //
 //	CGO_LDFLAGS="-L<dir-with-libtokenizers.a>" \
 //	DYLD_LIBRARY_PATH=/opt/homebrew/opt/onnxruntime/lib \
-//	SIDECAR_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/miniflux2?sslmode=disable \
+//	SIDECAR_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/miniflux2?sslmode=disable \
 //	SIDECAR_MODEL_PATH=<path-to-model_quantized.onnx> \
 //	SIDECAR_ONNX_LIB_DIR=/opt/homebrew/opt/onnxruntime/lib \
 //	  go test -tags ORT ./cmd/sidecar/ -run TestEvalRecall -v
 //
-// Skips (not fails) without SIDECAR_DATABASE_URL or SIDECAR_MODEL_PATH,
+// Skips (not fails) without SIDECAR_TEST_DATABASE_URL or SIDECAR_MODEL_PATH,
 // exactly like every other database/model-backed test in this module.
 
 // evalQueriesPath locates the committed, hand-labelled query set relative
@@ -51,10 +52,7 @@ const evalQueriesPath = "../../internal/search/eval/testdata/queries.json"
 const evalK = 10
 
 func TestEvalRecall(t *testing.T) {
-	dsn := os.Getenv("SIDECAR_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SIDECAR_DATABASE_URL is not set, skipping database test")
-	}
+	dsn := testdb.DSN(t)
 	modelPath := os.Getenv("SIDECAR_MODEL_PATH")
 	if modelPath == "" {
 		t.Skip("SIDECAR_MODEL_PATH is not set, skipping model test")

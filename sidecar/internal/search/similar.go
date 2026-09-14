@@ -198,8 +198,9 @@ func selectSeedIndices(n, maxSeeds int) []int {
 }
 
 // nearestExcludingEntry ranks passages by cosine distance to vec,
-// excluding every passage belonging to excludeEntryID, applying f after
-// retrieval, and returns up to limit hits ordered best-first. Its SQL
+// excluding every passage belonging to excludeEntryID, applying f within
+// the same candidate scan, and returns up to limit hits ordered
+// best-first. Its SQL
 // shape mirrors Semantic's own (semantic.go) -- the same candidates CTE,
 // the same over-fetch/clamp (vectorCandidates, semantic.go — which
 // ceilings the count at pgvector's own hnsw.ef_search maximum of 1000,
@@ -213,14 +214,14 @@ func selectSeedIndices(n, maxSeeds int) []int {
 // than merely filtering after the fact.
 //
 // excludeEntryID's exclusion happens inside the candidates CTE, before
-// its own LIMIT -- not as a post-filter applied after fetching
-// candidates, unlike Filters (whose predicates need a join to
-// public.entries the CTE doesn't have). Passages from the same entry are
-// frequently the most similar passages of all (adjacent chunks of one
-// article routinely cosine-match each other more closely than any other
-// entry's content), so excluding them only after the CTE's LIMIT would
-// let them silently consume most or all of the candidate budget, this is
-// exactly the failure this method exists to prevent.
+// its own LIMIT, and so does f's -- both for the same reason. Passages
+// from the same entry are frequently the most similar passages of all
+// (adjacent chunks of one article routinely cosine-match each other more
+// closely than any other entry's content), so excluding them only after
+// the CTE's LIMIT would let them silently consume most or all of the
+// candidate budget; a filter applied after that LIMIT fails the same way,
+// which is why Filters now joins public.entries inside the CTE too (see
+// Filters' own doc comment).
 func (s *Searcher) nearestExcludingEntry(ctx context.Context, vec []float32, limit int, excludeEntryID int64, f Filters) ([]PassageHit, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -230,30 +231,30 @@ func (s *Searcher) nearestExcludingEntry(ctx context.Context, vec []float32, lim
 
 	var b strings.Builder
 	args := []any{vectorLiteral(vec), excludeEntryID, candidates}
+	where, whereArgs := f.whereClause(len(args) + 1)
+	args = append(args, whereArgs...)
 
 	b.WriteString(`
 		WITH candidates AS (
-			SELECT id, entry_id, ordinal, text, char_start, char_end, source,
-			       (embedding <=> $1::public.vector) AS distance
-			FROM search.passages
-			WHERE entry_id != $2
-			ORDER BY embedding <=> $1::public.vector
+			SELECT p.id, p.entry_id, p.ordinal, p.text, p.char_start, p.char_end, p.source,
+			       (p.embedding <=> $1::public.vector) AS distance
+			FROM search.passages p
+	`)
+	if where != "" {
+		b.WriteString(" JOIN entries e ON e.id = p.entry_id")
+	}
+	b.WriteString(" WHERE p.entry_id != $2")
+	if where != "" {
+		b.WriteString(" AND ")
+		b.WriteString(where)
+	}
+	b.WriteString(`
+			ORDER BY p.embedding <=> $1::public.vector
 			LIMIT $3
 		)
 		SELECT c.id, c.entry_id, c.ordinal, c.text, c.char_start, c.char_end, c.source, c.distance
 		FROM candidates c
 	`)
-
-	if !f.empty() {
-		b.WriteString(" JOIN entries e ON e.id = c.entry_id")
-	}
-
-	where, whereArgs := f.whereClause(len(args) + 1)
-	if where != "" {
-		b.WriteString(" WHERE ")
-		b.WriteString(where)
-		args = append(args, whereArgs...)
-	}
 
 	b.WriteString(fmt.Sprintf(" ORDER BY c.distance ASC, c.id ASC LIMIT $%d", len(args)+1))
 	args = append(args, limit)

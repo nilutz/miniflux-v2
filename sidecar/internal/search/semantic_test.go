@@ -193,7 +193,7 @@ func (c *countingReader) QueryRowContext(_ context.Context, _ string, _ ...any) 
 	return nil
 }
 
-// --- hermetic tests: no database, no SIDECAR_DATABASE_URL required --------
+// --- hermetic tests: no database, no SIDECAR_TEST_DATABASE_URL required ---
 
 // TestSemanticEmptyQueryDoesNotReachDatabase mirrors Lexical's own
 // contract for a blank query: nothing for the database or the embedder to
@@ -255,7 +255,7 @@ func TestSemanticWithoutAnEmbedderConfiguredFailsClearly(t *testing.T) {
 	}
 }
 
-// --- database-backed tests: skip without SIDECAR_DATABASE_URL -------------
+// --- database-backed tests: skip without SIDECAR_TEST_DATABASE_URL --------
 //
 // These reuse testStore/testDB/createFixtureEntry/writePassages from
 // lexical_test.go: same fixture conventions, same "zzyzx" vocabulary

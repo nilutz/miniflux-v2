@@ -3,8 +3,8 @@
 
 // This file implements the sidecar's read-only search HTTP API (task 7):
 //
-//	GET /api/search?q=&mode=&limit=&feed=&category=&unread=&starred=&since=&until=
-//	GET /api/similar?entry_id=&limit=&feed=&category=&unread=&starred=&since=&until=
+//	GET /api/search?q=&mode=&limit=&user=&feed=&category=&unread=&starred=&since=&until=
+//	GET /api/similar?entry_id=&limit=&user=&feed=&category=&unread=&starred=&since=&until=
 //
 // Why these two endpoints do NOT carry sameOriginOrNoOrigin's check
 // (server.go), unlike POST /api/backfill/pause|resume|config:
@@ -165,10 +165,37 @@ type searchResponseView struct {
 	Passages []passageResultView `json:"passages,omitempty"`
 }
 
+// similarEntryResultView is one GET /api/similar result. It is
+// deliberately NOT entryResultView: it carries no snippet.
+//
+// /api/search's snippet answers "why did this match?", which a result
+// list has to show. "More like this" has no query to highlight and no
+// match to explain — the fork's entry page renders a similar article as
+// its title, feed and category, all of which it already has in its own
+// database — so every snippet /api/similar used to build was discarded
+// by its only consumer.
+//
+// Building them was not free. One similar-article response is up to
+// limit results; each snippet costs an EntryForIndexing (the entry's
+// full HTML content, detoasted) plus an EntryIndexState round trip and
+// a full ExtractText pass over that HTML, all of it on the entry page's
+// synchronous render path. Measured against this corpus that was
+// roughly 430 KB of article HTML over 20 round trips and 10 HTML
+// extractions per entry page view, for output nothing read.
+//
+// Dropping the field from the wire type, rather than leaving it present
+// and empty, is what stops it quietly coming back: a future caller that
+// wants a snippet here has to add it deliberately, and pay for it
+// deliberately.
+type similarEntryResultView struct {
+	EntryID int64   `json:"entry_id"`
+	Score   float64 `json:"score"`
+}
+
 // similarResponseView is GET /api/similar's response body.
 type similarResponseView struct {
-	EntryID int64             `json:"entry_id"`
-	Entries []entryResultView `json:"entries"`
+	EntryID int64                    `json:"entry_id"`
+	Entries []similarEntryResultView `json:"entries"`
 }
 
 // entrySnapshot is one entry's current state plus its last-recorded index
@@ -250,6 +277,17 @@ func (s *Server) buildEntryViews(hits []search.EntryHit, query string) []entryRe
 			Score:   h.Score,
 			Snippet: buildSnippetView(h.Best, snaps.get(h.EntryID), query),
 		})
+	}
+	return views
+}
+
+// buildSimilarEntryViews serialises similar-article hits with no snippet
+// work at all — no EntryLookup round trips, no HTML extraction. See
+// similarEntryResultView for why.
+func buildSimilarEntryViews(hits []search.EntryHit) []similarEntryResultView {
+	views := make([]similarEntryResultView, 0, len(hits))
+	for _, h := range hits {
+		views = append(views, similarEntryResultView{EntryID: h.EntryID, Score: h.Score})
 	}
 	return views
 }
@@ -385,10 +423,47 @@ func parseDateParam(raw, name string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("%s must be RFC3339 or YYYY-MM-DD, got %q", name, raw)
 }
 
+// parseUserID parses the optional "user" query parameter into
+// search.Filters.UserID.
+//
+// Absent/blank means 0, which search.Filters reads as "every user's
+// content is eligible". That is deliberately still permitted — this
+// service is loopback-bound, unauthenticated, and has operator-facing
+// callers (the eval harness, a curl against one's own corpus) for which
+// a global search is the point — but it is NOT what a multi-user reader
+// UI should send: see search.Filters.UserID's own doc comment for why an
+// unscoped search silently shortens a user's own result page rather than
+// merely widening it. The fork's searchclient always sets it.
+//
+// A present-but-nonsensical value (not a whole number, zero, negative)
+// is a 400 rather than a silent fall back to "unscoped": a caller that
+// meant to scope and got it wrong must not be quietly answered with the
+// whole corpus.
+func parseUserID(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("user must be a whole number, got %q", raw)
+	}
+	if id <= 0 {
+		return 0, fmt.Errorf("user must be positive, got %d", id)
+	}
+	return id, nil
+}
+
 // parseFilters parses every filter query parameter shared by
 // GET /api/search and GET /api/similar into a search.Filters.
 func parseFilters(q url.Values) (search.Filters, error) {
 	var f search.Filters
+
+	userID, err := parseUserID(q.Get("user"))
+	if err != nil {
+		return f, err
+	}
+	f.UserID = userID
 
 	feedIDs, err := parseIDList(q["feed"], "feed")
 	if err != nil {
@@ -516,12 +591,9 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Similar has no free-text query to highlight against — "" is passed
-	// as BuildSnippet's query, which still re-derives and slices the
-	// correct plaintext window (see BuildSnippet's own doc comment); it
-	// simply produces no Highlights, since queryTerms("") is empty.
+	// No snippets here, by design: see similarEntryResultView.
 	writeJSON(w, similarResponseView{
 		EntryID: entryID,
-		Entries: s.buildEntryViews(hits, ""),
+		Entries: buildSimilarEntryViews(hits),
 	})
 }

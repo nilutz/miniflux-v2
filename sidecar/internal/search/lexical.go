@@ -16,13 +16,16 @@ import (
 
 // candidateMultiplier is how many times limit's worth of candidates are
 // pulled from passages_bm25_idx (and, in semantic.go/similar.go, from
-// passages_embedding_idx) before Filters is applied. The index covers
-// only (id, text) — it cannot push a feed/category/date/status predicate
-// into its own scan — so a candidate set that already matches the final
-// limit exactly would come back short after filtering removes some of
-// it. 5x is generous enough that a filter excluding up to 80% of an
-// unfiltered ranking still leaves a full page of results, without
-// pulling in enough of the corpus's long BM25 tail to matter for latency.
+// passages_embedding_idx) before the result is truncated to limit.
+// Retrieval is passage-level and callers want entries, so several
+// candidates routinely collapse into one result; 5x is generous enough
+// to fill a page without pulling in enough of the corpus's long BM25
+// tail to matter for latency.
+//
+// It is NOT what makes a filtered search correct — Filters is applied
+// inside the candidates CTE, beneath its LIMIT, so the candidate budget
+// is never spent on rows the filter would reject (see Filters' own doc
+// comment).
 //
 // BEWARE THE AMPLIFICATION. This is the inner of two independent 5x
 // multipliers, and they COMPOUND. A caller's Request.Limit is multiplied
@@ -109,7 +112,8 @@ func NewSearcher(s *store.Store, opts ...SearcherOption) *Searcher {
 }
 
 // Lexical ranks passages by BM25 (paradedb.score) against query, applying
-// f after retrieval, and returns up to limit hits ordered best-first.
+// f within its own candidate scan, and returns up to limit hits ordered
+// best-first.
 //
 // query is never interpolated into pg_search's query-string syntax: it is
 // passed as the value argument to paradedb.match('text', query), which
@@ -127,15 +131,10 @@ func NewSearcher(s *store.Store, opts ...SearcherOption) *Searcher {
 // blank search bar or a zero-result page size could usefully ask
 // ParadeDB for.
 //
-// Caveat for callers of a filtered search: f is applied after Lexical
-// pulls its BM25 candidate set (passages_bm25_idx covers only (id, text)
-// and cannot push a Filters predicate into its own scan), so a filter
-// narrow enough to exclude more than roughly the top candidateMultiplier
-// fraction of the unfiltered ranking can legitimately return fewer than
-// limit hits even when more matching passages exist further down BM25's
-// ranking. This is not a bug to chase — it is the accepted cost of an
-// index that cannot filter for itself — but it is worth knowing before
-// diagnosing a short result page as a retrieval defect.
+// f is applied INSIDE the candidates CTE, via a join to public.entries
+// beneath the CTE's own LIMIT, so the candidate budget is spent entirely
+// on rows that already match the filter. See Filters' own doc comment for
+// why that placement matters and what it used to cost when it was wrong.
 func (s *Searcher) Lexical(ctx context.Context, query string, limit int, f Filters) ([]PassageHit, error) {
 	if strings.TrimSpace(query) == "" || limit <= 0 {
 		return nil, nil
@@ -151,30 +150,30 @@ func (s *Searcher) Lexical(ctx context.Context, query string, limit int, f Filte
 
 	var b strings.Builder
 	args := []any{query, candidates}
+	where, whereArgs := f.whereClause(len(args) + 1)
+	args = append(args, whereArgs...)
 
 	b.WriteString(`
 		WITH candidates AS (
-			SELECT id, entry_id, ordinal, text, char_start, char_end, source,
-			       paradedb.score(id) AS score
-			FROM search.passages
-			WHERE text @@@ paradedb.match('text', $1)
-			ORDER BY paradedb.score(id) DESC, id ASC
+			SELECT p.id, p.entry_id, p.ordinal, p.text, p.char_start, p.char_end, p.source,
+			       paradedb.score(p.id) AS score
+			FROM search.passages p
+	`)
+	if where != "" {
+		b.WriteString(" JOIN entries e ON e.id = p.entry_id")
+	}
+	b.WriteString(" WHERE p.text @@@ paradedb.match('text', $1)")
+	if where != "" {
+		b.WriteString(" AND ")
+		b.WriteString(where)
+	}
+	b.WriteString(`
+			ORDER BY paradedb.score(p.id) DESC, p.id ASC
 			LIMIT $2
 		)
 		SELECT c.id, c.entry_id, c.ordinal, c.text, c.char_start, c.char_end, c.source, c.score
 		FROM candidates c
 	`)
-
-	if !f.empty() {
-		b.WriteString(" JOIN entries e ON e.id = c.entry_id")
-	}
-
-	where, whereArgs := f.whereClause(len(args) + 1)
-	if where != "" {
-		b.WriteString(" WHERE ")
-		b.WriteString(where)
-		args = append(args, whereArgs...)
-	}
 
 	b.WriteString(fmt.Sprintf(" ORDER BY c.score DESC, c.id ASC LIMIT $%d", len(args)+1))
 	args = append(args, limit)
@@ -206,11 +205,11 @@ func (s *Searcher) Lexical(ctx context.Context, query string, limit int, f Filte
 
 // whereClause builds the dynamic filter predicate against the "e" alias
 // (public.entries) that every retrieval method in this package applies
-// after fetching its own candidate set — see Filters' own doc comment for
-// why filtering can't happen inside either index's scan. argStart is the
-// 1-based placeholder number the first generated predicate should use;
-// callers append their own leading arguments (the query text, a
-// candidate LIMIT, an embedding) before this clause's.
+// inside its own candidates CTE, beneath that CTE's LIMIT — see Filters'
+// own doc comment for why the placement matters. argStart is the 1-based
+// placeholder number the first generated predicate should use; callers
+// append their own leading arguments (the query text, a candidate LIMIT,
+// an embedding) before this clause's.
 //
 // It returns "" with a nil arg slice when f is empty, so a caller can
 // skip both the JOIN and the WHERE entirely for the common unfiltered
@@ -224,6 +223,11 @@ func (f Filters) whereClause(argStart int) (string, []any) {
 	var args []any
 	idx := argStart
 
+	if f.UserID != 0 {
+		conds = append(conds, fmt.Sprintf("e.user_id = $%d", idx))
+		args = append(args, f.UserID)
+		idx++
+	}
 	if len(f.FeedIDs) > 0 {
 		conds = append(conds, fmt.Sprintf("e.feed_id = ANY($%d)", idx))
 		args = append(args, pq.Array(f.FeedIDs))

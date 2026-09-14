@@ -157,6 +157,7 @@ repository:
 ```sh
 CGO_LDFLAGS="-L<dir-with-libtokenizers.a>" \
 DYLD_LIBRARY_PATH=/opt/homebrew/opt/onnxruntime/lib \
+SIDECAR_TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5434/miniflux2_test?sslmode=disable" \
 SIDECAR_MODEL_PATH=<path-to-model_quantized.onnx> \
 SIDECAR_ONNX_LIB_DIR=/opt/homebrew/opt/onnxruntime/lib \
   make test
@@ -208,10 +209,21 @@ when the corresponding variable is unset. Note that this is about *runtime*
 services only — it says nothing about the native libraries the ONNX packages
 need in order to link at all (see "Running the tests" below).
 
-- `SIDECAR_DATABASE_URL` — a Postgres DSN (e.g.
-  `postgres://postgres:postgres@127.0.0.1:5434/miniflux2?sslmode=disable`)
-  pointing at a running ParadeDB instance. Used by `internal/store` and
-  `internal/indexer`. Unset: those tests `t.Skip`.
+- `SIDECAR_TEST_DATABASE_URL` — a Postgres DSN (e.g.
+  `postgres://postgres:postgres@127.0.0.1:5434/miniflux2_test?sslmode=disable`)
+  pointing at a running ParadeDB instance. Used by `internal/store`,
+  `internal/search`, `internal/search/eval`, `internal/indexer` and
+  `cmd/sidecar`. Unset: those tests `t.Skip`.
+
+  **This is deliberately not `SIDECAR_DATABASE_URL`.** That one is what the
+  sidecar *binary* reads, and what the operator guide tells you to point at
+  your live Miniflux database. `make test` runs `internal/indexer`'s suite,
+  which sweeps the entire `entries` table and rewrites `search.passages`
+  with a fake embedder; sharing one variable between "run the service" and
+  "run the tests" put a destroyed corpus one `export` away, and did destroy
+  one in this project. Point `SIDECAR_TEST_DATABASE_URL` at a throwaway
+  database — `internal/testdb` fails the run outright, rather than skipping,
+  if the two variables name the same place.
 - `SIDECAR_MODEL_PATH` — filesystem path to the quantized embedding model
   (`model_quantized.onnx`), used by `internal/embed/onnx`. Unset: those
   tests `t.Skip`.
@@ -224,14 +236,23 @@ need in order to link at all (see "Running the tests" below).
 ```sh
 make dev-db
 CGO_LDFLAGS="-L<dir-with-libtokenizers.a>" \
-SIDECAR_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5434/miniflux2?sslmode=disable" \
+SIDECAR_TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5434/miniflux2_test?sslmode=disable" \
   make test
+```
+
+For the packages that need neither a database nor the native libraries —
+the set CI runs — there is a target that needs no environment at all:
+
+```sh
+make test-hermetic
 ```
 
 Two separate things are optional here, and they fail in different ways:
 
-- **`SIDECAR_DATABASE_URL` is genuinely optional.** Without it the
-  database-backed tests `t.Skip` and everything else still passes.
+- **`SIDECAR_TEST_DATABASE_URL` is genuinely optional.** Without it the
+  database-backed tests `t.Skip` and everything else still passes. What is
+  *not* optional is that it must never be your live database: see the
+  variable's own entry above.
 - **`libtokenizers.a` is not.** `make test` passes `-tags ORT` and covers
   `./...`, which includes `internal/embed/onnx` and `cmd/sidecar`; both link
   the native tokenizer, so on a machine without it `make test` fails at the
@@ -240,7 +261,7 @@ Two separate things are optional here, and they fail in different ways:
   packages that do not need them directly:
 
   ```sh
-  go test ./internal/indexer/ ./internal/store/ ./internal/web/ ./internal/passage/ ./internal/embed
+  make test-hermetic
   ```
 
 ## Running the sidecar

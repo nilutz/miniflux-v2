@@ -5,11 +5,12 @@ package eval // import "miniflux.app/v2/sidecar/internal/search/eval"
 
 import (
 	"database/sql"
-	"os"
 	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
+
+	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
 // checkCorpusStats is pure logic — no database — so every failure mode the
@@ -132,7 +133,7 @@ func assertMentionsReindex(t *testing.T, err error) {
 // this package's hermetic contract (see eval.go's package doc) is
 // deliberately broken, for the same reason store's own tests break it:
 // there is no way to verify VerifyCorpusIntegrity's SQL against anything
-// but a real ParadeDB database. They skip without SIDECAR_DATABASE_URL,
+// but a real ParadeDB database. They skip without SIDECAR_TEST_DATABASE_URL,
 // per the plan's global constraints, and they never write anything —
 // only SELECT — so there is no way for them to touch, let alone corrupt,
 // the corpus.
@@ -140,10 +141,7 @@ func assertMentionsReindex(t *testing.T, err error) {
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	dsn := os.Getenv("SIDECAR_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SIDECAR_DATABASE_URL is not set, skipping database test")
-	}
+	dsn := testdb.DSN(t)
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

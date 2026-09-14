@@ -5,18 +5,16 @@ package store // import "miniflux.app/v2/sidecar/internal/store"
 
 import (
 	"database/sql"
-	"os"
 	"strings"
 	"testing"
+
+	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
 
-	dsn := os.Getenv("SIDECAR_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SIDECAR_DATABASE_URL is not set, skipping database test")
-	}
+	dsn := testdb.DSN(t)
 
 	s, err := New(dsn)
 	if err != nil {

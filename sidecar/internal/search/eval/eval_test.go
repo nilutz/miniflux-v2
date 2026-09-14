@@ -12,7 +12,7 @@ import (
 
 // This file is hermetic on purpose (spec §11, task brief): no database, no
 // embedder, no network. It must pass with `go test ./internal/search/eval/`
-// alone, without -tags ORT and without SIDECAR_DATABASE_URL set.
+// alone, without -tags ORT and without SIDECAR_TEST_DATABASE_URL set.
 
 func TestRecallAtKCountsOnlyTheTopK(t *testing.T) {
 	relevant := []int64{10, 20, 30}

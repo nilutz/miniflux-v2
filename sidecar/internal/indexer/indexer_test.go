@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +17,7 @@ import (
 
 	"miniflux.app/v2/sidecar/internal/passage"
 	"miniflux.app/v2/sidecar/internal/store"
+	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
 // fakeEmbedder is a deterministic, call-counting stand-in for the real ONNX
@@ -84,16 +84,15 @@ func (b *batchRecordingEmbedder) sizes() []int {
 // testEnv opens both a *store.Store (the code under test) and a raw *sql.DB
 // (for fixture setup — package store's own db field is unexported and this
 // is a different package) against the same real dev database, and migrates
-// the search schema. Skips when SIDECAR_DATABASE_URL is unset, keeping the
+// the search schema. Skips when SIDECAR_TEST_DATABASE_URL is unset (and
+// refuses outright if it names the same database as SIDECAR_DATABASE_URL —
+// see package testdb; this suite sweeps the whole entries table), keeping the
 // default suite hermetic; this must never require SIDECAR_MODEL_PATH, since
 // no real ONNX model is loaded here.
 func testEnv(t *testing.T) (*store.Store, *sql.DB) {
 	t.Helper()
 
-	dsn := os.Getenv("SIDECAR_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SIDECAR_DATABASE_URL is not set, skipping database test")
-	}
+	dsn := testdb.DSN(t)
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

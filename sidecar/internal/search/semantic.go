@@ -115,9 +115,9 @@ func vectorCandidates(limit int) int {
 
 // Semantic ranks passages by cosine distance (embedding <=> query vector,
 // public.vector_cosine_ops — the same operator class passages_embedding_idx
-// is built on) against query's own embedding, applying f after retrieval,
-// and returns up to limit hits ordered best-first (smallest distance
-// first). Score on each hit is that raw cosine distance: 0 for an
+// is built on) against query's own embedding, applying f within its own
+// candidate scan, and returns up to limit hits ordered best-first
+// (smallest distance first). Score on each hit is that raw cosine distance: 0 for an
 // identical direction, 1 for orthogonal, 2 for opposite — never a
 // similarity, so a smaller Score is always a better match here, the
 // opposite sense from Lexical's Score. Rank, as with Lexical, is always
@@ -144,13 +144,15 @@ func vectorCandidates(limit int) int {
 //   - A failing embedder (model unavailable, request timeout, etc.) is
 //     returned as an error, not swallowed into an empty hit list.
 //
-// Caveat for callers of a filtered search: identical to Lexical's own —
-// passages_embedding_idx covers only the embedding column and cannot push a
-// Filters predicate into its HNSW scan, so f is applied after Semantic
-// pulls its candidate set. A filter narrow enough to exclude more than
-// roughly the top candidateMultiplier fraction of the unfiltered ranking
-// can legitimately return fewer than limit hits even though more matching
-// passages exist further down the corpus's vector ranking.
+// f is applied inside the candidates CTE, beneath its LIMIT, exactly as
+// in Lexical (see Filters' doc comment). One caveat remains specific to
+// this path: passages_embedding_idx cannot evaluate the predicate itself,
+// so the planner chooses between an HNSW scan whose results are then
+// filtered — which can still under-fill, since an HNSW scan yields at
+// most hnsw.ef_search tuples — and an exact filtered scan sorted by
+// distance. At this corpus's size it picks the exact plan and the
+// candidate set is complete; on a much larger corpus with a narrow
+// filter, pgvector's hnsw.iterative_scan is the lever for that case.
 func (s *Searcher) Semantic(ctx context.Context, query string, limit int, f Filters) ([]PassageHit, error) {
 	if strings.TrimSpace(query) == "" || limit <= 0 {
 		return nil, nil
@@ -165,29 +167,26 @@ func (s *Searcher) Semantic(ctx context.Context, query string, limit int, f Filt
 
 	var b strings.Builder
 	args := []any{vectorLiteral(vec), candidates}
+	where, whereArgs := f.whereClause(len(args) + 1)
+	args = append(args, whereArgs...)
 
 	b.WriteString(`
 		WITH candidates AS (
-			SELECT id, entry_id, ordinal, text, char_start, char_end, source,
-			       (embedding <=> $1::public.vector) AS distance
-			FROM search.passages
-			ORDER BY embedding <=> $1::public.vector
+			SELECT p.id, p.entry_id, p.ordinal, p.text, p.char_start, p.char_end, p.source,
+			       (p.embedding <=> $1::public.vector) AS distance
+			FROM search.passages p
+	`)
+	if where != "" {
+		b.WriteString(" JOIN entries e ON e.id = p.entry_id WHERE ")
+		b.WriteString(where)
+	}
+	b.WriteString(`
+			ORDER BY p.embedding <=> $1::public.vector
 			LIMIT $2
 		)
 		SELECT c.id, c.entry_id, c.ordinal, c.text, c.char_start, c.char_end, c.source, c.distance
 		FROM candidates c
 	`)
-
-	if !f.empty() {
-		b.WriteString(" JOIN entries e ON e.id = c.entry_id")
-	}
-
-	where, whereArgs := f.whereClause(len(args) + 1)
-	if where != "" {
-		b.WriteString(" WHERE ")
-		b.WriteString(where)
-		args = append(args, whereArgs...)
-	}
 
 	b.WriteString(fmt.Sprintf(" ORDER BY c.distance ASC, c.id ASC LIMIT $%d", len(args)+1))
 	args = append(args, limit)

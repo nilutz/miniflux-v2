@@ -16,7 +16,7 @@ import (
 
 // fakeBackfill is a hermetic stand-in for *indexer.Backfill: it satisfies
 // BackfillController without a store, an embedder, or a real Controller, so
-// these tests never need SIDECAR_DATABASE_URL or a native ONNX Runtime
+// these tests never need a database or a native ONNX Runtime
 // library. Pause/Resume just flip a flag Stats() reflects, matching the
 // contract the real Backfill.Pause/Resume/Stats documents.
 type fakeBackfill struct {

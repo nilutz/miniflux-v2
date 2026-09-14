@@ -6,7 +6,6 @@ package search // import "miniflux.app/v2/sidecar/internal/search"
 import (
 	"context"
 	"database/sql"
-	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -14,10 +13,12 @@ import (
 	_ "github.com/lib/pq"
 
 	"miniflux.app/v2/sidecar/internal/store"
+	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
 // testStore opens a real connection for these tests, skipping without
-// SIDECAR_DATABASE_URL per the plan's global constraints. Every fixture
+// SIDECAR_TEST_DATABASE_URL (never SIDECAR_DATABASE_URL, the variable the
+// sidecar binary itself reads — see package testdb). Every fixture
 // this file creates uses a distinctive, made-up vocabulary (a "zzyzx..."
 // prefix) so its rows can never collide with anything already in the
 // real, shared corpus these tests run alongside — and every fixture is
@@ -25,10 +26,7 @@ import (
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
 
-	dsn := os.Getenv("SIDECAR_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SIDECAR_DATABASE_URL is not set, skipping database test")
-	}
+	dsn := testdb.DSN(t)
 
 	s, err := store.New(dsn)
 	if err != nil {
@@ -52,10 +50,7 @@ func testStore(t *testing.T) *store.Store {
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	dsn := os.Getenv("SIDECAR_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SIDECAR_DATABASE_URL is not set, skipping database test")
-	}
+	dsn := testdb.DSN(t)
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
