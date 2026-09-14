@@ -20,14 +20,53 @@ type Entry struct {
 	ContentHash string
 }
 
+// PipelineVersion identifies the derivation pipeline whose output is
+// currently stored in search.passages: internal/passage's ExtractText (HTML
+// -> plaintext) and Split (plaintext -> passages with char_start/char_end
+// offsets into that plaintext).
+//
+// It exists because content_hash alone is not enough to decide whether a
+// stored passage set is still valid. The offsets index into a plaintext
+// that is never stored anywhere — P1b has to re-derive it by calling
+// ExtractText again — so ANY change to ExtractText or Split silently
+// invalidates every stored offset and passage boundary, with the entry's
+// HTML, and therefore its content hash, completely unchanged. Nothing
+// would detect that, and there would be no way to force a re-index short
+// of TRUNCATE plus a 4-41 hour re-run (spec §9.3).
+//
+// Folding it into the hash rather than adding a pipeline_version column
+// keeps exactly one value to compare, on both sides, with no migration and
+// no second predicate to keep in step: a bump changes every entry's
+// recorded hash, so PendingEntryIDs' existing content_hash comparison
+// re-offers the whole corpus by itself.
+//
+// **Bump this whenever internal/passage's extraction or splitting output
+// changes for any input.** internal/passage's TestPipelineOutputDigestIsStable
+// exists to fail loudly and remind you.
+//
+//	1 — initial pipeline (task 3).
+const PipelineVersion = "1"
+
+// pipelineVersion is the value actually used by contentHash and by the
+// pending-set predicate. It is a var, not the constant directly, purely so
+// this package's own tests can bump it at runtime and observe that
+// previously-indexed entries become pending again; production never
+// changes it.
+var pipelineVersion = PipelineVersion
+
 // contentHash returns the hash recorded in
 // search.entry_index_state.content_hash for a given piece of entry content.
+// It covers the pipeline version as well as the content itself, so a
+// pipeline change invalidates stored passages exactly like an edited entry
+// does (see PipelineVersion).
+//
 // It must agree, byte for byte, with the hash PendingEntryIDs computes in
-// SQL, md5(coalesce(entry content, empty string)) — both sides hash the
-// empty string for a NULL/absent content column — or a changed entry could
-// be silently missed, or an unchanged one endlessly re-queued.
+// SQL, md5(pipeline version || coalesce(entry content, empty string)) —
+// both sides hash the empty string for a NULL/absent content column — or a
+// changed entry could be silently missed, or an unchanged one endlessly
+// re-queued.
 func contentHash(content string) string {
-	sum := md5.Sum([]byte(content))
+	sum := md5.Sum([]byte(pipelineVersion + content))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -64,13 +103,13 @@ func (s *Store) PendingEntryIDs(afterID int64, limit int) ([]int64, error) {
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5(coalesce(e.content, ''))
+		    OR s.content_hash <> md5($3 || coalesce(e.content, ''))
 		  )
 		ORDER BY e.id ASC
 		LIMIT $2
 	`
 
-	rows, err := s.db.Query(query, afterID, limit)
+	rows, err := s.db.Query(query, afterID, limit, pipelineVersion)
 	if err != nil {
 		return nil, fmt.Errorf("store: unable to fetch pending entry ids: %w", err)
 	}
@@ -121,9 +160,9 @@ func (s *Store) PendingEntryCount(afterID int64) (int64, error) {
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5(coalesce(e.content, ''))
+		    OR s.content_hash <> md5($2 || coalesce(e.content, ''))
 		  )
-	`, afterID).Scan(&count)
+	`, afterID, pipelineVersion).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("store: unable to count pending entries: %w", err)
 	}

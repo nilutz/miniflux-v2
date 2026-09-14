@@ -291,15 +291,15 @@ func pendingSnapshot(t *testing.T, s *Store, afterID int64) (count int64, ids []
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5(coalesce(e.content, ''))
+		    OR s.content_hash <> md5($2 || coalesce(e.content, ''))
 		  )
 	`
 
-	if err := tx.QueryRow(`SELECT count(*) `+pendingWhere, afterID).Scan(&count); err != nil {
+	if err := tx.QueryRow(`SELECT count(*) `+pendingWhere, afterID, pipelineVersion).Scan(&count); err != nil {
 		t.Fatalf("unable to count pending entries: %v", err)
 	}
 
-	rows, err := tx.Query(`SELECT e.id `+pendingWhere, afterID)
+	rows, err := tx.Query(`SELECT e.id `+pendingWhere, afterID, pipelineVersion)
 	if err != nil {
 		t.Fatalf("unable to list pending entries: %v", err)
 	}
@@ -434,4 +434,79 @@ func TestPendingEntryIDsRespectsLimit(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatalf("expected exactly 1 entry id, got %d", len(ids))
 	}
+}
+
+// Bumping the pipeline version makes every already-indexed entry pending
+// again, without any change to the entry's own content (whole-branch fix
+// wave, finding 6). This is the mechanism that stops a change to
+// internal/passage's ExtractText/Split from silently leaving stored
+// char_start/char_end offsets pointing into a plaintext nothing derives
+// that way any more.
+func TestPipelineVersionBumpMakesIndexedEntriesPendingAgain(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntry(t, s, "pipeline-version-bump", "<p>Content that never changes at all.</p>")
+
+	entry, err := s.EntryForIndexing(entryID)
+	if err != nil {
+		t.Fatalf("EntryForIndexing failed: %v", err)
+	}
+	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
+		Ordinal: 0, Text: "Content that never changes at all.", CharStart: 0, CharEnd: 34,
+		Embedding: make([]float32, 384),
+	}}); err != nil {
+		t.Fatalf("ReplacePassages failed: %v", err)
+	}
+
+	if containsID(pendingIDsFrom(t, s, entryID-1), entryID) {
+		t.Fatalf("entry #%d should not be pending right after being indexed at the current pipeline version", entryID)
+	}
+
+	original := pipelineVersion
+	t.Cleanup(func() { pipelineVersion = original })
+	pipelineVersion = original + "-bumped"
+
+	if !containsID(pendingIDsFrom(t, s, entryID-1), entryID) {
+		t.Fatalf("entry #%d should be pending again after the pipeline version was bumped, but PendingEntryIDs did not return it", entryID)
+	}
+
+	// The Go-side hash must move with it too, or the re-index would write
+	// back the old hash and the entry would be re-offered forever.
+	rehashed, err := s.EntryForIndexing(entryID)
+	if err != nil {
+		t.Fatalf("EntryForIndexing after bump failed: %v", err)
+	}
+	if rehashed.ContentHash == entry.ContentHash {
+		t.Fatalf("expected EntryForIndexing to compute a different hash after a pipeline version bump, got %q both times", entry.ContentHash)
+	}
+
+	// And the count predicate must agree with the ids predicate.
+	count, err := s.PendingEntryCount(entryID - 1)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	if count < 1 {
+		t.Fatalf("expected PendingEntryCount to count the bumped entry, got %d", count)
+	}
+}
+
+func pendingIDsFrom(t *testing.T, s *Store, afterID int64) []int64 {
+	t.Helper()
+	ids, err := s.PendingEntryIDs(afterID, 100)
+	if err != nil {
+		t.Fatalf("PendingEntryIDs failed: %v", err)
+	}
+	return ids
+}
+
+func containsID(ids []int64, want int64) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }
