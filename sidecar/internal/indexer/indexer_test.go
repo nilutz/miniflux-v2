@@ -496,3 +496,111 @@ func TestIndexerSetBatchSizeClampsAndTakesEffect(t *testing.T) {
 		t.Fatalf("expected at least one full batch of exactly %d texts (the chosen batch size), got sizes %v", chosenBatchSize, sizes)
 	}
 }
+
+// Every error IndexEntry can return must classify to a short, stable
+// label, so that the backfill lane's by-cause aggregation is a breakdown
+// by cause and not one row per entry (whole-branch fix wave, finding 4).
+func TestFailureCauseIsStableAcrossEntries(t *testing.T) {
+	embedErr := errors.New("onnxruntime: input tensor shape mismatch at offset 4096")
+
+	byEntry := map[string]bool{}
+	for _, entryID := range []int64{1, 12345, 999999} {
+		err := fmt.Errorf("%w #%d: %w", errEmbed, entryID, embedErr)
+		byEntry[failureCause(err)] = true
+	}
+	if len(byEntry) != 1 {
+		t.Fatalf("expected the same embedding failure on three entries to classify to ONE cause, got %d: %v", len(byEntry), byEntry)
+	}
+	for cause := range byEntry {
+		if strings.ContainsAny(cause, "0123456789#") {
+			t.Fatalf("a cause used as an aggregation key must not carry an entry id or any other number, got %q", cause)
+		}
+		if cause != "embedding failed" {
+			t.Fatalf("unexpected cause label %q", cause)
+		}
+	}
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"load entry", fmt.Errorf("%w #7: %w", errLoadEntry, errors.New("boom")), "could not read the entry"},
+		{"load state", fmt.Errorf("%w #7: %w", errLoadIndexState, errors.New("boom")), "could not read the entry's index state"},
+		{"mark skipped", fmt.Errorf("%w #7: %w", errMarkSkipped, errors.New("boom")), "could not record the entry's index state"},
+		{"mark failed", fmt.Errorf("%w #7: %w", errMarkFailed, errors.New("boom")), "could not record the entry's index state"},
+		{"write passages", fmt.Errorf("%w #7: %w", errWritePassages, errors.New("boom")), "could not write the entry's passages"},
+		{"interrupted", fmt.Errorf("%w #7: %w", errInterrupted, context.Canceled), "interrupted"},
+	}
+	for _, tc := range cases {
+		if got := failureCause(tc.err); got != tc.want {
+			t.Fatalf("%s: failureCause = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	// An error wrapping no known kind still has to yield a bounded key.
+	stray := failureCause(errors.New("pq: deadlock detected on relation 41234 for pid 9981"))
+	if strings.ContainsAny(stray, "0123456789") {
+		t.Fatalf("expected the generic fallback to strip digit runs, got %q", stray)
+	}
+	long := failureCause(errors.New(strings.Repeat("x", 4096)))
+	if len(long) > maxCauseLength+3 {
+		t.Fatalf("expected the generic fallback to truncate to at most %d characters, got %d", maxCauseLength+3, len(long))
+	}
+}
+
+// An IndexEntry error produced by the real code path, not a
+// hand-assembled one, must classify the same way — the wrapping has to
+// actually be in place.
+func TestIndexEntryEmbeddingFailureClassifiesByCause(t *testing.T) {
+	s, db := testEnv(t)
+
+	idA := createTestEntry(t, db, "cause-classify-a", "<p>First entry with plenty of usable text in it.</p>")
+	idB := createTestEntry(t, db, "cause-classify-b", "<p>Second entry with plenty of usable text in it.</p>")
+
+	idx := New(s, &fakeEmbedder{err: errors.New("model session closed")})
+
+	errA := idx.IndexEntry(context.Background(), idA)
+	errB := idx.IndexEntry(context.Background(), idB)
+	if errA == nil || errB == nil {
+		t.Fatalf("expected both entries to fail to index, got %v and %v", errA, errB)
+	}
+	if !errors.Is(errA, errEmbed) {
+		t.Fatalf("expected the error to wrap errEmbed, got %v", errA)
+	}
+	if failureCause(errA) != failureCause(errB) {
+		t.Fatalf("two entries failing the same way must share one cause, got %q and %q", failureCause(errA), failureCause(errB))
+	}
+	// The full detail still has to reach the log line's error value.
+	if !strings.Contains(errA.Error(), "model session closed") {
+		t.Fatalf("expected the full error to keep the embedder's own message, got %q", errA.Error())
+	}
+	if !strings.Contains(errA.Error(), fmt.Sprintf("#%d", idA)) {
+		t.Fatalf("expected the full error to keep the entry id, got %q", errA.Error())
+	}
+}
+
+// causeCounts must stay bounded no matter how many distinct causes it is
+// handed: the lane runs unattended for up to 41 hours.
+func TestCauseCountsAreBounded(t *testing.T) {
+	c := newCauseCounts()
+	for i := 0; i < maxCauseKeys*10; i++ {
+		c.add(fmt.Sprintf("cause-%d", i))
+	}
+
+	snap := c.snapshot()
+	if len(snap) > maxCauseKeys+1 {
+		t.Fatalf("expected at most %d keys (maxCauseKeys plus the overflow bucket), got %d", maxCauseKeys+1, len(snap))
+	}
+	if snap[overflowCause] == 0 {
+		t.Fatalf("expected causes beyond the cap to be counted under %q, got %v", overflowCause, snap)
+	}
+
+	var total int64
+	for _, v := range snap {
+		total += v
+	}
+	if total != int64(maxCauseKeys*10) {
+		t.Fatalf("expected every add to be counted somewhere (%d), got %d", maxCauseKeys*10, total)
+	}
+}

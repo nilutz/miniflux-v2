@@ -8,7 +8,10 @@ package indexer // import "miniflux.app/v2/sidecar/internal/indexer"
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 
 	"miniflux.app/v2/sidecar/internal/embed"
@@ -32,6 +35,86 @@ const (
 	MinBatchSize = 8
 	MaxBatchSize = 32
 )
+
+// The kinds of failure IndexEntry can return. Every error it produces
+// wraps exactly one of these, so a caller can classify an outcome without
+// pattern-matching on message text.
+//
+// This exists because the backfill lane aggregates failures by cause for
+// the admin page (spec §9.4, "error and skip counts by cause") and for its
+// own retry de-duplication. Keying that on err.Error() made every failing
+// entry its own key — the string carries the entry id, and often the
+// embedder's own per-call detail — so the map grew without bound across a
+// lane meant to run unattended for 41 hours (spec §9.3), recordFailure's
+// de-duplication could never fire across entries, and the "Failures by
+// cause" table rendered one row per entry, which is not a breakdown by
+// cause (whole-branch review, finding 4).
+//
+// Their message text is the leading clause of the error string they are
+// wrapped into, so wrapping costs no change in what an operator reads in
+// a log line.
+var (
+	errLoadEntry      = errors.New("indexer: unable to load entry")
+	errLoadIndexState = errors.New("indexer: unable to load index state for entry")
+	errMarkSkipped    = errors.New("indexer: unable to mark entry skipped")
+	errMarkFailed     = errors.New("indexer: unable to mark entry failed")
+	errEmbed          = errors.New("indexer: unable to embed entry")
+	errInterrupted    = errors.New("indexer: embedding interrupted for entry")
+	errWritePassages  = errors.New("indexer: unable to replace passages for entry")
+)
+
+// maxCauseLength truncates an unclassified cause label, so that even a
+// pathological error string cannot make one map key, one JSON field or one
+// admin-page table cell arbitrarily large.
+const maxCauseLength = 120
+
+// causeDigits matches the runs of digits a generic cause label must lose
+// before it can be used as an aggregation key: an entry id, a row count,
+// an offset, a port, a timestamp. Without this, "connection refused on
+// 127.0.0.1:5434" and "deadlock detected on relation 41234" are as
+// unbounded as the strings they came from.
+var causeDigits = regexp.MustCompile(`\d+`)
+
+// failureCause maps an error returned by IndexEntry to a short, stable,
+// low-cardinality label suitable for use as an aggregation key. The full
+// error, entry id and all, belongs in the log line; this is what the
+// counters and the admin page's "Failures by cause" table are keyed on.
+func failureCause(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, errEmbed):
+		return "embedding failed"
+	case errors.Is(err, errInterrupted):
+		return "interrupted"
+	case errors.Is(err, errLoadEntry):
+		return "could not read the entry"
+	case errors.Is(err, errLoadIndexState):
+		return "could not read the entry's index state"
+	case errors.Is(err, errMarkSkipped), errors.Is(err, errMarkFailed):
+		return "could not record the entry's index state"
+	case errors.Is(err, errWritePassages):
+		return "could not write the entry's passages"
+	default:
+		return genericCause(err)
+	}
+}
+
+// genericCause is failureCause's fallback for an error that wraps none of
+// the known kinds: strip the digit runs that make a message per-entry
+// unique and truncate. It is deliberately lossy — an aggregation key is
+// not a diagnostic, and the diagnostic is already in the log.
+func genericCause(err error) string {
+	cause := causeDigits.ReplaceAllString(err.Error(), "N")
+	cause = strings.TrimSpace(cause)
+	if cause == "" {
+		return "unknown"
+	}
+	if len(cause) > maxCauseLength {
+		cause = cause[:maxCauseLength] + "..."
+	}
+	return cause
+}
 
 // Indexer indexes one entry at a time into search.passages.
 type Indexer struct {
@@ -90,12 +173,12 @@ func (idx *Indexer) BatchSize() int {
 func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	entry, err := idx.store.EntryForIndexing(entryID)
 	if err != nil {
-		return fmt.Errorf("indexer: unable to load entry #%d: %w", entryID, err)
+		return fmt.Errorf("%w #%d: %w", errLoadEntry, entryID, err)
 	}
 
 	state, err := idx.store.EntryIndexState(entryID)
 	if err != nil {
-		return fmt.Errorf("indexer: unable to load index state for entry #%d: %w", entryID, err)
+		return fmt.Errorf("%w #%d: %w", errLoadIndexState, entryID, err)
 	}
 	if state != nil && state.Status == "ok" && state.ContentHash == entry.ContentHash {
 		return nil
@@ -104,7 +187,7 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	text := passage.ExtractText(entry.Content)
 	if text == "" {
 		if err := idx.store.MarkEntrySkipped(entryID, entry.ContentHash, "no usable text extracted from entry content"); err != nil {
-			return fmt.Errorf("indexer: unable to mark entry #%d skipped: %w", entryID, err)
+			return fmt.Errorf("%w #%d: %w", errMarkSkipped, entryID, err)
 		}
 		return nil
 	}
@@ -112,7 +195,7 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	passages := passage.Split(text, passage.DefaultSplitOptions())
 	if len(passages) == 0 {
 		if err := idx.store.MarkEntrySkipped(entryID, entry.ContentHash, "no passages produced from extracted text"); err != nil {
-			return fmt.Errorf("indexer: unable to mark entry #%d skipped: %w", entryID, err)
+			return fmt.Errorf("%w #%d: %w", errMarkSkipped, entryID, err)
 		}
 		return nil
 	}
@@ -138,13 +221,13 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 				// "failed" row on every graceful shutdown — leave it
 				// exactly as it was; PendingEntryIDs offers it again next
 				// time, identical to an entry that was never attempted.
-				return fmt.Errorf("indexer: embedding entry #%d interrupted: %w", entryID, err)
+				return fmt.Errorf("%w #%d: %w", errInterrupted, entryID, err)
 			}
 			reason := fmt.Sprintf("embedding failed: %v", err)
 			if markErr := idx.store.MarkEntryFailed(entryID, entry.ContentHash, reason); markErr != nil {
-				return fmt.Errorf("indexer: entry #%d failed to embed (%w) and could not be marked failed: %v", entryID, err, markErr)
+				return fmt.Errorf("%w #%d: could not be marked failed (%v) after: %w", errMarkFailed, entryID, markErr, err)
 			}
-			return fmt.Errorf("indexer: unable to embed entry #%d: %w", entryID, err)
+			return fmt.Errorf("%w #%d: %w", errEmbed, entryID, err)
 		}
 
 		for i, vector := range vectors {
@@ -160,7 +243,7 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	}
 
 	if err := idx.store.ReplacePassages(entryID, entry.ContentHash, rows); err != nil {
-		return fmt.Errorf("indexer: unable to replace passages for entry #%d: %w", entryID, err)
+		return fmt.Errorf("%w #%d: %w", errWritePassages, entryID, err)
 	}
 
 	return nil

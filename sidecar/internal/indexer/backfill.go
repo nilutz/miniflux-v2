@@ -67,9 +67,27 @@ func (cfg BackfillConfig) withDefaults() BackfillConfig {
 	return cfg
 }
 
-// causeCounts aggregates counts keyed by a short cause string (an error
-// message, or a recorded skip reason), safe for concurrent use by the
-// backfill lane's worker goroutines.
+// maxCauseKeys bounds how many distinct causes a causeCounts will track
+// before folding everything further into overflowCause. The lane is meant
+// to run unattended for up to 41 hours (spec §9.3) over a corpus of up to
+// a million entries, and both of its cause sources are ultimately strings
+// produced elsewhere — failureCause's generic fallback, and skip reasons
+// read back from the database — so neither is structurally guaranteed to
+// stay small. A cap makes "the map cannot grow without bound" a property
+// of this type rather than a property of every caller getting its
+// classification right, and 64 rows is already more than spec §9.4's
+// by-cause table can usefully render.
+const maxCauseKeys = 64
+
+// overflowCause is the bucket every cause beyond maxCauseKeys is counted
+// under. It is deliberately conspicuous: seeing it on the admin page means
+// the classification upstream is leaking detail into its keys.
+const overflowCause = "(other causes)"
+
+// causeCounts aggregates counts keyed by a short cause string (a
+// classified failure cause, or a recorded skip reason), safe for
+// concurrent use by the backfill lane's worker goroutines, and bounded at
+// maxCauseKeys distinct keys.
 type causeCounts struct {
 	mu sync.Mutex
 	m  map[string]int64
@@ -80,6 +98,10 @@ func newCauseCounts() *causeCounts { return &causeCounts{m: make(map[string]int6
 func (c *causeCounts) add(cause string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if _, known := c.m[cause]; !known && len(c.m) >= maxCauseKeys {
+		c.m[overflowCause]++
+		return
+	}
 	c.m[cause]++
 }
 
@@ -738,7 +760,12 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 		if ctx.Err() != nil {
 			return
 		}
-		cause := err.Error()
+		// The CLASSIFIED cause, never err.Error(): this string is a map
+		// key in failedByReason, a row in spec §9.4's by-cause table, and
+		// the value recordFailure de-duplicates repeat failures against.
+		// The full error, entry id and all, goes to the log line below
+		// where it belongs (whole-branch review, finding 4).
+		cause := failureCause(err)
 		interval := b.pollInterval()
 		initialBackoff := interval * retryBackoffMultiple
 		maxBackoff := interval * retryBackoffCapMultiple
