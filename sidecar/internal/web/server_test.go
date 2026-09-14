@@ -20,9 +20,12 @@ import (
 // library. Pause/Resume just flip a flag Stats() reflects, matching the
 // contract the real Backfill.Pause/Resume/Stats documents.
 type fakeBackfill struct {
-	mu     sync.Mutex
-	stats  indexer.Stats
-	paused bool
+	mu      sync.Mutex
+	stats   indexer.Stats
+	paused  bool
+	cfg     indexer.RuntimeConfig
+	patches []indexer.ConfigPatch
+	cfgErr  error
 }
 
 func (f *fakeBackfill) Stats() indexer.Stats {
@@ -43,6 +46,56 @@ func (f *fakeBackfill) Resume() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.paused = false
+}
+
+func (f *fakeBackfill) RuntimeConfig() indexer.RuntimeConfig {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cfg
+}
+
+// ApplyConfig records the patch it was handed and folds it into the
+// reported configuration. It deliberately does NOT re-implement
+// indexer.ApplyConfig's clamping — that is indexer's own tests' job; these
+// tests are about the HTTP surface faithfully carrying a patch across and
+// reporting back what the lane says, not about the clamp arithmetic.
+func (f *fakeBackfill) ApplyConfig(patch indexer.ConfigPatch) (indexer.RuntimeConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.patches = append(f.patches, patch)
+	if f.cfgErr != nil {
+		return f.cfg, f.cfgErr
+	}
+	if patch.Window != nil {
+		f.cfg.WindowStart, f.cfg.WindowEnd = patch.Window.Start, patch.Window.End
+	}
+	if patch.MinWorkers != nil {
+		f.cfg.MinWorkers = *patch.MinWorkers
+	}
+	if patch.MaxWorkers != nil {
+		f.cfg.MaxWorkers = *patch.MaxWorkers
+	}
+	if patch.BatchSize != nil {
+		f.cfg.BatchSize = *patch.BatchSize
+	}
+	if patch.PageSize != nil {
+		f.cfg.PageSize = *patch.PageSize
+	}
+	if patch.PollInterval != nil {
+		f.cfg.PollIntervalSeconds = patch.PollInterval.Seconds()
+	}
+	if patch.IdleResweepInterval != nil {
+		f.cfg.IdleResweepIntervalSecs = patch.IdleResweepInterval.Seconds()
+	}
+	return f.cfg, nil
+}
+
+func (f *fakeBackfill) appliedPatches() []indexer.ConfigPatch {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]indexer.ConfigPatch, len(f.patches))
+	copy(out, f.patches)
+	return out
 }
 
 func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
@@ -276,7 +329,7 @@ func TestBuildViewETAEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := buildView(tt.stats)
+			v := buildView(tt.stats, indexer.RuntimeConfig{})
 			if v.ETA != tt.wantETA {
 				t.Errorf("ETA = %q, want %q", v.ETA, tt.wantETA)
 			}
@@ -300,5 +353,160 @@ func TestPauseWithGetMethodNotAllowed(t *testing.T) {
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// The runtime half of spec §9.2: POST /api/backfill/config carries a
+// partial configuration change through to the lane and reports back what
+// actually took effect (whole-branch fix wave, finding 1).
+func TestConfigEndpointAppliesAPartialChange(t *testing.T) {
+	fb := &fakeBackfill{cfg: indexer.RuntimeConfig{MinWorkers: 1, MaxWorkers: 2, BatchSize: 16, PageSize: 20}}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/backfill/config",
+		strings.NewReader(`{"window":"02:00-07:00","max_workers":3,"batch_size":8}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var got indexer.RuntimeConfig
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unable to decode the response: %v (body %s)", err, rec.Body.String())
+	}
+	if got.WindowStart != 2 || got.WindowEnd != 7 {
+		t.Fatalf("expected the window 2-7 to be reported back, got %d-%d", got.WindowStart, got.WindowEnd)
+	}
+	if got.MaxWorkers != 3 || got.BatchSize != 8 {
+		t.Fatalf("expected max_workers=3 and batch_size=8, got %d and %d", got.MaxWorkers, got.BatchSize)
+	}
+
+	patches := fb.appliedPatches()
+	if len(patches) != 1 {
+		t.Fatalf("expected exactly one ApplyConfig call, got %d", len(patches))
+	}
+	p := patches[0]
+	if p.Window == nil || p.MaxWorkers == nil || p.BatchSize == nil {
+		t.Fatalf("expected the three named fields to be present in the patch, got %+v", p)
+	}
+	// Fields the request left out must arrive as nil, so applying one
+	// knob cannot clobber another.
+	if p.MinWorkers != nil || p.PageSize != nil || p.PollInterval != nil || p.IdleResweepInterval != nil || p.LoadThreshold != nil {
+		t.Fatalf("expected omitted fields to be absent from the patch, got %+v", p)
+	}
+}
+
+func TestConfigEndpointRejectsAnUnparseableWindow(t *testing.T) {
+	fb := &fakeBackfill{}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/backfill/config", strings.NewReader(`{"window":"whenever"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unparseable window, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(fb.appliedPatches()) != 0 {
+		t.Fatal("a rejected request must not reach the lane at all")
+	}
+}
+
+func TestConfigEndpointRejectsAnEmptyPatch(t *testing.T) {
+	fb := &fakeBackfill{}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/backfill/config", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a patch that changes nothing, got %d", rec.Code)
+	}
+	if len(fb.appliedPatches()) != 0 {
+		t.Fatal("an empty patch must not reach the lane")
+	}
+}
+
+// The config endpoint changes operational state, so it carries the same
+// Origin check pause/resume do.
+func TestConfigEndpointRejectsCrossOriginRequest(t *testing.T) {
+	fb := &fakeBackfill{}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/backfill/config", strings.NewReader(`{"max_workers":8}`))
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for a cross-origin config change, got %d", rec.Code)
+	}
+	if len(fb.appliedPatches()) != 0 {
+		t.Fatal("a cross-origin request must never reach the lane")
+	}
+}
+
+func TestConfigEndpointReportsCurrentConfiguration(t *testing.T) {
+	fb := &fakeBackfill{cfg: indexer.RuntimeConfig{
+		WindowStart: 22, WindowEnd: 6, MinWorkers: 1, MaxWorkers: 2, BatchSize: 16, PageSize: 20,
+	}}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/backfill/config", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var got indexer.RuntimeConfig
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unable to decode: %v", err)
+	}
+	if got.WindowStart != 22 || got.WindowEnd != 6 {
+		t.Fatalf("expected the lane's window 22-6, got %d-%d", got.WindowStart, got.WindowEnd)
+	}
+}
+
+// The status page and its JSON both have to show the settings in force,
+// or an operator cannot tell whether a change landed.
+func TestStatusShowsTheConfigurationInForce(t *testing.T) {
+	fb := &fakeBackfill{cfg: indexer.RuntimeConfig{
+		WindowStart: 2, WindowEnd: 7, MinWorkers: 1, MaxWorkers: 2,
+		BatchSize: 16, PageSize: 20, PollIntervalSeconds: 5, IdleResweepIntervalSecs: 900,
+		MaxAllowedWorkersOnHost: 8, MinBatchSizeAllowed: 8, MaxBatchSizeAllowed: 32,
+	}}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var view struct {
+		Config      indexer.RuntimeConfig `json:"config"`
+		WindowLabel string                `json:"window_label"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("unable to decode: %v", err)
+	}
+	if view.WindowLabel != "02:00-07:00" {
+		t.Fatalf("expected the window label 02:00-07:00, got %q", view.WindowLabel)
+	}
+	if view.Config.BatchSize != 16 {
+		t.Fatalf("expected the batch size in the status JSON, got %d", view.Config.BatchSize)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{"02:00-07:00", "Schedule window", "Batch size", "/api/backfill/config"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected the status page to contain %q", want)
+		}
 	}
 }

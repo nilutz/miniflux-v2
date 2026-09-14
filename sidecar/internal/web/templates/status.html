@@ -13,6 +13,11 @@
   .progress-bar { background: #2b6cb0; height: 100%; }
   .reason { color: #555; font-size: 0.9em; }
   button { padding: 0.4rem 1rem; margin-right: 0.5rem; }
+  fieldset { border: 1px solid #ddd; border-radius: 4px; margin: 1rem 0; padding: 0.5rem 1rem 1rem; }
+  legend { font-weight: 600; font-size: 0.95rem; }
+  label { display: block; margin: 0.6rem 0 0; font-size: 0.9rem; }
+  label input { display: block; margin-top: 0.2rem; padding: 0.3rem; width: 12rem; }
+  .hint { color: #555; font-size: 0.8em; }
   .stale { color: #a00; }
 </style>
 </head>
@@ -59,6 +64,47 @@
 <button id="resume-btn" onclick="post('/api/backfill/resume')">Resume</button>
 <span id="control-msg"></span>
 
+<fieldset>
+  <legend>Throttle</legend>
+  <p class="hint">
+    Schedule window, concurrency ceiling and embedding batch size take effect
+    on the next batch, without a restart. Blank fields are left unchanged;
+    out-of-range numbers are clamped, and the values shown below are what
+    actually took effect.
+  </p>
+
+  <label>Schedule window
+    <input id="cfg-window" type="text" placeholder="{{.WindowLabel}}">
+    <span class="hint">&ldquo;always&rdquo;, or an hour range such as 02:00-07:00 (wraps past midnight).</span>
+  </label>
+
+  <label>Maximum workers
+    <input id="cfg-max-workers" type="number" min="1" max="{{.Config.MaxAllowedWorkersOnHost}}" placeholder="{{.Config.MaxWorkers}}">
+    <span class="hint">1&ndash;{{.Config.MaxAllowedWorkersOnHost}} on this host. Two was the measured optimum.</span>
+  </label>
+
+  <label>Minimum workers
+    <input id="cfg-min-workers" type="number" min="1" max="{{.Config.MaxAllowedWorkersOnHost}}" placeholder="{{.Config.MinWorkers}}">
+  </label>
+
+  <label>Batch size
+    <input id="cfg-batch-size" type="number" min="{{.Config.MinBatchSizeAllowed}}" max="{{.Config.MaxBatchSizeAllowed}}" placeholder="{{.Config.BatchSize}}">
+    <span class="hint">Passages per forward pass, {{.Config.MinBatchSizeAllowed}}&ndash;{{.Config.MaxBatchSizeAllowed}}. Larger is slower, not faster.</span>
+  </label>
+
+  <p><button id="cfg-apply" onclick="applyConfig()">Apply</button><span id="config-msg"></span></p>
+</fieldset>
+
+<table>
+  <tr><th>Window</th><td>{{.WindowLabel}}</td></tr>
+  <tr><th>Worker band</th><td>{{.Config.MinWorkers}}&ndash;{{.Config.MaxWorkers}} (host ceiling {{.Config.MaxAllowedWorkersOnHost}})</td></tr>
+  <tr><th>Load threshold</th><td>{{printf "%.2f" .Config.LoadThreshold}} per core</td></tr>
+  <tr><th>Batch size</th><td>{{.Config.BatchSize}} passages per forward pass</td></tr>
+  <tr><th>Page size</th><td>{{.Config.PageSize}} entries per batch</td></tr>
+  <tr><th>Poll interval</th><td>{{.PollInterval}}</td></tr>
+  <tr><th>Idle re-sweep</th><td>{{.IdleResweep}}</td></tr>
+</table>
+
 <p class="reason">Generated {{.GeneratedAt}}. This page refreshes every 10 seconds.</p>
 
 <script>
@@ -70,16 +116,42 @@
   // actual request before it reaches the server. The server additionally
   // checks the Origin header itself, since not every client is a browser
   // honoring that preflight.
-  function post(path) {
-    fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
-      .then(function (r) {
-        if (!r.ok) { throw new Error('request failed: ' + r.status); }
-        document.getElementById('control-msg').textContent = 'done, reloading...';
-        location.reload();
-      })
-      .catch(function (err) {
-        document.getElementById('control-msg').textContent = String(err);
-      });
+  function post(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    }).then(function (r) {
+      if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('request failed: ' + r.status)); }); }
+      document.getElementById('control-msg').textContent = 'done, reloading...';
+      location.reload();
+    }).catch(function (err) {
+      document.getElementById('control-msg').textContent = String(err);
+      throw err;
+    });
+  }
+
+  // Only fields the operator actually filled in are sent, so applying one
+  // knob never restates (and never clobbers) the others.
+  function applyConfig() {
+    var body = {};
+    var text = document.getElementById('cfg-window').value.trim();
+    if (text !== '') { body.window = text; }
+    [['cfg-max-workers', 'max_workers'],
+     ['cfg-min-workers', 'min_workers'],
+     ['cfg-batch-size', 'batch_size']].forEach(function (pair) {
+      var v = document.getElementById(pair[0]).value.trim();
+      if (v !== '') { body[pair[1]] = parseInt(v, 10); }
+    });
+
+    if (Object.keys(body).length === 0) {
+      document.getElementById('config-msg').textContent = ' nothing to change';
+      return;
+    }
+    document.getElementById('config-msg').textContent = '';
+    post('/api/backfill/config', body).catch(function (err) {
+      document.getElementById('config-msg').textContent = ' ' + String(err);
+    });
   }
 </script>
 </body>
