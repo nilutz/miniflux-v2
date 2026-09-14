@@ -598,3 +598,50 @@ The four states are a preference signal: **star = strong positive, read =
 positive, unread = no signal, hide = negative.** The daily best-of has nothing
 to learn from without them. Building the rating control is what makes that phase
 possible, and it should be built even if the recommendation work never follows.
+
+## 13.4 Saving a URL that has no feed
+
+**Goal:** paste the URL of a blog post or page, have the system fetch and parse
+it, and make it searchable — as a source, not as a subscription.
+
+### The constraint that shapes it
+
+`entries.feed_id` is `NOT NULL` with a foreign key. Every entry belongs to a
+feed. The alternatives to accepting that are both bad: making the column
+nullable touches upstream schema and breaks every query that joins entries to
+feeds, permanently enlarging the fork's rebase surface; and a parallel table in
+the `search` schema would mean the indexer, retrieval, snippets and similar all
+need a second code path, then a union at query time.
+
+**Decision: a saved page is an entry in a per-user, disabled synthetic feed.**
+One feed per user, created lazily on first use, `disabled = true` so the
+scheduler never tries to refresh it — the batch builder already filters on
+`disabled IS false`, so this needs no scheduler change.
+
+### Why this is cheap
+
+Almost nothing is new. The fork already scrapes pages: `ProcessEntryWebPage`
+fetches a URL, runs readability, applies rewrite rules and sanitises — it is
+what the per-entry "fetch content" button and the P0 backfill both use. The
+crawler is on by default since P0, so full article text is the normal case.
+
+And **the sidecar needs no changes at all.** It indexes `public.entries`; a
+saved page *is* an entry. Search, passage retrieval, snippets and
+similar-articles all work on it the moment it is written, through the existing
+live lane.
+
+The work is therefore: create the synthetic feed, scrape the URL into an entry,
+and give it a UI.
+
+### Behaviour
+
+- The saved-pages feed **appears in the feed list** like any other. It is a real
+  collection worth browsing, and hiding it would make unread counts
+  inexplicable.
+- Re-pasting a URL already saved **updates rather than duplicates**. The entry
+  hash is derived from the URL, so the existing `entryExists` path handles it.
+- A saved page is readable in Miniflux exactly like a feed entry, and rateable
+  under §13.3 like any other.
+- If the fetch fails — paywall, JS-only page, non-HTML — the save fails with a
+  message rather than creating an empty entry. §10's rule that a scrape yielding
+  no article text must not be recorded as success applies here too.
