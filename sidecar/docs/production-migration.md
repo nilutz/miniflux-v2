@@ -8,18 +8,18 @@ fully before starting, especially §7 (rollback).
 ## Why this migration exists
 
 Stock PostgreSQL ships neither extension the sidecar's schema needs —
-verified directly: a plain `postgres:17-alpine` container reports only
-`pg_trgm` in `pg_available_extensions`. The `paradedb/paradedb` image ships
-`vector` 0.8.4 and `pg_search` 0.25.9 — but on **PostgreSQL 18**, while a
-typical existing Miniflux instance runs PostgreSQL 17. There is no
-in-place, same-major-version path to get both extensions: the database
-itself has to move to a new major version.
+verified directly: a `postgres:17-alpine` lists 59 available extensions,
+and neither `vector` nor `pg_search` is among them. The `paradedb/paradedb`
+image ships `vector` 0.8.4 and `pg_search` 0.25.9 — but on **PostgreSQL
+18**, while a typical existing Miniflux instance runs PostgreSQL 17. There
+is no in-place, same-major-version path to get both extensions: the
+database itself has to move to a new major version.
 
 **This is a known-good path, not a guess.** During the design of this plan,
 Miniflux's own migrator (`./miniflux -migrate`) was run directly against a
 `paradedb/paradedb` (PostgreSQL 18) container and applied all **134
-upstream migrations plus both fork migrations** cleanly: 20 tables in
-`public`, `schema_version = 134`, `fork_schema_version = 2`, and the fork's
+upstream migrations plus both fork migrations** cleanly:
+`schema_version = 134`, `fork_schema_version = 2`, and the fork's
 `entries.full_text_fetched_at` column present and correct. Miniflux's
 schema is confirmed compatible with PostgreSQL 18 / ParadeDB. What was not
 previously exercised — and what this runbook's rehearsal (§8) exists to
@@ -41,7 +41,11 @@ client tools, so if both databases are reachable from a host that can
 `docker exec` into the ParadeDB container, that container's own `pg_dump` /
 `pg_restore` is a convenient way to satisfy this without installing
 anything extra (see the exact commands in §4 and §8 — the rehearsal used
-exactly this).
+exactly this). This assumes a Docker-based deployment where that container
+can reach the source server (e.g. via `host.docker.internal` or a shared
+Docker network) — in a non-Docker deployment, install matching-version
+`postgresql-client` packages on whichever host runs the dump/restore
+instead.
 
 ### 1. Record what you have
 
@@ -242,7 +246,10 @@ Miniflux back up on the old side.
    the migration again from a fresh dump.
 7. Only after the cause is understood and fixed, restart from §2 (a fresh
    backup — do not reuse a dump that was involved in a failed run without
-   re-verifying it per §2).
+   re-verifying it per §2). Before re-running §4's `createdb`, rename or
+   drop the failed-restore database from step 6 — `createdb` fails loudly
+   on a name collision rather than overwriting it, but it will still block
+   the retry until you do.
 
 There is no scenario in this procedure where the original PostgreSQL 17
 database is dropped, altered, or overwritten. The only way data is lost is
