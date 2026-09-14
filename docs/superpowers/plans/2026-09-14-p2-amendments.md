@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Tasks 1–4 are sidecar-only (`sidecar/`). Tasks 5–6 are fork-only (repo root).** No task touches both.
+- **Tasks 1–4 are sidecar-only (`sidecar/`). Tasks 5–7 are fork-only (repo root).** No task touches both.
 - The fork must not import `miniflux.app/v2/sidecar/...`. The contract is HTTP and JSON.
 - **Only `cmd/sidecar` may import `internal/embed/onnx`** — packages that never do inference must keep linking without the 37MB native library. Verify every task.
 - **The fork's diff against upstream stays minimal.** It rebases onto upstream indefinitely; new fork-owned files are cheap, edited upstream files are permanent cost.
@@ -223,6 +223,64 @@ Exercise it in a browser against the seeded corpus: hide an article, confirm it 
 
 ---
 
+### Task 7: Save a URL that has no feed
+
+**Files:**
+- Create: `internal/ui/saved_page.go` and its test (fork-owned)
+- Modify: `internal/storage/feed.go` or a fork-owned equivalent, `internal/ui/ui.go`, `internal/database/fork_migrations.go` if needed
+- Modify: `internal/template/templates/views/add_subscription.html`, `internal/locale/translations/*.json`
+
+**Interfaces:**
+- Consumes: `processor.ProcessEntryWebPage`, the existing scraper
+- Produces: a saved-pages feed per user; a route that turns a pasted URL into an entry
+
+**Spec §13.4.** `entries.feed_id` is `NOT NULL`, so a saved page is an entry in a per-user **disabled** synthetic feed. The scheduler already filters on `disabled IS false`, so it is never refreshed and no scheduler change is needed.
+
+**The sidecar needs no changes at all.** It indexes `public.entries`, and a saved page is an entry — retrieval, snippets and similar-articles work on it through the existing live lane the moment it is written. Do not touch `sidecar/`.
+
+- [ ] **Step 1: Write the failing tests**
+
+- saving a URL creates an entry whose content is the scraped article, in the user's saved-pages feed
+- the feed is created **lazily on first save**, exactly once per user, and is `disabled`
+- **the saved-pages feed is never returned by the scheduler's batch builder** — assert against the real builder, not by reading the flag
+- **re-saving the same URL updates rather than duplicating** — the hash derives from the URL, so the existing `entryExists` path should handle it; prove that it does
+- **a page that yields no article text fails with a message and creates no entry.** §10's rule applies: a scrape that returns markup but no prose is not a success. This is the same class of bug P0 had to fix in the crawler, and it is easy to reintroduce here.
+- two users saving the same URL get their own entries in their own feeds
+
+- [ ] **Step 2: The synthetic feed**
+
+Lazily created, `disabled = true`, with a `feed_url` that is unique per user and cannot collide with a real subscription. Give it a title a person would recognise in their feed list.
+
+It **appears in the feed list** like any other feed — per spec §13.4, it is a real collection worth browsing, and hiding it would make unread counts inexplicable.
+
+- [ ] **Step 3: The save path**
+
+Reuse `processor.ProcessEntryWebPage` rather than writing a second scraper — it fetches, runs readability, applies rewrite rules and sanitises, and it is the same path the per-entry "fetch content" button uses.
+
+Set the entry's hash from the URL so re-saving is an update. Title comes from the page; `published_at` is the save time, since the page may carry no reliable date.
+
+- [ ] **Step 4: The UI**
+
+Add it where a person would look for it — the existing add-subscription page already takes a URL, and "this has no feed, save the page itself" belongs beside it rather than in a separate corner of the app.
+
+Translations for every new string via `make add-string`, which inserts into all 23 locales at once.
+
+- [ ] **Step 5: Verify**
+
+```bash
+make test && make lint
+```
+
+Then end to end: save a real URL, confirm the entry appears and is readable, confirm the sidecar's live lane indexes it without any sidecar change, and confirm it is findable by search.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git commit -m "feat(ui): save a URL with no feed as a searchable page"
+```
+
+---
+
 ## Done criteria
 
 - [ ] `make test` and `make lint` pass at the repo root; the sidecar's hermetic packages pass
@@ -231,6 +289,7 @@ Exercise it in a browser against the seeded corpus: hide an article, confirm it 
 - [ ] An unreachable remote embedder pauses indexing with a distinguishable reason, and does not mark entries failed
 - [ ] The admin page shows database size, passages-per-entry, and dead tuples
 - [ ] A hidden entry leaves the unread list, stays searchable, and is invisible to Fever and Google Reader
+- [ ] A saved URL becomes a readable, searchable entry without any sidecar change
 - [ ] The corpus is intact: 436 entries, 5,681 passages, embeddings unit-normalised
 
 ## What this deliberately does not do
