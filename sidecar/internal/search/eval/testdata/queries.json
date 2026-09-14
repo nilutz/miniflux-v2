@@ -82,7 +82,7 @@
   {
     "text": "archived tumblr posts about quantum mechanics by su3su2u1",
     "relevant_entry_ids": [18058],
-    "note": "rare discriminating term: the handle 'su3su2u1' is a near-unique token (4 passage hits corpus-wide, all this entry). 'physics', 'archive', 'tumblr' are common words shared with unrelated entries."
+    "note": "rare discriminating term: the handle 'su3su2u1' is rare (4 passage hits corpus-wide via @@@) but not entry-unique -- it's split across three entries: 1 hit in 18004 ('About danluu.com', a passing attribution), 1 in 18058 (this entry), and 2 in 18059 ('Harry Potter and the Methods of Rationality review by su3su2u1', a different post by the same handle). All three were read: 18059 is a book review, not about physics or a tumblr archive, so it stays out; 18058 is the only one actually matching the query's full description. 'physics', 'archive', 'tumblr' are common words shared with unrelated entries -- the query needs both the rare handle and the topic words to disambiguate."
   },
   {
     "text": "networking standard RFC 9234 for BGP roles",
@@ -90,9 +90,9 @@
     "note": "rare discriminating term: the RFC number '9234' is the discriminator; 'networking', 'standard', 'BGP' are common in this corpus (Cloudflare Blog has many networking posts)."
   },
   {
-    "text": "post-quantum DNSSEC response that is 2420 bytes long",
+    "text": "post-quantum DNSSEC response that is 2,420 bytes long",
     "relevant_entry_ids": [17866],
-    "note": "rare discriminating term: the specific byte count '2420' is the discriminator against other post-quantum/DNSSEC posts on the same blog."
+    "note": "rare discriminating term: the specific byte count is the discriminator against other post-quantum/DNSSEC posts on the same blog. Written with the comma deliberately: the corpus stores it as '2,420' and ParadeDB's tokenizer splits on the comma, so 'text:2420' (no comma) matches zero passages while 'text:\"2,420\"' matches 6, all in entry 17866 -- verified against the live index with @@@, not ILIKE. An earlier version of this query used the no-comma form and could never have matched anything."
   },
   {
     "text": "using Zstandard compression with Pingora to save cache storage",
@@ -156,7 +156,7 @@
   },
   {
     "text": "real-world experiences building and deploying AI coding agents in engineering teams",
-    "relevant_entry_ids": [17838, 17845, 17868, 17881, 17920, 17933, 17936],
-    "note": "multi-relevant topic query across Stack Overflow Blog, Martin Fowler, and Google Research Blog -- each entry read individually and confirmed to be substantively about building/operating agentic AI coding systems, not just mentioning 'AI' or 'agent' in passing. Not claimed exhaustive: other entries in the corpus touch AI-assisted coding tangentially without being centrally about it, and were left out rather than guessed at."
+    "relevant_entry_ids": [17838, 17845, 17868, 17881, 17933, 17936],
+    "note": "multi-relevant topic query across Stack Overflow Blog and Martin Fowler -- each entry read individually and confirmed to be substantively about building/operating agentic AI *coding* systems, not just mentioning 'AI' or 'agent' in passing. Entry 17920 ('Building Reliable Agentic AI Systems', Google Research Blog) was deliberately left out despite the title match: read in full, it's about PRINCE, a Bayer research/QA agent for preclinical drug-discovery literature -- it never touches code generation, IDEs, or software engineering workflows, so it would inflate recall for this specific query for the wrong reason. It is correctly labelled on the separate close-wording query above, whose text is its literal title. Not claimed exhaustive otherwise: other entries in the corpus touch AI-assisted coding tangentially without being centrally about it, and were left out rather than guessed at."
   }
 ]
