@@ -34,6 +34,7 @@ the crawler affects new entries only.
 | Split of work | Thin fork of Miniflux (UI touchpoints only) plus a sidecar service |
 | Sidecar language | Go, matching the fork |
 | Inference runtime | ONNX Runtime via CGO, behind an `Embedder` interface |
+| Measured throughput | 33.9 passages/sec (spike, 2026-09-14) — see §6.7 |
 | Corpus scale | Single user, 100k–1M entries, long retained history |
 | Index location | pgvector in Miniflux's own Postgres, in a sidecar-owned schema |
 | Embeddings | Local model on CPU, same host, 384 dimensions |
@@ -239,7 +240,17 @@ milliseconds on CPU, with a small LRU cache for repeated queries.
 Embedding runs in-process through ONNX Runtime via CGO — `hugot` over
 `onnxruntime_go`, which supplies WordPiece tokenization, the forward pass, and
 mean pooling. An int8-quantised bge-small-class model keeps CPU inference fast
-enough that the backfill is measured in nights rather than weeks.
+enough that the backfill is measured in hours.
+
+The stack below is **measured, not chosen on reputation** (§6.7). Pin it:
+
+| Component | Version |
+|---|---|
+| `github.com/knights-analytics/hugot` | v0.7.8, build tag `ORT` |
+| `github.com/yalue/onnxruntime_go` | v1.35.0 |
+| `github.com/daulet/tokenizers` | v1.27.0 |
+| ONNX Runtime (native) | v1.30.0 |
+| Model | `Xenova/bge-small-en-v1.5`, int8 ONNX (~32 MB) |
 
 The cost is the static-binary property: ONNX Runtime is a shared library that
 must be installed on the host. On a single self-hosted machine that is an
@@ -260,6 +271,49 @@ type Embedder interface {
 A pure-Go implementation (`cybertron`/`spago`, no CGO, roughly 3–5× slower) and
 a local-HTTP implementation are both viable behind this interface if the native
 dependency becomes inconvenient.
+
+### 6.7 Spike results (2026-09-14)
+
+Measured on an Apple M1 Pro, 8 cores, darwin/arm64, int8 model, 377-token
+passages.
+
+| Configuration | passages/sec |
+|---|---|
+| 2 workers, batch 8, unconstrained ORT threading | **33.9** |
+| 2 workers, batch 32, unconstrained | 33.1 |
+| 1 worker, batch 32, unconstrained | 26.2 |
+| 2 workers, batch 8, **1 intra/inter-op thread each** | 11.7 |
+| 1 worker, batch 32, fp32 instead of int8 | 14.5 |
+
+**Two results contradict the obvious approach and are binding on the design:**
+
+*Constraining threads per worker is 3× slower.* hugot's README recommends one
+intra-op thread per worker with N workers. On this machine that measured 11.7/s
+against 33.9/s for two goroutines sharing one unconstrained multi-threaded
+session. §9.2's controller must therefore vary **worker count against a shared
+unconstrained session** — never thread pinning.
+
+*Batch size has a sweet spot.* Batch 64 (24.3/s) is worse than batch 8 (33.9/s).
+Default to 8–32 and treat larger batches as a regression, not an optimisation.
+
+Vector sanity is unambiguous: paraphrase cosine 0.87 against 0.31 for unrelated
+sentences, with mean pooling plus L2 normalisation.
+
+**Build and deployment friction, all verified:**
+
+- The native ONNX Runtime dylib is a separate install (`brew install onnxruntime`
+  on macOS). hugot's default search path is `/usr/lib`, a Linux default, so
+  macOS needs an explicit `WithOnnxLibraryPath` **and** `DYLD_LIBRARY_PATH`.
+- `libtokenizers.a` (HuggingFace's Rust tokenizer) is **not** fetched by
+  `go get`. It must be downloaded per-architecture from `daulet/tokenizers`
+  releases, matched to the exact module version, and linked via `CGO_LDFLAGS`.
+  Building from source needs a Rust toolchain.
+- Requires `CGO_ENABLED=1` and `-tags ORT`. **Omitting the tag silently builds
+  the much slower pure-Go GoMLX backend instead of failing** — a 10×-class
+  performance footgun that produces no error. CI must assert the ORT backend is
+  the one actually loaded.
+- hugot is developed and tested primarily on amd64-linux. darwin/arm64 worked
+  but is unverified upstream.
 
 ## 7. P2 — Similar articles
 
@@ -339,9 +393,18 @@ wins over the controller.
 ### 9.3 Expected duration
 
 At 100k–1M entries and 4–6 passages each, the backlog is roughly 0.5M–5M
-embeddings. A quantised bge-small-class model on CPU throttled to two workers
-runs on the order of 30–80 passages/sec, putting the full backfill between a few
-nights and a couple of weeks.
+embeddings. At the measured 33.9 passages/sec (§6.7) that is:
+
+| Backlog | Wall-clock |
+|---|---|
+| 0.5M passages | ~4.1 hours |
+| 5M passages | ~41 hours (~1.7 days) |
+
+Single machine, CPU-only, embedding time only — text extraction, chunking and
+IO are extra. The backfill is embarrassingly parallel (no shared state), so
+sharding across processes divides the 5M case if a sub-day window is ever
+needed. Incremental embedding of new articles is a few thousand passages a day
+and is not a concern at any throughput in this range.
 
 Search degrades gracefully meanwhile: BM25 is at full coverage from day one and
 semantic recall improves as the backfill advances.
@@ -404,20 +467,31 @@ does not measure extraction *quality*.
 higher-dimension model later means re-embedding the whole corpus — days of
 compute. The 384-dimension choice is effectively load-bearing.
 
-**Go's ML libraries are less trodden than Python's.** `hugot`,
-`onnxruntime_go` and the pure-Go alternatives are usable but far less
-battle-tested than `sentence-transformers`. The P1 plan therefore opens with a
-spike that embeds several hundred real passages and measures throughput and
-output sanity *before* anything is built on top. If that spike fails, the
-`Embedder` interface is the seam at which a local inference service or a Python
-component gets substituted.
+**Go's ML libraries are less trodden than Python's.** *Largely retired by the
+spike (§6.7): the stack works and the vectors are sane.* What remains is
+narrower and concrete — hugot is untested upstream on darwin/arm64, the CGO
+chain needs two architecture-specific native artefacts fetched outside
+`go get`, and a missing build tag silently swaps in a far slower backend. The
+`Embedder` interface remains the seam at which a local inference service or a
+Python component could be substituted.
+
+**Both Postgres extensions require moving the live database.** *Verified
+2026-09-14:* `pgvector` 0.8.4 and `pg_search` 0.25.9 coexist cleanly in the
+`paradedb/paradedb` image — an HNSW index and a BM25 index were built on one
+table and a full RRF hybrid query returned correctly ordered results. But that
+image ships **PostgreSQL 18**, and stock Postgres carries neither extension. So
+P1 requires migrating the running Miniflux instance onto ParadeDB, across a
+major version, with a dump and restore. That is a scheduled-downtime task the
+P1 plan must own, not a footnote.
 
 ## 13. Open questions
 
 None blocking. Two to resolve during implementation:
 
-1. Exact embedding model within the bge-small class, chosen by measuring
-   recall@10 on the evaluation set rather than by reputation, and confirmed to
-   load and run under ONNX Runtime in Go before the pipeline depends on it.
+1. ~~Exact embedding model within the bge-small class.~~ **Answered by the
+   spike (§6.7):** `Xenova/bge-small-en-v1.5` int8 loads and runs under ONNX
+   Runtime in Go at 33.9 passages/sec with sane vectors. Still worth measuring
+   recall@10 against the evaluation set once it exists, but the pipeline may
+   now depend on this model.
 2. Whether passage mode is a separate picker option or a toggle on results,
    which is a UI question best answered by using the search first.
