@@ -495,3 +495,106 @@ None blocking. Two to resolve during implementation:
    now depend on this model.
 2. Whether passage mode is a separate picker option or a toggle on results,
    which is a UI question best answered by using the search first.
+
+---
+
+# 13. Amendments (2026-09-14)
+
+Three additions, decided after P1b shipped. Each carries a decision that was
+made explicitly rather than defaulted into.
+
+## 13.1 Pluggable embedding models, including on another machine
+
+**Goal:** run embedding on a different box — a GPU host — toggled from the admin
+page, with the option of a different model entirely, and re-index afterwards.
+
+### The safety gap this must close first
+
+`contentHash` is `md5(pipelineVersion + title + content)`. **It does not include
+the model.** Switching models today changes no hashes, marks nothing pending,
+and leaves `search.passages` holding vectors from two different models in one
+HNSW graph. Cosine similarity across models is meaningless, so search would
+return plausible wrong results with no error anywhere.
+
+**Decision: the model's identity joins the hash.** A model identifier —
+name plus revision plus dimensions — becomes part of `contentHash`, so changing
+any of them marks every entry pending and the backfill re-indexes. This is the
+same mechanism `pipelineVersion` already uses, extended to cover the thing that
+actually produces the vectors.
+
+### Dimensions
+
+`embedding` is `public.vector(384)`, and pgvector requires a fixed dimension to
+build an HNSW index. A model with different dimensions therefore needs a schema
+migration that drops and recreates the column and its index.
+
+**Decision: a dimension change is an explicit, operator-initiated action**, not
+something a config edit performs silently. It destroys every existing vector —
+which is unavoidable, since they are incompatible anyway — but it must be
+something a person chose, with the re-index cost stated before it runs.
+
+### Remote embedding
+
+`Embedder` is an interface precisely so this can slot in beside the in-process
+ONNX implementation (§6.6). A second implementation speaks HTTP to a remote
+service.
+
+**Decision: when the remote embedder is unreachable, indexing pauses.** It does
+not fall back to local CPU embedding. The reasoning is that a silent fallback
+produces a corpus embedded by two different paths with no record of which is
+which — and if the remote runs a different model, that is precisely the
+corruption §13.1 exists to prevent. Pausing is visible: the admin page says the
+lane stopped and why, and indexing resumes when the host returns.
+
+A same-model remote is a pure speedup — vectors stay compatible, no re-index —
+and turns a ~41-hour backfill into minutes. That is the common case and it
+should be easy. A different-model remote is a re-index, and should feel like one.
+
+## 13.2 Database size in the admin page
+
+The measured corpus is **13 passages per entry**, not the 4–6 §5.5 assumed, and
+occupies 112 MB for 436 entries — of which only ~16 MB is data and the rest is
+index. Extrapolating: **~15–25 GB at 100k entries, ~150–200 GB at 1M.** §5.5's
+estimate of 20–40 GB for 1M is wrong by roughly 5×.
+
+**Decision: surface it where it will be seen.** The admin page shows total
+database size, the `search` schema's share, the HNSW index specifically (it
+grows fastest), passage and entry counts, and **dead tuple count** — because a
+stale `VACUUM` silently truncates HNSW scans, which cost real debugging time to
+find once already.
+
+## 13.3 Rating articles: read, unread, hide, star
+
+**Goal:** a control on the unread list to say what an article was — **star**
+(exceptional), **read** (read the text), **unread** (not yet), **hide** (not
+interested).
+
+Miniflux has `status` ∈ {`unread`, `read`} and a separate `starred` boolean.
+Only **hide** is new.
+
+### Not a third status value
+
+The obvious implementation is `status = 'hidden'`. **Rejected.** Every Go path
+in the fork assumes two statuses, and Fever and Google Reader both expose
+read/unread with no concept of hidden — so a third value forces a mapping
+decision in two legacy APIs and touches every status-handling call site,
+permanently enlarging the fork's rebase surface.
+
+**Decision: `hidden` is a separate boolean, exactly as `starred` already is.**
+`status` stays two-valued, every existing path works unchanged, and both legacy
+APIs are unaffected because they never see the flag. This follows a precedent
+the codebase already set rather than inventing a parallel one.
+
+### What hiding does
+
+**Decision: it drops the entry from the unread list and its counts, and nothing
+else.** The entry stays searchable, stays in the corpus, stays reachable through
+feed and category views. Hiding says "not now", not "never" — and an article you
+dismissed and later want should still be findable.
+
+### Why this is a prerequisite for §3
+
+The four states are a preference signal: **star = strong positive, read =
+positive, unread = no signal, hide = negative.** The daily best-of has nothing
+to learn from without them. Building the rating control is what makes that phase
+possible, and it should be built even if the recommendation work never follows.
