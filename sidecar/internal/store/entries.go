@@ -4,6 +4,7 @@
 package store // import "miniflux.app/v2/sidecar/internal/store"
 
 import (
+	"context"
 	"crypto/md5"
 	"database/sql"
 	"encoding/hex"
@@ -88,10 +89,15 @@ func contentHash(title, content string) string {
 
 // EntryForIndexing loads one entry's title and content from public.entries
 // (read-only) and computes its content hash.
-func (s *Store) EntryForIndexing(entryID int64) (*Entry, error) {
+//
+// It takes a context because its callers are not all background work: the
+// search API builds a snippet per result through this, on the synchronous
+// render path of a page someone is waiting for, and a reader who navigates
+// away should not leave a detoasted full-content read running behind them.
+func (s *Store) EntryForIndexing(ctx context.Context, entryID int64) (*Entry, error) {
 	var title string
 	var content sql.NullString
-	err := s.db.QueryRow(`SELECT title, content FROM entries WHERE id=$1`, entryID).Scan(&title, &content)
+	err := s.db.QueryRowContext(ctx, `SELECT title, content FROM entries WHERE id=$1`, entryID).Scan(&title, &content)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("store: entry #%d does not exist: %w", entryID, err)
 	}

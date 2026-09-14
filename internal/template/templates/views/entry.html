@@ -327,7 +327,7 @@
         <article class="item entry-item item-status-{{ .Status }}" data-id="{{ .ID }}" aria-labelledby="entry-similar-title-{{ .ID }}">
             <header class="item-header" dir="auto">
                 <h3 id="entry-similar-title-{{ .ID }}" class="item-title" {{ with or .Language .Feed.Language }}lang="{{ . }}"{{ end }}>
-                    <a href="{{ routePath "/history/entry/%d" .ID }}">
+                    <a href="{{ if eq .Status "unread" }}{{ routePath "/unread/entry/%d" .ID }}{{ else }}{{ routePath "/history/entry/%d" .ID }}{{ end }}">
                         {{ if ne .Feed.Icon.IconID 0 }}
                         <img src="{{ routePath "/feed-icon/%s" .Feed.Icon.ExternalIconID }}" width="16" height="16" loading="lazy" alt="{{ .Feed.Title }}">
                         {{ else }}

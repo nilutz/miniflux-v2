@@ -95,7 +95,7 @@ func TestEntryForIndexingReturnsContentAndHash(t *testing.T) {
 
 	entryID := createTestEntry(t, s, "entryfor-basic", "<p>Hello world.</p>")
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestEntryForIndexingReturnsContentAndHash(t *testing.T) {
 	// The hash must be a pure function of content: hashing the same content
 	// twice must agree, or PendingEntryIDs' SQL-side hash comparison and
 	// this Go-side hash would silently drift apart.
-	again, err := s.EntryForIndexing(entryID)
+	again, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -132,14 +132,14 @@ func TestEntryForIndexingChangesHashWhenContentChanges(t *testing.T) {
 
 	entryID := createTestEntry(t, s, "entryfor-changed", "<p>Original.</p>")
 
-	before, err := s.EntryForIndexing(entryID)
+	before, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	updateEntryContent(t, s, entryID, "<p>Changed.</p>")
 
-	after, err := s.EntryForIndexing(entryID)
+	after, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -164,14 +164,14 @@ func TestEntryForIndexingChangesHashWhenTitleChangesButContentDoesNot(t *testing
 
 	entryID := createTestEntryWithTitle(t, s, "entryfor-title-changed", "Original Title", "<p>Body never changes.</p>")
 
-	before, err := s.EntryForIndexing(entryID)
+	before, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	updateEntryTitle(t, s, entryID, "Completely Different Title")
 
-	after, err := s.EntryForIndexing(entryID)
+	after, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestEntryForIndexingReturnsErrorForUnknownEntry(t *testing.T) {
 		t.Fatalf("migrate failed: %v", err)
 	}
 
-	if _, err := s.EntryForIndexing(-1); err == nil {
+	if _, err := s.EntryForIndexing(context.Background(), -1); err == nil {
 		t.Fatal("expected an error for an entry id that does not exist")
 	}
 }
@@ -227,7 +227,7 @@ func TestPendingEntryIDsExcludesUpToDateOKEntry(t *testing.T) {
 
 	entryID := createTestEntry(t, s, "pending-ok", "<p>Already indexed.</p>")
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestPendingEntryIDsIncludesChangedEntry(t *testing.T) {
 
 	entryID := createTestEntry(t, s, "pending-changed", "<p>Before edit.</p>")
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestPendingEntryIDsIncludesEntryWhoseTitleChanged(t *testing.T) {
 
 	entryID := createTestEntryWithTitle(t, s, "pending-title-changed", "Before Title", "<p>Stable body.</p>")
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestPendingEntryCountMatchesPendingEntryIDs(t *testing.T) {
 		t.Fatalf("expected our own fixture #%d to be pending before indexing", entryID)
 	}
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -547,7 +547,7 @@ func TestPipelineVersionBumpMakesIndexedEntriesPendingAgain(t *testing.T) {
 
 	entryID := createTestEntry(t, s, "pipeline-version-bump", "<p>Content that never changes at all.</p>")
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("EntryForIndexing failed: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestPipelineVersionBumpMakesIndexedEntriesPendingAgain(t *testing.T) {
 
 	// The Go-side hash must move with it too, or the re-index would write
 	// back the old hash and the entry would be re-offered forever.
-	rehashed, err := s.EntryForIndexing(entryID)
+	rehashed, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("EntryForIndexing after bump failed: %v", err)
 	}
@@ -634,7 +634,7 @@ func TestPendingEntryCountApproxTracksTheExactCount(t *testing.T) {
 		t.Fatalf("with nothing indexed above #%d the two counts must agree, got exact=%d approx=%d", after, exact, approx)
 	}
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("EntryForIndexing failed: %v", err)
 	}

@@ -67,7 +67,7 @@ type fakeEntries struct {
 	states  map[int64]*store.IndexState
 }
 
-func (f *fakeEntries) EntryForIndexing(entryID int64) (*store.Entry, error) {
+func (f *fakeEntries) EntryForIndexing(_ context.Context, entryID int64) (*store.Entry, error) {
 	e, ok := f.entries[entryID]
 	if !ok {
 		return nil, fmt.Errorf("web_test: no such entry #%d", entryID)
@@ -75,7 +75,7 @@ func (f *fakeEntries) EntryForIndexing(entryID int64) (*store.Entry, error) {
 	return e, nil
 }
 
-func (f *fakeEntries) EntryIndexState(entryID int64) (*store.IndexState, error) {
+func (f *fakeEntries) EntryIndexState(_ context.Context, entryID int64) (*store.IndexState, error) {
 	return f.states[entryID], nil
 }
 
@@ -485,12 +485,12 @@ type countingEntries struct {
 	stateCalls int
 }
 
-func (c *countingEntries) EntryForIndexing(entryID int64) (*store.Entry, error) {
+func (c *countingEntries) EntryForIndexing(_ context.Context, entryID int64) (*store.Entry, error) {
 	c.entryCalls++
 	return &store.Entry{ID: entryID, Title: "t", Content: "<p>body</p>"}, nil
 }
 
-func (c *countingEntries) EntryIndexState(entryID int64) (*store.IndexState, error) {
+func (c *countingEntries) EntryIndexState(_ context.Context, entryID int64) (*store.IndexState, error) {
 	c.stateCalls++
 	return nil, nil
 }

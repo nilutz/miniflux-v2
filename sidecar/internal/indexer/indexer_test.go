@@ -611,7 +611,7 @@ func TestIndexEntryReplacesPassagesOnContentChange(t *testing.T) {
 		t.Fatalf("expected status 'ok' after re-index, got %q", status)
 	}
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

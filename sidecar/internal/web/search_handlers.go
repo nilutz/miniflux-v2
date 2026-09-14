@@ -71,8 +71,8 @@ type SearchService interface {
 // the last time it was actually indexed. *store.Store satisfies this
 // with no adaptation; tests use an in-memory fakeEntries instead.
 type EntryLookup interface {
-	EntryForIndexing(entryID int64) (*store.Entry, error)
-	EntryIndexState(entryID int64) (*store.IndexState, error)
+	EntryForIndexing(ctx context.Context, entryID int64) (*store.Entry, error)
+	EntryIndexState(ctx context.Context, entryID int64) (*store.IndexState, error)
 }
 
 // webMaxSearchLimit is the highest `limit` this API will ever honour,
@@ -225,7 +225,7 @@ func newEntrySnapshots(lookup EntryLookup) *entrySnapshots {
 // caller: it degrades the ONE result's snippet to its raw, unhighlighted
 // PassageHit.Text (see buildSnippetView) instead of failing the whole
 // search response over what is, at that point, a display nicety.
-func (s *entrySnapshots) get(entryID int64) entrySnapshot {
+func (s *entrySnapshots) get(ctx context.Context, entryID int64) entrySnapshot {
 	if snap, ok := s.cache[entryID]; ok {
 		return snap
 	}
@@ -236,7 +236,7 @@ func (s *entrySnapshots) get(entryID int64) entrySnapshot {
 		return snap
 	}
 
-	entry, err := s.lookup.EntryForIndexing(entryID)
+	entry, err := s.lookup.EntryForIndexing(ctx, entryID)
 	if err != nil {
 		slog.Warn("web: unable to load entry for search snippet; degrading to unhighlighted text",
 			slog.Int64("entry_id", entryID), slog.Any("error", err))
@@ -244,7 +244,7 @@ func (s *entrySnapshots) get(entryID int64) entrySnapshot {
 		return snap
 	}
 
-	indexed, err := s.lookup.EntryIndexState(entryID)
+	indexed, err := s.lookup.EntryIndexState(ctx, entryID)
 	if err != nil {
 		slog.Warn("web: unable to load index state for search snippet; degrading to unhighlighted text",
 			slog.Int64("entry_id", entryID), slog.Any("error", err))
@@ -268,14 +268,14 @@ func buildSnippetView(hit search.PassageHit, snap entrySnapshot, query string) s
 	return toSnippetView(search.BuildSnippet(hit, *snap.entry, snap.indexed, query))
 }
 
-func (s *Server) buildEntryViews(hits []search.EntryHit, query string) []entryResultView {
+func (s *Server) buildEntryViews(ctx context.Context, hits []search.EntryHit, query string) []entryResultView {
 	snaps := newEntrySnapshots(s.entries)
 	views := make([]entryResultView, 0, len(hits))
 	for _, h := range hits {
 		views = append(views, entryResultView{
 			EntryID: h.EntryID,
 			Score:   h.Score,
-			Snippet: buildSnippetView(h.Best, snaps.get(h.EntryID), query),
+			Snippet: buildSnippetView(h.Best, snaps.get(ctx, h.EntryID), query),
 		})
 	}
 	return views
@@ -292,7 +292,7 @@ func buildSimilarEntryViews(hits []search.EntryHit) []similarEntryResultView {
 	return views
 }
 
-func (s *Server) buildPassageViews(hits []search.PassageHit, query string) []passageResultView {
+func (s *Server) buildPassageViews(ctx context.Context, hits []search.PassageHit, query string) []passageResultView {
 	snaps := newEntrySnapshots(s.entries)
 	views := make([]passageResultView, 0, len(hits))
 	for _, h := range hits {
@@ -302,7 +302,7 @@ func (s *Server) buildPassageViews(hits []search.PassageHit, query string) []pas
 			Ordinal:   h.Ordinal,
 			Source:    h.Source,
 			Score:     h.Score,
-			Snippet:   buildSnippetView(h, snaps.get(h.EntryID), query),
+			Snippet:   buildSnippetView(h, snaps.get(ctx, h.EntryID), query),
 		})
 	}
 	return views
@@ -545,10 +545,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	view := searchResponseView{Mode: resp.Mode.String(), Query: query}
 	if resp.Entries != nil {
-		view.Entries = s.buildEntryViews(resp.Entries, query)
+		view.Entries = s.buildEntryViews(r.Context(), resp.Entries, query)
 	}
 	if resp.Passages != nil {
-		view.Passages = s.buildPassageViews(resp.Passages, query)
+		view.Passages = s.buildPassageViews(r.Context(), resp.Passages, query)
 	}
 	writeJSON(w, view)
 }

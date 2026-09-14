@@ -83,21 +83,25 @@ func TestSearchTemplateRendersSnippetsWithoutRawHTML(t *testing.T) {
 	}
 
 	data := map[string]any{
-		"language":         "en_US",
-		"theme":            "system_serif",
-		"searchQuery":      "hello",
-		"searchMode":       "hybrid",
-		"searchModes":      []string{"keyword", "semantic", "hybrid", "passages"},
-		"searchUnreadOnly": false,
-		"searchDegraded":   true,
-		"searchRows":       rows,
-		"total":            2,
-		"pagination":       fakePagination{Route: "/search"},
-		"user":             &model.User{},
-		"hasSaveEntry":     false,
-		"menu":             "search",
-		"countUnread":      0,
-		"countErrorFeeds":  0,
+		"language":    "en_US",
+		"theme":       "system_serif",
+		"searchQuery": "hello",
+		"searchMode":  "hybrid",
+		"searchModes": []string{"keyword", "semantic", "hybrid", "passages"},
+		// The sidecar is configured in this case: showSearchPage sets
+		// this from SEARCH_SIDECAR_URL. See
+		// TestSearchTemplateOmitsModePickerWhenTheSidecarIsOff.
+		"searchModesAvailable": true,
+		"searchUnreadOnly":     false,
+		"searchDegraded":       true,
+		"searchRows":           rows,
+		"total":                2,
+		"pagination":           fakePagination{Route: "/search"},
+		"user":                 &model.User{},
+		"hasSaveEntry":         false,
+		"menu":                 "search",
+		"countUnread":          0,
+		"countErrorFeeds":      0,
 	}
 
 	out := string(engine.Render("search.html", data))
@@ -178,5 +182,87 @@ func TestEntryTemplateOmitsSimilarBlockWhenNil(t *testing.T) {
 
 	if strings.Contains(out, "entry-similar") {
 		t.Fatalf("expected no similar-articles block when similarEntries is absent, got:\n%s", out)
+	}
+}
+
+// TestSearchTemplateOmitsModePickerWhenTheSidecarIsOff is the whole-branch
+// review's finding 8. With SEARCH_SIDECAR_URL unset every mode resolves
+// to the same built-in full-text search, so a mode picker would change
+// the URL and nothing else — the one place the off switch failed to mean
+// "behaviour exactly as before" (spec §8.2). The rest of the page must
+// still render normally.
+func TestSearchTemplateOmitsModePickerWhenTheSidecarIsOff(t *testing.T) {
+	engine := NewEngine("")
+	engine.ParseTemplates()
+
+	data := map[string]any{
+		"language":             "en_US",
+		"theme":                "system_serif",
+		"searchQuery":          "hello",
+		"searchMode":           "hybrid",
+		"searchModes":          []string{"keyword", "semantic", "hybrid", "passages"},
+		"searchModesAvailable": false,
+		"searchUnreadOnly":     false,
+		"searchDegraded":       false,
+		"searchRows":           []fakeRow{{Entry: newFakeEntry(1, "Hello")}},
+		"total":                1,
+		"pagination":           fakePagination{Route: "/search"},
+		"user":                 &model.User{},
+		"hasSaveEntry":         false,
+		"menu":                 "search",
+		"countUnread":          0,
+		"countErrorFeeds":      0,
+	}
+
+	out := string(engine.Render("search.html", data))
+
+	if strings.Contains(out, `id="search-mode"`) {
+		t.Fatalf("the mode picker rendered with the sidecar off:\n%s", out)
+	}
+	if strings.Contains(out, "Search mode") {
+		t.Fatalf("the mode picker label rendered with the sidecar off:\n%s", out)
+	}
+	if !strings.Contains(out, "Hello") {
+		t.Fatalf("expected the results themselves to still render, got:\n%s", out)
+	}
+	if !strings.Contains(out, `name="q"`) {
+		t.Fatalf("expected the search box itself to still render, got:\n%s", out)
+	}
+}
+
+// TestEntryTemplateLinksSimilarEntriesByTheirOwnStatus covers the review's
+// minor: the similar block hardcoded /history/entry/%d, which puts an
+// unread article into the history reading context (its prev/next
+// navigation walks read entries) no matter what state it is actually in.
+func TestEntryTemplateLinksSimilarEntriesByTheirOwnStatus(t *testing.T) {
+	engine := NewEngine("")
+	engine.ParseTemplates()
+
+	unread := newFakeEntry(9, "Still unread")
+	read := newFakeEntry(10, "Already read")
+	read.Status = "read"
+
+	data := map[string]any{
+		"language":        "en_US",
+		"theme":           "system_serif",
+		"entry":           newFakeEntry(1, "Main entry"),
+		"user":            &model.User{},
+		"hasSaveEntry":    false,
+		"similarEntries":  model.Entries{unread, read},
+		"menu":            "search",
+		"countUnread":     0,
+		"countErrorFeeds": 0,
+	}
+
+	out := string(engine.Render("entry.html", data))
+
+	if !strings.Contains(out, "/unread/entry/9") {
+		t.Fatalf("expected the unread similar entry to link into the unread context, got:\n%s", out)
+	}
+	if !strings.Contains(out, "/history/entry/10") {
+		t.Fatalf("expected the read similar entry to link into the history context, got:\n%s", out)
+	}
+	if strings.Contains(out, "/history/entry/9") {
+		t.Fatalf("the unread similar entry still links into the history context:\n%s", out)
 	}
 }

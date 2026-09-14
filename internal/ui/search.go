@@ -27,6 +27,39 @@ var searchModes = []string{"keyword", "semantic", "hybrid", "passages"}
 
 const defaultSearchMode = "hybrid"
 
+// maxSidecarSearchLimit caps how many results the search page asks the
+// sidecar for, independently of the reader's own EntriesPerPage.
+//
+// EntriesPerPage defaults to 100 in Miniflux, and passing it straight
+// through was far more expensive than it looked. The sidecar multiplies a
+// request's limit by searchCandidateMultiplier (5) at the fusion boundary
+// and again by candidateMultiplier (5) inside each retrieval channel, so
+// limit=100 meant 2000 BM25 candidates and an HNSW scan configured at
+// pgvector's ceiling of ef_search=1000, then 100 highlighted snippets —
+// each one an entry-content round trip and a full HTML extraction — all
+// inside the 3-second budget the whole call has before it falls back.
+//
+// 20 is chosen as the number a person actually reads. Search results are
+// scanned from the top, not paged through: a reader who does not find it
+// in the first twenty refines the query rather than scrolling. It keeps
+// the index work at 20*5*5 = 500 candidates, comfortably inside
+// pgvector's ef_search ceiling with room for the multipliers to grow, and
+// bounds snippet building to twenty extractions.
+//
+// It is a ceiling, not a fixed size: a reader whose EntriesPerPage is
+// smaller still gets exactly their page size, so the count the page shows
+// stays consistent with the pagination beneath it.
+const maxSidecarSearchLimit = 20
+
+// sidecarSearchLimit returns how many results to ask the sidecar for,
+// given the reader's configured page size. See maxSidecarSearchLimit.
+func sidecarSearchLimit(entriesPerPage int) int {
+	if entriesPerPage <= 0 || entriesPerPage > maxSidecarSearchLimit {
+		return maxSidecarSearchLimit
+	}
+	return entriesPerPage
+}
+
 // parseSearchMode validates raw against searchModes, falling back to
 // defaultSearchMode for anything else.
 func parseSearchMode(raw string) string {
@@ -92,11 +125,12 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 		rows, entriesCount, degraded, err = resolveSearchResults(
 			r.Context(),
 			config.Opts.SearchSidecarURL(),
+			user.ID,
 			searchQuery,
 			searchMode,
 			unreadOnly,
 			offset,
-			user.EntriesPerPage,
+			sidecarSearchLimit(user.EntriesPerPage),
 			hydrate,
 			fallback,
 		)
@@ -115,6 +149,12 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 	view.Set("searchQuery", searchQuery)
 	view.Set("searchMode", searchMode)
 	view.Set("searchModes", searchModes)
+	// searchModesAvailable gates the mode picker in the template. With
+	// SEARCH_SIDECAR_URL unset every mode resolves to the same built-in
+	// full-text search, so offering the choice would change the URL and
+	// nothing else - the one place the off switch would not be "exactly
+	// as before" (spec §8.2).
+	view.Set("searchModesAvailable", config.Opts.SearchSidecarURL() != "")
 	view.Set("searchUnreadOnly", unreadOnly)
 	view.Set("searchRows", rows)
 	view.Set("total", entriesCount)
@@ -137,13 +177,15 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 // resolveSearchResults returns the rows and total count to render on the
 // search page.
 //
-// When sidecarURL is empty, or offset is non-zero (the sidecar's search
-// API has no offset parameter, so paging past the first page always uses
-// the fallback path, which supports it natively), fallback runs directly
-// and degraded is false: neither case is a failure. Fallback rows never
-// carry a snippet - only the sidecar computes highlighted snippets - so
-// their Segments are left nil; the template simply renders no snippet
-// paragraph for those rows.
+// When sidecarURL is empty, fallback runs directly and degraded is false:
+// the feature is off, nothing failed, and the page must look exactly as
+// it did before the sidecar existed. When offset is non-zero, fallback
+// also runs - the sidecar's search API has no offset parameter - but
+// degraded IS reported, because the reader is being answered by a
+// different search engine than the one the page says it is using.
+// Fallback rows never carry a snippet - only the sidecar computes
+// highlighted snippets - so their Segments are left nil; the template
+// simply renders no snippet paragraph for those rows.
 //
 // Otherwise the sidecar is queried in searchMode. ANY failure —
 // connection refused, timeout, non-200 status, a malformed body
@@ -161,6 +203,7 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 func resolveSearchResults(
 	ctx context.Context,
 	sidecarURL string,
+	userID int64,
 	query string,
 	searchMode string,
 	unreadOnly bool,
@@ -174,9 +217,24 @@ func resolveSearchResults(
 		return entryRows(entries), count, err
 	}
 
-	if sidecarURL == "" || offset > 0 {
+	if sidecarURL == "" {
 		rows, count, err := runFallback()
 		return rows, count, false, err
+	}
+
+	if offset > 0 {
+		// Paging past the first page uses the fallback path, which
+		// supports an offset natively; the sidecar's search API has no
+		// offset parameter. This IS reported as degraded, unlike the
+		// unconfigured case: the reader asked for ranked search, has a
+		// mode selected in the URL, and is being served built-in
+		// full-text results instead. A stale bookmark to page 2 that
+		// quietly answered with a different search engine, under the
+		// mode picker still showing "hybrid", was the worst kind of
+		// silence - the notice is cheap and the alternative is a reader
+		// comparing two pages of incomparable rankings.
+		rows, count, err := runFallback()
+		return rows, count, true, err
 	}
 
 	client := searchclient.NewClient(sidecarURL)
@@ -184,6 +242,7 @@ func resolveSearchResults(
 		Query:      query,
 		Mode:       searchMode,
 		Limit:      limit,
+		UserID:     userID,
 		UnreadOnly: unreadOnly,
 	})
 	if err != nil {

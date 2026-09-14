@@ -885,7 +885,7 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 	}
 	b.retries.recordSuccess(id)
 
-	state, err := b.idx.store.EntryIndexState(id)
+	state, err := b.idx.store.EntryIndexState(ctx, id)
 	if err != nil {
 		// Indexing itself succeeded; a failure to read back the state we
 		// just wrote is logged and does not fail the batch, but the entry

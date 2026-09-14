@@ -32,6 +32,27 @@ import (
 // page wait noticeably.
 const DefaultTimeout = 3 * time.Second
 
+// SimilarTimeout bounds the similar-articles call, and is deliberately
+// shorter than DefaultTimeout.
+//
+// The two calls are not worth the same wait. A search page that renders
+// without its results has failed at the thing the reader asked for, so
+// it is worth three seconds to get them. The entry page's "similar
+// articles" block is a sidebar beside an article the reader is already
+// reading: the page is complete without it, and every millisecond spent
+// waiting for it is a millisecond the article itself is not on screen.
+// This call sits on the synchronous render path of every entry view, so
+// its ceiling is what a wedged sidecar costs a reader who never asked
+// for a recommendation.
+//
+// 1.5s is chosen against what the work actually costs: Similar issues up
+// to maxSeedPassages (32) sequential nearest-neighbour queries, measured
+// at roughly 26ms each on this corpus, so a healthy sidecar answers even
+// the worst-case entry inside about 850ms. Anything slower than 1.5s is
+// not a slow entry, it is a sidecar in trouble - and the right answer to
+// that is to drop the block, which is exactly what the caller does.
+const SimilarTimeout = 1500 * time.Millisecond
+
 // Range is a highlighted span within a Snippet's Text, in byte offsets.
 type Range struct {
 	Start int `json:"start"`
@@ -72,10 +93,21 @@ type SearchResponse struct {
 	Passages []PassageResult `json:"passages,omitempty"`
 }
 
+// SimilarResult is one GET /api/similar hit. It carries no snippet, and
+// that is the contract, not an omission: the entry page's similar block
+// renders an entry's title, feed and category, all of which the fork
+// already holds in its own database, so the sidecar does not build a
+// snippet for this endpoint at all (see its
+// internal/web/search_handlers.go's similarEntryResultView).
+type SimilarResult struct {
+	EntryID int64   `json:"entry_id"`
+	Score   float64 `json:"score"`
+}
+
 // SimilarResponse is GET /api/similar's response body.
 type SimilarResponse struct {
-	EntryID int64         `json:"entry_id"`
-	Entries []EntryResult `json:"entries"`
+	EntryID int64           `json:"entry_id"`
+	Entries []SimilarResult `json:"entries"`
 }
 
 // SearchRequest is a GET /api/search call. Zero values mean "no opinion"
@@ -83,9 +115,18 @@ type SimilarResponse struct {
 // zero Limit lets it apply its own default, and zero-value Since/Until
 // mean unbounded — matching search_handlers.go's own parsing.
 type SearchRequest struct {
-	Query       string
-	Mode        string // "", "keyword", "semantic", "hybrid", "passages"
-	Limit       int
+	Query string
+	Mode  string // "", "keyword", "semantic", "hybrid", "passages"
+	Limit int
+
+	// UserID scopes the search to one Miniflux user's entries. Unlike
+	// every other field here, leaving it zero is not a neutral "no
+	// opinion": the sidecar's index is global, so an unscoped search
+	// draws its candidate set from every user's content and the caller
+	// silently gets a shorter page of their own. Every caller in this
+	// fork sets it.
+	UserID int64
+
 	FeedIDs     []int64
 	CategoryIDs []int64
 	UnreadOnly  bool
@@ -96,14 +137,40 @@ type SearchRequest struct {
 
 // SimilarRequest is a GET /api/similar call.
 type SimilarRequest struct {
-	EntryID     int64
-	Limit       int
+	EntryID int64
+	Limit   int
+
+	// UserID scopes the lookup to one Miniflux user's entries. See
+	// SearchRequest.UserID: leaving it zero is not neutral.
+	UserID int64
+
 	FeedIDs     []int64
 	CategoryIDs []int64
 	UnreadOnly  bool
 	StarredOnly bool
 	Since       time.Time
 	Until       time.Time
+}
+
+// sharedHTTPClient is the one *http.Client every Client in this process
+// uses.
+//
+// A Client is constructed per request — the UI handlers call NewClient on
+// each page view rather than holding one — and a fresh *http.Client means
+// a fresh Transport, which means a fresh connection pool that is thrown
+// away after a single use. Every search and every entry page view paid
+// for a new TCP handshake to a service on loopback. Hoisting the client
+// here lets keep-alive actually keep something alive across requests,
+// while a per-Client timeout stays per-Client: get wraps each request's
+// context in its own deadline, which bounds connect, response and body
+// read alike, so the bound never needed to live on the *http.Client.
+var sharedHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		MaxIdleConns:        8,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+	},
 }
 
 // Client is a small HTTP client for one sidecar instance.
@@ -119,12 +186,14 @@ func NewClient(baseURL string) *Client {
 }
 
 // NewClientWithTimeout returns a Client bounded by an explicit timeout.
-// Exported (rather than an option func) so tests can use a short timeout
-// and keep the suite fast without waiting out DefaultTimeout.
+// Exported (rather than an option func) so callers with a different
+// tolerance can say so — the similar-articles block uses SimilarTimeout
+// — and so tests can use a short timeout and keep the suite fast without
+// waiting out DefaultTimeout.
 func NewClientWithTimeout(baseURL string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: sharedHTTPClient,
 		timeout:    timeout,
 	}
 }
@@ -144,6 +213,7 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 		values.Set("limit", strconv.Itoa(req.Limit))
 	}
 	setFilterParams(values, filterParams{
+		UserID:      req.UserID,
 		FeedIDs:     req.FeedIDs,
 		CategoryIDs: req.CategoryIDs,
 		UnreadOnly:  req.UnreadOnly,
@@ -168,6 +238,7 @@ func (c *Client) Similar(ctx context.Context, req SimilarRequest) (SimilarRespon
 		values.Set("limit", strconv.Itoa(req.Limit))
 	}
 	setFilterParams(values, filterParams{
+		UserID:      req.UserID,
 		FeedIDs:     req.FeedIDs,
 		CategoryIDs: req.CategoryIDs,
 		UnreadOnly:  req.UnreadOnly,
@@ -186,6 +257,7 @@ func (c *Client) Similar(ctx context.Context, req SimilarRequest) (SimilarRespon
 // filterParams is the set of optional filters shared by SearchRequest and
 // SimilarRequest, factored out so setFilterParams has one implementation.
 type filterParams struct {
+	UserID      int64
 	FeedIDs     []int64
 	CategoryIDs []int64
 	UnreadOnly  bool
@@ -195,6 +267,9 @@ type filterParams struct {
 }
 
 func setFilterParams(values url.Values, f filterParams) {
+	if f.UserID > 0 {
+		values.Set("user", strconv.FormatInt(f.UserID, 10))
+	}
 	for _, id := range f.FeedIDs {
 		values.Add("feed", strconv.FormatInt(id, 10))
 	}
@@ -216,12 +291,13 @@ func setFilterParams(values url.Values, f filterParams) {
 }
 
 // get issues one bounded GET request and decodes its JSON body into out.
-// ctx is wrapped in its own timeout in addition to httpClient's Timeout
-// (belt and suspenders: a caller that passes context.Background(), or a
-// context with a much longer deadline than this client's own, still gets
-// bounded by c.timeout here) so that no caller can accidentally make a
-// reader page wait on the sidecar for longer than this Client was
-// configured to allow.
+// ctx is wrapped in this Client's own timeout, which is the ONLY bound on
+// the call now that the *http.Client is shared process-wide and carries
+// no Timeout of its own (see sharedHTTPClient). A context deadline covers
+// more than http.Client.Timeout did anyway — connect, response headers
+// and body read alike — so no caller can make a reader page wait on the
+// sidecar for longer than this Client was configured to allow, whatever
+// context it passes in.
 func (c *Client) get(ctx context.Context, path string, values url.Values, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()

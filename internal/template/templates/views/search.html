@@ -14,6 +14,7 @@
             <button type="submit" class="button button-primary" data-label-loading="{{ t "form.submit.loading" }}">{{ t "search.submit" }}</button>
         </div>
         <label class="search-filter"><input type="checkbox" name="unread" value="1" {{ if $.searchUnreadOnly }}checked{{ end }}> {{ t "menu.show_only_unread_entries" }}</label>
+        {{ if $.searchModesAvailable }}
         <label class="search-filter" for="search-mode">{{ t "search.mode.label" }}
             <select name="mode" id="search-mode">
                 {{ range $.searchModes }}
@@ -21,6 +22,7 @@
                 {{ end }}
             </select>
         </label>
+        {{ end }}
     </form>
 </search>
 

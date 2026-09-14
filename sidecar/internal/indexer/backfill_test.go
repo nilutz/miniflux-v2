@@ -580,11 +580,11 @@ func TestBackfillReindexesEntryWithChangedContent(t *testing.T) {
 		}
 	}
 
-	entry, err := s.EntryForIndexing(entryID)
+	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	state, err := s.EntryIndexState(entryID)
+	state, err := s.EntryIndexState(context.Background(), entryID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

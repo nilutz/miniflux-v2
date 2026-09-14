@@ -1,0 +1,58 @@
+# The search sidecar (sidecar/) is a separate Go module with its own
+# toolchain requirements, so it gets its own workflow rather than a step
+# inside tests.yml or linters.yml: the root module's jobs run `go test
+# ./...` from the repository root, which never descends into a nested
+# module.
+#
+# This job runs only the packages that are hermetic — no build tags, no
+# native ONNX Runtime or libtokenizers, no database. Two exclusions are
+# deliberate:
+#
+#   - internal/embed/onnx and cmd/sidecar need libtokenizers.a and
+#     libonnxruntime, neither of which is a Go module or vendored here;
+#     they fail at the LINK step on a machine without them, not at an
+#     assertion.
+#   - internal/indexer's suite sweeps the entire entries table and
+#     rewrites search.passages. It belongs on a throwaway database chosen
+#     deliberately, never in CI. See sidecar/internal/testdb.
+#
+# SIDECAR_TEST_DATABASE_URL is intentionally not set here, so the
+# database-backed tests in the packages below t.Skip.
+name: Search sidecar
+
+permissions: read-all
+
+on:
+  pull_request:
+    branches:
+    - main
+  workflow_dispatch:
+
+jobs:
+  sidecar:
+    name: Sidecar vet, gofmt and hermetic tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sidecar
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: stable
+        cache-dependency-path: sidecar/go.sum
+    - name: go vet
+      run: go vet ./...
+    - name: gofmt
+      run: |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then
+          echo "These files are not gofmt'd:"
+          echo "$unformatted"
+          gofmt -d .
+          exit 1
+        fi
+    - name: Hermetic tests
+      run: make test-hermetic

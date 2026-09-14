@@ -15,6 +15,12 @@ import (
 	"miniflux.app/v2/internal/model"
 )
 
+// testUserID is the reader every resolveSearchResults call in this file
+// is made on behalf of. Its value does not matter to these tests beyond
+// being non-zero: what matters is that it reaches the sidecar, which
+// TestResolveSearchResults_SendsTheUserScope asserts directly.
+const testUserID int64 = 42
+
 // fallbackEntries is what the pre-existing WithSearchQuery path would
 // have returned; resolveSearchResults must return exactly these entries
 // (wrapped as rows with no snippet) whenever it falls back, whatever the
@@ -42,6 +48,7 @@ func TestResolveSearchResults_NoSidecarConfigured(t *testing.T) {
 	rows, count, degraded, err := resolveSearchResults(
 		context.Background(),
 		"",
+		testUserID,
 		"coffee",
 		"hybrid",
 		false,
@@ -89,6 +96,7 @@ func TestResolveSearchResults_SidecarUnreachableFallsBack(t *testing.T) {
 	rows, count, degraded, err := resolveSearchResults(
 		context.Background(),
 		"http://"+addr,
+		testUserID,
 		"coffee",
 		"hybrid",
 		false,
@@ -130,7 +138,7 @@ func TestResolveSearchResults_SidecarNonOKFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, nil },
 		fallbackEntries,
 	)
@@ -156,7 +164,7 @@ func TestResolveSearchResults_SidecarMalformedBodyFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, nil },
 		fallbackEntries,
 	)
@@ -189,7 +197,7 @@ func TestResolveSearchResults_SidecarSuccessOrdersAndHydrates(t *testing.T) {
 
 	var hydratedIDs []int64
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
 		func(ids []int64) (model.Entries, error) {
 			hydratedIDs = ids
 			// Return them out of order on purpose, to prove
@@ -247,7 +255,7 @@ func TestResolveSearchResults_PassagesModeBuildsOneRowPerPassage(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, "coffee", "passages", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "passages", false, 0, 10,
 		func(ids []int64) (model.Entries, error) {
 			return model.Entries{{ID: 5, Title: "Five"}}, nil
 		},
@@ -273,35 +281,6 @@ func TestResolveSearchResults_PassagesModeBuildsOneRowPerPassage(t *testing.T) {
 	}
 }
 
-// TestResolveSearchResults_OffsetSkipsSidecar proves paging past the
-// first page always uses the fallback path (the sidecar API has no
-// offset parameter), and that this is NOT reported as degraded - it is a
-// deliberate scope limit, not a failure.
-func TestResolveSearchResults_OffsetSkipsSidecar(t *testing.T) {
-	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"mode":"hybrid","query":"coffee","entries":[]}`))
-	}))
-	defer server.Close()
-
-	_, _, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, "coffee", "hybrid", false, 20, 10,
-		func(ids []int64) (model.Entries, error) { return nil, nil },
-		fallbackEntries,
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if called {
-		t.Fatal("expected the sidecar not to be called for a non-zero offset")
-	}
-	if degraded {
-		t.Fatal("skipping the sidecar for pagination is not a degradation")
-	}
-}
-
 // TestResolveSearchResults_HydrateErrorFallsBack proves a failure while
 // loading full entry data for the sidecar's hit ids (a store error) also
 // falls back, rather than propagating a hard error to the page.
@@ -313,7 +292,7 @@ func TestResolveSearchResults_HydrateErrorFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, errors.New("store exploded") },
 		fallbackEntries,
 	)
@@ -338,7 +317,7 @@ func TestResolveSearchResults_PassagesHydrateErrorFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, "coffee", "passages", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "passages", false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, errors.New("store exploded") },
 		fallbackEntries,
 	)
@@ -369,5 +348,119 @@ func TestParseSearchMode(t *testing.T) {
 		if got := parseSearchMode(in); got != want {
 			t.Errorf("parseSearchMode(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestResolveSearchResults_SendsTheUserScope is the fork half of the
+// whole-branch review's finding 3. The sidecar indexes every user's
+// passages in one table, so a search that does not name its user draws
+// its candidate set from the whole corpus; the fork's own hydration then
+// removes what it does not own, leaving the reader with a short page —
+// or an empty one — for a query their own articles match. Nothing about
+// that is visible in the rendered page, which is why it needs a test at
+// the wire level rather than an assertion about rows.
+func TestResolveSearchResults_SendsTheUserScope(t *testing.T) {
+	var gotUser string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = r.URL.Query().Get("user")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"mode":"hybrid","query":"coffee","entries":[]}`))
+	}))
+	defer server.Close()
+
+	_, _, _, err := resolveSearchResults(
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
+		func(ids []int64) (model.Entries, error) { return model.Entries{}, nil },
+		func() (model.Entries, int, error) {
+			t.Fatal("fallback should not be called on a sidecar success")
+			return nil, 0, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotUser != "42" {
+		t.Fatalf("the sidecar was asked for user=%q, want %q — an unscoped search silently shortens the reader's own results", gotUser, "42")
+	}
+}
+
+// TestResolveSearchResults_OffsetFallbackIsDegraded is the review's
+// finding 7. Paging past the first page cannot use the sidecar (its API
+// has no offset), so those results come from the built-in search — a
+// different engine, with a different ranking, under a mode picker still
+// showing the mode the reader chose. That has to be said out loud.
+func TestResolveSearchResults_OffsetFallbackIsDegraded(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Write([]byte(`{"mode":"hybrid","query":"coffee","entries":[]}`))
+	}))
+	defer server.Close()
+
+	rows, count, degraded, err := resolveSearchResults(
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 20, 10,
+		func(ids []int64) (model.Entries, error) { return nil, nil },
+		fallbackEntries,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Fatal("expected the sidecar not to be called for a non-zero offset")
+	}
+	if !degraded {
+		t.Fatal("expected degraded=true: page 2 is served by the built-in search, not the mode the page says it is using")
+	}
+	if count != 2 || len(rows) != 2 {
+		t.Fatalf("expected the fallback's rows to still render, got %d (count %d)", len(rows), count)
+	}
+}
+
+// TestSidecarSearchLimitCapsThePageSize is the review's finding 5. The
+// sidecar multiplies its limit by 25 on the way to the index and builds
+// one snippet per result, so handing it EntriesPerPage (100 by default)
+// made every search far more expensive than the page it produced.
+func TestSidecarSearchLimitCapsThePageSize(t *testing.T) {
+	cases := map[int]int{
+		100: maxSidecarSearchLimit, // the Miniflux default
+		50:  maxSidecarSearchLimit,
+		21:  maxSidecarSearchLimit,
+		20:  20,
+		10:  10, // a smaller page size is honoured, so the count matches the pagination
+		1:   1,
+		0:   maxSidecarSearchLimit, // unset/nonsense falls back to the cap, never to zero
+		-5:  maxSidecarSearchLimit,
+	}
+	for in, want := range cases {
+		if got := sidecarSearchLimit(in); got != want {
+			t.Errorf("sidecarSearchLimit(%d) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// TestResolveSearchResults_HonoursTheCappedLimit proves the cap is what
+// actually reaches the sidecar, not just what the helper returns.
+func TestResolveSearchResults_HonoursTheCappedLimit(t *testing.T) {
+	var gotLimit string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLimit = r.URL.Query().Get("limit")
+		w.Write([]byte(`{"mode":"hybrid","query":"coffee","entries":[]}`))
+	}))
+	defer server.Close()
+
+	_, _, _, err := resolveSearchResults(
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0,
+		sidecarSearchLimit(100),
+		func(ids []int64) (model.Entries, error) { return model.Entries{}, nil },
+		func() (model.Entries, int, error) {
+			t.Fatal("fallback should not be called on a sidecar success")
+			return nil, 0, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotLimit != "20" {
+		t.Fatalf("the sidecar was asked for limit=%q, want %q", gotLimit, "20")
 	}
 }

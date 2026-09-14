@@ -26,8 +26,19 @@ func (h *handler) similarEntries(ctx context.Context, userID, entryID int64) mod
 		return nil
 	}
 
-	client := searchclient.NewClient(sidecarURL)
-	resp, err := client.Similar(ctx, searchclient.SimilarRequest{EntryID: entryID})
+	// A shorter bound than the search page's: this block is a sidebar on
+	// a page whose actual content is already loaded, and the call sits on
+	// its synchronous render path. See searchclient.SimilarTimeout.
+	client := searchclient.NewClientWithTimeout(sidecarURL, searchclient.SimilarTimeout)
+	resp, err := client.Similar(ctx, searchclient.SimilarRequest{
+		EntryID: entryID,
+		// Without this the sidecar's candidate set is drawn from every
+		// user's passages, so another user's articles can crowd this
+		// reader's own neighbours out of the top-N before the hydration
+		// below ever filters by ownership - the block then renders short
+		// or empty rather than wrong. See searchclient.SimilarRequest.UserID.
+		UserID: userID,
+	})
 	if err != nil {
 		slog.Debug("ui: similar-articles sidecar unavailable, omitting the block",
 			slog.Int64("entry_id", entryID),

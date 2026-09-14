@@ -4,6 +4,7 @@
 package store // import "miniflux.app/v2/sidecar/internal/store"
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -40,10 +41,12 @@ type IndexState struct {
 // EntryIndexState returns the currently recorded index state for an entry,
 // or nil if the entry has never been indexed (no row in
 // search.entry_index_state yet).
-func (s *Store) EntryIndexState(entryID int64) (*IndexState, error) {
+// It takes a context for the same reason EntryForIndexing does: the search
+// API calls it once per result while a page render waits.
+func (s *Store) EntryIndexState(ctx context.Context, entryID int64) (*IndexState, error) {
 	var st IndexState
 	var reason sql.NullString
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT content_hash, status, reason FROM search.entry_index_state WHERE entry_id=$1`,
 		entryID,
 	).Scan(&st.ContentHash, &st.Status, &reason)

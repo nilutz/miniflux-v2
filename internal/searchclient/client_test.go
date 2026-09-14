@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -215,5 +216,128 @@ func TestClientSimilar_Success(t *testing.T) {
 	}
 	if len(resp.Entries) != 1 || resp.Entries[0].EntryID != 8 {
 		t.Fatalf("unexpected entries: %+v", resp.Entries)
+	}
+}
+
+// TestClientSendsTheUserScope proves both endpoints put the caller's user
+// id on the wire. The sidecar's index is global; without this parameter
+// its candidate set is drawn from every user's content and the reader
+// silently gets a shorter page of their own (whole-branch review,
+// finding 3).
+func TestClientSendsTheUserScope(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query().Get("user")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"mode":"hybrid","query":"coffee","entries":[]}`)
+	}))
+	defer server.Close()
+
+	client := NewClientWithTimeout(server.URL, time.Second)
+
+	if _, err := client.Search(context.Background(), SearchRequest{Query: "coffee", UserID: 7}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got != "7" {
+		t.Fatalf("Search sent user=%q, want %q", got, "7")
+	}
+
+	got = ""
+	if _, err := client.Similar(context.Background(), SimilarRequest{EntryID: 1, UserID: 7}); err != nil {
+		t.Fatalf("Similar: %v", err)
+	}
+	if got != "7" {
+		t.Fatalf("Similar sent user=%q, want %q", got, "7")
+	}
+
+	// A zero UserID stays off the wire entirely, so the sidecar applies
+	// its own documented "unscoped" default rather than being handed
+	// user=0, which it rejects as a caller error.
+	got = "unset"
+	if _, err := client.Search(context.Background(), SearchRequest{Query: "coffee"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("a zero UserID put user=%q on the wire; want the parameter omitted", got)
+	}
+}
+
+// TestSimilarTimeoutIsShorterThanSearch pins the relationship the entry
+// page depends on (whole-branch review, finding 2): the similar-articles
+// block is a sidebar on an already-loaded page and must not be allowed
+// to hold the render path as long as a search the reader actually asked
+// for.
+func TestSimilarTimeoutIsShorterThanSearch(t *testing.T) {
+	if SimilarTimeout >= DefaultTimeout {
+		t.Fatalf("SimilarTimeout (%v) must be shorter than DefaultTimeout (%v)", SimilarTimeout, DefaultTimeout)
+	}
+}
+
+// TestClientTimeoutBoundsASlowSidecar proves the per-Client timeout still
+// bounds a request now that the *http.Client is shared process-wide and
+// carries no Timeout of its own — the bound moved onto the request
+// context, and this is what checks it did not simply disappear.
+func TestClientTimeoutBoundsASlowSidecar(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	client := NewClientWithTimeout(server.URL, 50*time.Millisecond)
+
+	start := time.Now()
+	_, err := client.Similar(context.Background(), SimilarRequest{EntryID: 1})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a timeout error from a sidecar that never answers")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("the call was not bounded by the client's own timeout, took %v", elapsed)
+	}
+}
+
+// TestClientsReuseOneConnection is the review's minor: a *http.Client per
+// request meant a Transport per request, so every search and every entry
+// page view opened a fresh TCP connection to a service on loopback and
+// threw the pool away. Counting connections at the server, rather than
+// inspecting the client, is what actually proves the pool is shared.
+func TestClientsReuseOneConnection(t *testing.T) {
+	var mu sync.Mutex
+	conns := map[net.Conn]struct{}{}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"mode":"hybrid","query":"coffee","entries":[]}`)
+	}))
+	server.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			mu.Lock()
+			conns[c] = struct{}{}
+			mu.Unlock()
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	for i := 0; i < 5; i++ {
+		// A fresh Client each time, exactly as the UI handlers build one
+		// per page view.
+		client := NewClientWithTimeout(server.URL, time.Second)
+		if _, err := client.Search(context.Background(), SearchRequest{Query: "coffee"}); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	n := len(conns)
+	mu.Unlock()
+
+	if n != 1 {
+		t.Fatalf("5 sequential requests opened %d connections; want 1 — the shared transport's keep-alive is not being used", n)
 	}
 }

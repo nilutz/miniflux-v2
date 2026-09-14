@@ -177,12 +177,12 @@ func (idx *Indexer) BatchSize() int {
 // the entry recorded ok, in a single atomic replace — IndexEntry never
 // marks an entry ok on a partial result.
 func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
-	entry, err := idx.store.EntryForIndexing(entryID)
+	entry, err := idx.store.EntryForIndexing(ctx, entryID)
 	if err != nil {
 		return fmt.Errorf("%w #%d: %w", errLoadEntry, entryID, err)
 	}
 
-	state, err := idx.store.EntryIndexState(entryID)
+	state, err := idx.store.EntryIndexState(ctx, entryID)
 	if err != nil {
 		return fmt.Errorf("%w #%d: %w", errLoadIndexState, entryID, err)
 	}
