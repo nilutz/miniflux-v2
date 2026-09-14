@@ -4,8 +4,14 @@
 package ui // import "miniflux.app/v2/internal/ui"
 
 type pagination struct {
-	Route        string
-	SearchQuery  string
+	Route       string
+	SearchQuery string
+	// Mode carries the search mode picker's selection (spec §6.3) across
+	// pagination links. It is only ever set by the search page - every
+	// other caller of getPagination leaves it at its zero value, which
+	// queryString (internal/template/functions.go) omits from the query
+	// string entirely, so this field changes nothing for any other page.
+	Mode         string
 	Total        int
 	Offset       int
 	ItemsPerPage int

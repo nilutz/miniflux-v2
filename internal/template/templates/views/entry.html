@@ -318,4 +318,31 @@
     {{ template "entry_pagination" . }}
 </div>
 {{ end }}
+
+{{ if and .user .similarEntries }}
+<section class="entry-similar" aria-labelledby="entry-similar-title">
+    <h2 id="entry-similar-title">{{ t "entry.similar.title" }}</h2>
+    <div class="items">
+        {{ range .similarEntries }}
+        <article class="item entry-item item-status-{{ .Status }}" data-id="{{ .ID }}" aria-labelledby="entry-similar-title-{{ .ID }}">
+            <header class="item-header" dir="auto">
+                <h3 id="entry-similar-title-{{ .ID }}" class="item-title" {{ with or .Language .Feed.Language }}lang="{{ . }}"{{ end }}>
+                    <a href="{{ routePath "/history/entry/%d" .ID }}">
+                        {{ if ne .Feed.Icon.IconID 0 }}
+                        <img src="{{ routePath "/feed-icon/%s" .Feed.Icon.ExternalIconID }}" width="16" height="16" loading="lazy" alt="{{ .Feed.Title }}">
+                        {{ else }}
+                        <span class="sr-only">{{ .Feed.Title }}</span>
+                        {{ end }}
+                        {{ .Title }}
+                    </a>
+                </h3>
+                <span class="category">
+                    <a href="{{ routePath "/category/%d/entries" .Feed.Category.ID }}">{{ .Feed.Category.Title }}</a>
+                </span>
+            </header>
+        </article>
+        {{ end }}
+    </div>
+</section>
+{{ end }}
 {{ end }}

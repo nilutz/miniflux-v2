@@ -14,41 +14,58 @@
             <button type="submit" class="button button-primary" data-label-loading="{{ t "form.submit.loading" }}">{{ t "search.submit" }}</button>
         </div>
         <label class="search-filter"><input type="checkbox" name="unread" value="1" {{ if $.searchUnreadOnly }}checked{{ end }}> {{ t "menu.show_only_unread_entries" }}</label>
+        <label class="search-filter" for="search-mode">{{ t "search.mode.label" }}
+            <select name="mode" id="search-mode">
+                {{ range $.searchModes }}
+                <option value="{{ . }}" {{ if eq . $.searchMode }}selected{{ end }}>{{ t (printf "search.mode.%s" .) }}</option>
+                {{ end }}
+            </select>
+        </label>
     </form>
 </search>
 
 {{ if $.searchQuery }}
-    {{ if not .entries }}
+    {{ if $.searchDegraded }}
+        <p role="status" class="alert alert-info">{{ t "search.degraded_notice" }}</p>
+    {{ end }}
+    {{ if not .searchRows }}
         <p role="alert" class="alert alert-info">{{ t "alert.no_search_result" }}</p>
     {{ else }}
         <div class="pagination-top">
             {{ template "pagination" .pagination }}
         </div>
         <div class="items">
-            {{ range .entries }}
+            {{ range .searchRows }}
+            {{ $entry := .Entry }}
             <article
-                class="item entry-item {{ if $.user.EntrySwipe }}entry-swipe{{ end }} item-status-{{ .Status }}"
-                data-id="{{ .ID }}"
-                aria-labelledby="entry-title-{{ .ID }}"
+                class="item entry-item {{ if $.user.EntrySwipe }}entry-swipe{{ end }} item-status-{{ $entry.Status }}"
+                data-id="{{ $entry.ID }}"
+                aria-labelledby="entry-title-{{ $entry.ID }}"
             >
                 <header class="item-header" dir="auto">
-                    <h2 id="entry-title-{{ .ID }}" class="item-title" {{ with or .Language .Feed.Language }}lang="{{ . }}"{{ end }}>
-                        <a href="{{ routePath "/search/entry/%d" .ID }}{{ queryString (dict "q" $.searchQuery "unread" $.searchUnreadOnly) }}" {{ if and $.user.AlwaysOpenExternalLinks $.user.OpenExternalLinksInNewTab }}target="_blank"{{ end }}>
-                            {{ if ne .Feed.Icon.IconID 0 }}
-                            <img src="{{ routePath "/feed-icon/%s" .Feed.Icon.ExternalIconID }}" width="16" height="16" loading="lazy" alt="{{ .Feed.Title }}">
+                    <h2 id="entry-title-{{ $entry.ID }}" class="item-title" {{ with or $entry.Language $entry.Feed.Language }}lang="{{ . }}"{{ end }}>
+                        <a href="{{ routePath "/search/entry/%d" $entry.ID }}{{ queryString (dict "q" $.searchQuery "unread" $.searchUnreadOnly "mode" $.searchMode) }}" {{ if and $.user.AlwaysOpenExternalLinks $.user.OpenExternalLinksInNewTab }}target="_blank"{{ end }}>
+                            {{ if ne $entry.Feed.Icon.IconID 0 }}
+                            <img src="{{ routePath "/feed-icon/%s" $entry.Feed.Icon.ExternalIconID }}" width="16" height="16" loading="lazy" alt="{{ $entry.Feed.Title }}">
                             {{ else }}
-                            <span class="sr-only">{{ .Feed.Title }}</span>
+                            <span class="sr-only">{{ $entry.Feed.Title }}</span>
                             {{ end }}
-                            {{ .Title }}
+                            {{ $entry.Title }}
                         </a>
                     </h2>
                     <span class="category">
-                        <a href="{{ routePath "/category/%d/entries" .Feed.Category.ID }}">
-                            {{ .Feed.Category.Title }}
+                        <a href="{{ routePath "/category/%d/entries" $entry.Feed.Category.ID }}">
+                            {{ $entry.Feed.Category.Title }}
                         </a>
                     </span>
                 </header>
-                {{ template "item_meta" dict "user" $.user "entry" . "hasSaveEntry" $.hasSaveEntry  }}
+                {{ if .Segments }}
+                <p class="item-snippet">
+                    {{ if .Ordinal }}<strong>{{ t "search.passage.label" .Ordinal }}</strong> {{ end }}
+                    {{ range .Segments }}{{ if .Highlight }}<mark>{{ .Text }}</mark>{{ else }}{{ .Text }}{{ end }}{{ end }}
+                </p>
+                {{ end }}
+                {{ template "item_meta" dict "user" $.user "entry" $entry "hasSaveEntry" $.hasSaveEntry  }}
             </article>
             {{ end }}
         </div>

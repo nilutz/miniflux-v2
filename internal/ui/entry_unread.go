@@ -86,6 +86,9 @@ func (h *handler) showUnreadEntryPage(w http.ResponseWriter, r *http.Request) {
 	view.Set("nextEntry", nextEntry)
 	view.Set("nextEntryRoute", nextEntryRoute)
 	view.Set("prevEntryRoute", prevEntryRoute)
+	// similarEntries is nil (block simply absent) whenever the search
+	// sidecar is unavailable or unconfigured - see entry_similar.go.
+	view.Set("similarEntries", h.similarEntries(r.Context(), user.ID, entry.ID))
 	view.Set("menu", "unread")
 	view.Set("user", user)
 	// Fetching the counters here avoids being off by one.
