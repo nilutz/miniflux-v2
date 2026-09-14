@@ -302,12 +302,13 @@ type Stats struct {
 	Failed  int64 // distinct failures: a persistently failing entry counts once per distinct cause, not once per retry attempt
 
 	// Remaining is how many entries currently still need (re-)indexing,
-	// by the same criteria PendingEntryIDs uses — the denominator Task 7
-	// needs to render "N indexed of M" and derive an ETA from
-	// ThroughputPerSec. Memoised behind DefaultRemainingCountTTL, so
-	// polling Stats() frequently does not repeatedly force a full,
-	// content-hashing scan. It is -1 if the underlying count could not be
-	// read (logged, not fatal to the rest of the snapshot).
+	// approximately — the denominator Task 7 needs to render "N indexed
+	// of M" and derive an ETA from ThroughputPerSec. It comes from
+	// store.PendingEntryCountApprox (which does not detoast or hash
+	// anything, and slightly under-counts entries edited since they were
+	// indexed), memoised behind DefaultRemainingCountTTL, with at most one
+	// refresh in flight at a time. It is -1 if no count could be read
+	// (logged, not fatal to the rest of the snapshot).
 	Remaining int64
 
 	SkippedByReason map[string]int64 // skip reason -> count
@@ -369,15 +370,23 @@ type Backfill struct {
 	throughputMu   sync.Mutex
 	throughputEWMA float64
 
-	remainingMu       sync.Mutex
-	remainingCached   int64
-	remainingCachedAt time.Time
-	remainingCountTTL time.Duration // defaults to DefaultRemainingCountTTL; same-package tests may set it directly for a short TTL
+	remainingMu         sync.Mutex
+	remainingCached     int64
+	remainingCachedAt   time.Time
+	remainingCountTTL   time.Duration // defaults to DefaultRemainingCountTTL; same-package tests may set it directly for a short TTL
+	remainingRefreshing bool          // guards against concurrent refreshes; see cachedRemaining
+
+	// remainingCountFn is the query cachedRemaining refreshes from. A
+	// field rather than a direct call so that this package's own tests can
+	// substitute a counting, blocking stand-in and observe how many
+	// queries N concurrent Stats() calls actually issue; production always
+	// leaves it as NewBackfill sets it.
+	remainingCountFn func(afterID int64) (int64, error)
 }
 
 // NewBackfill builds a Backfill lane over idx, throttled by controller.
 func NewBackfill(idx *Indexer, controller *Controller, cfg BackfillConfig) *Backfill {
-	return &Backfill{
+	b := &Backfill{
 		idx:               idx,
 		controller:        controller,
 		cfg:               cfg.withDefaults(),
@@ -387,6 +396,12 @@ func NewBackfill(idx *Indexer, controller *Controller, cfg BackfillConfig) *Back
 		retries:           newRetryTracker(),
 		remainingCountTTL: DefaultRemainingCountTTL,
 	}
+	// The approximate count, not the exact one: this is refreshed on a
+	// timer behind an admin page that polls, and the exact predicate has
+	// to detoast and MD5 every candidate row (whole-branch review, finding
+	// 5). See store.PendingEntryCountApprox for exactly how it differs.
+	b.remainingCountFn = idx.store.PendingEntryCountApprox
+	return b
 }
 
 // SetPageSize live-edits the number of pending entry ids fetched per
@@ -895,13 +910,22 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 	b.indexed.Add(1)
 }
 
-// cachedRemaining returns Stats().Remaining, querying
-// store.PendingEntryCount at most once per remainingCountTTL and serving
-// the memoised value otherwise (fix round 2, finding 3). The query is
-// scoped to this run's own starting cursor (boundStartAfter), which lets
-// Postgres skip content-hashing anything at or below it via the primary
-// key index — a partial mitigation on a fresh, cursor-0 backfill, but a
-// real one on a resumed run.
+// cachedRemaining returns Stats().Remaining, refreshing it at most once
+// per remainingCountTTL and serving the memoised value otherwise (fix
+// round 2, finding 3). The query is scoped to this run's own starting
+// cursor (boundStartAfter), which lets Postgres skip everything at or
+// below it via the primary key index.
+//
+// At most ONE refresh is ever in flight. Without that guard, three
+// separately-minor things composed into a way to wedge the database
+// Miniflux itself is serving from: the TTL expiring starts a query that
+// can run for a long time on a large corpus, the admin page reloads every
+// ten seconds, and each of those reloads would start another one on top of
+// the last (whole-branch review, finding 5). A caller arriving while a
+// refresh is running gets the previous value — stale by definition, which
+// an ETA can carry — rather than queueing behind it or starting a second
+// scan. With no previous value at all it gets -1, which the admin page
+// already renders as an unknown ETA.
 func (b *Backfill) cachedRemaining() int64 {
 	b.remainingMu.Lock()
 	ttl := b.remainingCountTTL
@@ -910,21 +934,35 @@ func (b *Backfill) cachedRemaining() int64 {
 	}
 	fresh := !b.remainingCachedAt.IsZero() && time.Since(b.remainingCachedAt) < ttl
 	cached := b.remainingCached
-	b.remainingMu.Unlock()
+	haveCached := !b.remainingCachedAt.IsZero()
 	if fresh {
+		b.remainingMu.Unlock()
 		return cached
 	}
+	if b.remainingRefreshing {
+		b.remainingMu.Unlock()
+		if haveCached {
+			return cached
+		}
+		return -1
+	}
+	b.remainingRefreshing = true
+	b.remainingMu.Unlock()
 
-	count, err := b.idx.store.PendingEntryCount(b.boundStartAfter())
+	count, err := b.remainingCountFn(b.boundStartAfter())
+
+	b.remainingMu.Lock()
+	b.remainingRefreshing = false
+	if err == nil {
+		b.remainingCached = count
+		b.remainingCachedAt = time.Now()
+	}
+	b.remainingMu.Unlock()
+
 	if err != nil {
 		slog.Error("backfill lane: unable to count remaining pending entries for Stats()", slog.Any("error", err))
 		return -1
 	}
-
-	b.remainingMu.Lock()
-	b.remainingCached = count
-	b.remainingCachedAt = time.Now()
-	b.remainingMu.Unlock()
 	return count
 }
 

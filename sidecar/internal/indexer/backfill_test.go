@@ -1133,3 +1133,74 @@ func TestBackfillPauseAfterDoneStopsTheNextSweep(t *testing.T) {
 	cancel()
 	waitDone(t, done, 5*time.Second, "Backfill.start after cancellation")
 }
+
+// Concurrent Stats() calls whose cached Remaining has expired must issue
+// exactly ONE refresh between them; the rest serve the previous value.
+// Before this, every expiry plus every ten-second admin-page reload could
+// start another unbounded scan on top of the last, against the database
+// Miniflux itself is serving from (whole-branch fix wave, finding 5).
+func TestBackfillStatsRefreshesRemainingOnceUnderConcurrency(t *testing.T) {
+	s, db := testEnv(t)
+
+	entryID := createTestEntry(t, db, "backfill-remaining-singleflight",
+		"<p>A fixture so the lane has something to count.</p>")
+	_ = entryID
+
+	idx := New(s, &fakeEmbedder{})
+	ctrlCfg, bfCfg := backfillTestConfig()
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+	b.remainingCountTTL = time.Hour
+
+	var calls atomic.Int64
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	b.remainingCountFn = func(afterID int64) (int64, error) {
+		calls.Add(1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release // hold the "scan" open while the other callers arrive
+		return 42, nil
+	}
+
+	const callers = 8
+	results := make(chan int64, callers)
+
+	go func() { results <- b.Stats().Remaining }()
+	// Make sure the first caller is inside the refresh before the others
+	// arrive, so this tests the in-flight guard and not a race.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first Stats() call never reached the refresh")
+	}
+
+	for i := 1; i < callers; i++ {
+		go func() { results <- b.Stats().Remaining }()
+	}
+	// Give the other callers time to get through cachedRemaining.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	for i := 0; i < callers; i++ {
+		select {
+		case <-results:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d Stats() calls returned; a caller appears to be queued behind the refresh", i, callers)
+		}
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected %d concurrent Stats() calls to issue exactly 1 pending-count query, got %d", callers, got)
+	}
+
+	// And the refreshed value is what is served afterwards.
+	if got := b.Stats().Remaining; got != 42 {
+		t.Fatalf("expected the refreshed value 42 to be cached, got %d", got)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected the post-refresh call to be served from cache, got %d queries", got)
+	}
+}

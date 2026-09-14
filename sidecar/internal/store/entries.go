@@ -171,6 +171,55 @@ func (s *Store) PendingEntryCount(afterID int64) (int64, error) {
 	return count, nil
 }
 
+// PendingEntryCountApprox returns an approximation of PendingEntryCount
+// that no Postgres plan has to detoast or MD5 anything to answer: the
+// number of entries above afterID, minus the number of index-state rows
+// above afterID that are not in the retryable 'failed' state.
+//
+// It exists because the exact count is genuinely expensive and is asked
+// for on a timer. PendingEntryCount has no LIMIT to stop early at and must
+// content-hash every candidate row's full body; on a large corpus that can
+// run for minutes, and the admin page polls it (spec §9.4) against the
+// same database Miniflux itself is serving from. An ETA does not need
+// exactness, and the parts of the exact predicate that are expensive are
+// exactly the parts that do not move the number much.
+//
+// How it differs from the exact count, in both directions:
+//
+//   - It UNDER-counts entries whose content changed since they were last
+//     indexed: those have an 'ok' row and are subtracted here, but the
+//     exact predicate's content_hash comparison still calls them pending.
+//     At steady state that is a handful of re-scraped entries, not a
+//     fraction of the corpus.
+//   - It does NOT under-count for index-state rows whose entry no longer
+//     exists (a deleted entry's orphan row): the EXISTS clause below
+//     excludes those. That clause is the one join here, and it is a
+//     primary-key probe per state row — still no detoast and no MD5. It
+//     matters because nothing collects orphan rows today, so on a
+//     long-lived instance they accumulate, and subtracting them blindly
+//     would drag Remaining toward zero and the ETA with it. The result is
+//     clamped at zero regardless.
+//
+// Use PendingEntryCount where the number has to be right; use this one for
+// progress and ETA display.
+func (s *Store) PendingEntryCountApprox(afterID int64) (int64, error) {
+	var count int64
+	err := s.db.QueryRow(`
+		SELECT
+			(SELECT count(*) FROM entries WHERE id > $1)
+			- (SELECT count(*) FROM search.entry_index_state s
+			   WHERE s.entry_id > $1 AND s.status <> 'failed'
+			     AND EXISTS (SELECT 1 FROM entries e WHERE e.id = s.entry_id))
+	`, afterID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: unable to approximate the pending entry count: %w", err)
+	}
+	if count < 0 {
+		count = 0
+	}
+	return count, nil
+}
+
 // MaxEntryID returns the highest entry id currently in public.entries, or 0
 // if the table is empty. It exists so the live lane can snapshot "the
 // newest entry that already existed" at startup and start its cursor

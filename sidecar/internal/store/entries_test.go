@@ -510,3 +510,88 @@ func containsID(ids []int64, want int64) bool {
 	}
 	return false
 }
+
+// PendingEntryCountApprox must track PendingEntryCount closely enough to
+// drive an ETA, without detoasting or hashing anything. The one case
+// where they legitimately differ — an entry edited since it was indexed —
+// is asserted explicitly, so the approximation's shape is recorded rather
+// than merely tolerated (whole-branch fix wave, finding 5).
+func TestPendingEntryCountApproxTracksTheExactCount(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntry(t, s, "pending-approx", "<p>Body of the approximation fixture.</p>")
+	after := entryID - 1
+
+	exact, err := s.PendingEntryCount(after)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	approx, err := s.PendingEntryCountApprox(after)
+	if err != nil {
+		t.Fatalf("PendingEntryCountApprox failed: %v", err)
+	}
+	if approx != exact {
+		t.Fatalf("with nothing indexed above #%d the two counts must agree, got exact=%d approx=%d", after, exact, approx)
+	}
+
+	entry, err := s.EntryForIndexing(entryID)
+	if err != nil {
+		t.Fatalf("EntryForIndexing failed: %v", err)
+	}
+	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
+		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Embedding: make([]float32, 384)},
+	}); err != nil {
+		t.Fatalf("ReplacePassages failed: %v", err)
+	}
+
+	exact, err = s.PendingEntryCount(after)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	approx, err = s.PendingEntryCountApprox(after)
+	if err != nil {
+		t.Fatalf("PendingEntryCountApprox failed: %v", err)
+	}
+	if approx != exact {
+		t.Fatalf("after indexing the fixture the two counts must still agree, got exact=%d approx=%d", exact, approx)
+	}
+
+	// A failed entry is pending to both.
+	if err := s.MarkEntryFailed(entryID, entry.ContentHash, "synthetic failure"); err != nil {
+		t.Fatalf("MarkEntryFailed failed: %v", err)
+	}
+	exact, err = s.PendingEntryCount(after)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	approx, err = s.PendingEntryCountApprox(after)
+	if err != nil {
+		t.Fatalf("PendingEntryCountApprox failed: %v", err)
+	}
+	if approx != exact {
+		t.Fatalf("a failed entry must be pending to both counts, got exact=%d approx=%d", exact, approx)
+	}
+
+	// The documented divergence: content edited after a successful index.
+	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
+		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Embedding: make([]float32, 384)},
+	}); err != nil {
+		t.Fatalf("ReplacePassages failed: %v", err)
+	}
+	updateEntryContent(t, s, entryID, "<p>Rewritten body, hash no longer matches what was recorded.</p>")
+
+	exact, err = s.PendingEntryCount(after)
+	if err != nil {
+		t.Fatalf("PendingEntryCount failed: %v", err)
+	}
+	approx, err = s.PendingEntryCountApprox(after)
+	if err != nil {
+		t.Fatalf("PendingEntryCountApprox failed: %v", err)
+	}
+	if exact != approx+1 {
+		t.Fatalf("an entry edited since it was indexed must be pending to the exact count and (by design) missed by the approximation: got exact=%d approx=%d", exact, approx)
+	}
+}
