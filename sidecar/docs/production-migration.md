@@ -225,8 +225,8 @@ measured 33.9 passages/sec (spec §6.7) expect roughly **4 hours per 0.5M
 passages and 41 hours per 5M**, at 4–6 passages per entry. It is
 CPU-bound and runs alongside Miniflux on the same machine.
 
-The same applies after any upgrade that bumps `pipelineVersion` in
-`sidecar/internal/indexer`. That constant is folded into each entry's
+The same applies after any upgrade that bumps `store.PipelineVersion` in
+`sidecar/internal/store/entries.go`. That constant is folded into each entry's
 recorded hash precisely so a change to text extraction or passage
 splitting invalidates stale offsets — which means **the next start after
 such an upgrade re-indexes everything**, at the same cost. Check the
