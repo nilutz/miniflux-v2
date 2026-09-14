@@ -41,7 +41,7 @@ const liveLanePollInterval = 5 * time.Second
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "sidecar runs the Miniflux search sidecar's live indexing lane.\n\n")
+		fmt.Fprintf(os.Stderr, "sidecar runs the Miniflux search sidecar: live indexing, throttled backfill, and the status/admin page.\n\n")
 		fmt.Fprintf(os.Stderr, "Configuration is via environment variables:\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_DATABASE_URL   Postgres DSN (required)\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_MODEL_PATH     path to the quantized ONNX model file (required)\n")
