@@ -44,18 +44,82 @@ default `search_path` ever excludes `public`, the fix is to either add
 `public` to the search path for the migration session or schema-qualify the
 column as `public.vector(384)` — not to restructure the `search` schema.
 
-## Native dependencies (added in a later task)
+## The embedder (`internal/embed`)
 
-Once the embedding backend is wired in (spec §6.7), building and running the
-sidecar also requires two native dependencies that are **not** Go modules:
+`internal/embed` wraps [hugot](https://github.com/knights-analytics/hugot)
+(v0.7.8, build tag `ORT`) around [ONNX Runtime](https://onnxruntime.ai/)
+(native v1.30.0) to embed text with a pinned model,
+[`Xenova/bge-small-en-v1.5`](https://huggingface.co/Xenova/bge-small-en-v1.5)
+(int8-quantized ONNX export, 384 dimensions). This is the exact stack a spike
+measured end to end — see `NewONNX` in `internal/embed/onnx.go` for the
+call sequence and the reasoning behind it.
 
-- The **ONNX Runtime** shared library (`libonnxruntime.dylib` /
-  `.so`), used to run the embedding model.
-- **`libtokenizers.a`**, a static library used to tokenize text before it
-  reaches the model.
+Building or running the sidecar with this package requires three native
+dependencies that are **not** Go modules and are **not** vendored into this
+repository:
 
-Both must be present on the machine building or running the sidecar; neither
-is vendored into this repository.
+1. **ONNX Runtime**, the native shared library that actually runs the model.
+   On macOS: `brew install onnxruntime` (pins v1.30.0), which installs
+   `libonnxruntime.dylib` under `/opt/homebrew/opt/onnxruntime/lib`. hugot
+   defaults its library search path to `/usr/lib` (a Linux path), so you must
+   also pass that directory explicitly — see `ONNXConfig.ONNXLibraryDir`
+   below — and set `DYLD_LIBRARY_PATH` at runtime so the dynamic linker can
+   find it. On Linux, download the matching `libonnxruntime.so` from the
+   [ONNX Runtime releases](https://github.com/microsoft/onnxruntime/releases)
+   instead.
+
+2. **`libtokenizers.a`**, a static library (prebuilt Rust) that
+   [`daulet/tokenizers`](https://github.com/daulet/tokenizers) v1.27.0 needs
+   to tokenize text before it reaches the model. `go get` does not fetch
+   this — download the release archive matching that exact module version
+   (`libtokenizers.darwin-arm64.tar.gz` on macOS/arm64, with Linux
+   equivalents on the same releases page), extract `libtokenizers.a`
+   somewhere, and point `CGO_LDFLAGS` at its directory:
+   `CGO_LDFLAGS="-L<dir-with-libtokenizers.a>"`.
+
+3. **The model itself**, `onnx/model_quantized.onnx` from
+   `Xenova/bge-small-en-v1.5` on Hugging Face (~32MB, int8-quantized — do
+   *not* use the ~127MB fp32 `model.onnx`, which the spike measured at
+   roughly half the throughput for no accuracy benefit evaluated here),
+   alongside the rest of that repo's files (`tokenizer.json`, `vocab.txt`,
+   `config.json`, `tokenizer_config.json`, `special_tokens_map.json`), which
+   hugot expects to find next to (one directory up from) the `.onnx` file.
+
+`ONNXConfig` (in `internal/embed/onnx.go`) takes two fields:
+
+- `ModelPath` — the path to `model_quantized.onnx` itself; the surrounding
+  model directory is located automatically by walking up from it looking for
+  `tokenizer.json`.
+- `ONNXLibraryDir` — the directory containing `libonnxruntime.dylib`/`.so`
+  (e.g. `/opt/homebrew/opt/onnxruntime/lib` on macOS via Homebrew). Required
+  on macOS; hugot's own default (`/usr/lib`) only exists on Linux.
+
+### Full build/test invocation (macOS example)
+
+```sh
+CGO_LDFLAGS="-L<dir-with-libtokenizers.a>" \
+DYLD_LIBRARY_PATH=/opt/homebrew/opt/onnxruntime/lib \
+SIDECAR_MODEL_PATH=<path-to-model_quantized.onnx> \
+SIDECAR_ONNX_LIB_DIR=/opt/homebrew/opt/onnxruntime/lib \
+  make test
+```
+
+`CGO_LDFLAGS` and `DYLD_LIBRARY_PATH` are needed to build and link at all
+once `internal/embed` is in the build (with `-tags ORT`, which `make`
+already passes). `SIDECAR_MODEL_PATH` and `SIDECAR_ONNX_LIB_DIR` are only
+needed to run the embedder tests against the real model instead of skipping
+them — see "Environment variables used by tests" below.
+
+### One shared session, safe for concurrent use
+
+`NewONNX` creates one hugot session and one pipeline, both reused for every
+`Embed` call. This is deliberate: the spike's best-measured throughput (33.9
+passages/sec) came from **two goroutines sharing one session with ORT's
+default threading left unconstrained**, not from one session per goroutine
+or from pinning `WithIntraOpNumThreads`/`WithInterOpNumThreads` to 1 per
+hugot's own README advice — that measured **11.7** passages/sec, three times
+slower. `Embed` does no additional locking of its own; a later task's
+controller calls it concurrently from multiple goroutines on purpose.
 
 ## The `ORT` build tag
 
