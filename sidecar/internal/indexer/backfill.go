@@ -22,16 +22,39 @@ const DefaultBackfillPageSize = 20
 
 // DefaultBackfillPollInterval is how long Backfill waits before checking
 // again when it currently cannot do any work — outside the schedule
-// window, a PendingEntryIDs query itself errored, or a just-finished sweep
-// needs to pause briefly before retrying entries that failed during it
-// (see start's hadFailureThisSweep). It is unrelated to how fast entries
-// are actually processed once work is allowed.
+// window, a PendingEntryIDs query itself errored, or a just-ended sweep
+// still has outstanding retries cooling down (see retryTracker). It is
+// unrelated to how fast entries are actually processed once work is
+// allowed, and it is also the base unit each failing entry's own backoff
+// is measured in (see retryBackoffMultiple/retryBackoffCapMultiple in
+// live.go, reused here).
 const DefaultBackfillPollInterval = 5 * time.Second
+
+// DefaultRemainingCountTTL bounds how often Stats() actually queries
+// store.PendingEntryCount for its Remaining figure, rather than serving a
+// memoised value. That query has no LIMIT to stop early at and must
+// content-hash every candidate row (see PendingEntryCount's own doc
+// comment) — on a large, mostly-unindexed table it can take seconds, and
+// Remaining is exactly the value an admin page (Task 7) is likely to poll
+// most often for its ETA. 45s is ample staleness for an ETA display (spec
+// §9.4) while keeping Stats() itself a cheap, effectively in-memory read
+// the rest of the time (fix round 2, finding 3).
+const DefaultRemainingCountTTL = 45 * time.Second
+
+// throughputEWMAAlpha weights each newly observed batch's rate against
+// the running average: Stats().ThroughputPerSec is an exponentially
+// weighted moving average over batches, not a lifetime average over all
+// active time, so it reflects how fast the lane is running RIGHT NOW —
+// what Task 7's ETA needs — rather than being dragged down for the rest
+// of a 41-hour run by one early, unrepresentative batch (fix round 2,
+// finding 4). 0.3 gives noticeable weight to the most recent batch while
+// still smoothing out one-off jitter.
+const throughputEWMAAlpha = 0.3
 
 // BackfillConfig configures a Backfill lane.
 type BackfillConfig struct {
 	PageSize     int           // pending entry ids fetched per page/batch
-	PollInterval time.Duration // wait between checks while idle (schedule window closed, a fetch error, or between retry sweeps)
+	PollInterval time.Duration // wait between checks while idle (schedule window closed, a fetch error, or outstanding retries cooling down)
 }
 
 func (cfg BackfillConfig) withDefaults() BackfillConfig {
@@ -76,6 +99,104 @@ func (c *causeCounts) snapshot() map[string]int64 {
 	return out
 }
 
+// backfillRetryState tracks one persistently-failing entry's backoff and
+// last-seen failure cause across sweeps — the same discipline live.go's
+// retryState applies to the live lane, adapted to the sweep model.
+type backfillRetryState struct {
+	nextAttempt time.Time
+	backoff     time.Duration
+	lastCause   string
+}
+
+// retryTracker is Backfill's per-entry backoff state.
+//
+// Before this existed, every sweep that had seen a failure reset its
+// cursor and reattempted every still-failing entry unconditionally: with
+// a fixed pollInterval between sweeps, a single durably broken entry was
+// re-embedded roughly 720 times an hour, forever, against a CPU-bound
+// model, while Stats().Failed climbed by one per sweep for that same
+// entry until the number meant nothing (fix round 2, finding 1 — a
+// regression introduced by fix round 1's Done-semantics fix).
+//
+// shouldAttempt gates whether an id is even attempted this round,
+// skipping it — at zero embedding cost, not merely zero counted-as-failed
+// cost — until its own escalating backoff elapses. recordFailure reports
+// whether a given failure is new information (a never-before-seen id, or
+// one whose cause changed) worth counting in Stats(); a persistently
+// broken entry failing with the identical cause every time it's actually
+// attempted is counted once, not once per attempt.
+type retryTracker struct {
+	mu    sync.Mutex
+	state map[int64]*backfillRetryState
+}
+
+func newRetryTracker() *retryTracker {
+	return &retryTracker{state: make(map[int64]*backfillRetryState)}
+}
+
+func (r *retryTracker) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state = make(map[int64]*backfillRetryState)
+}
+
+// shouldAttempt reports whether id may be attempted right now: true if it
+// has no recorded failure, or its backoff has elapsed.
+func (r *retryTracker) shouldAttempt(id int64, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st, ok := r.state[id]
+	if !ok {
+		return true
+	}
+	return !now.Before(st.nextAttempt)
+}
+
+// recordFailure records id failing with cause at now: it escalates the
+// entry's backoff (doubling, capped at maxBackoff) if already tracked, or
+// starts it at initialBackoff for a first-seen failure. It reports
+// whether this failure is new information (countIt) — true the first
+// time an id is seen, or whenever its cause differs from the last one
+// recorded for it — which the caller uses to decide whether to increment
+// Stats().Failed / FailedByReason.
+func (r *retryTracker) recordFailure(id int64, cause string, now time.Time, initialBackoff, maxBackoff time.Duration) (countIt bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	st, ok := r.state[id]
+	if !ok {
+		r.state[id] = &backfillRetryState{nextAttempt: now.Add(initialBackoff), backoff: initialBackoff, lastCause: cause}
+		return true
+	}
+
+	st.backoff = min(st.backoff*2, maxBackoff)
+	st.nextAttempt = now.Add(st.backoff)
+	if st.lastCause == cause {
+		return false
+	}
+	st.lastCause = cause
+	return true
+}
+
+// recordSuccess forgets id's retry state: it recovered.
+func (r *retryTracker) recordSuccess(id int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.state, id)
+}
+
+// hasOutstanding reports whether any entry is still tracked as failing —
+// including one merely cooling down, not due for another attempt yet.
+// Backfill.start uses this, not "did anything fail just now", to decide
+// whether a sweep that reached its end may declare Done: an entry skipped
+// this round purely because its backoff has not elapsed is still
+// unresolved, and Done must not be reported while it is.
+func (r *retryTracker) hasOutstanding() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.state) > 0
+}
+
 // Stats is a snapshot of a Backfill lane's progress, for the admin page
 // (Task 7, spec §9.4): "progress and ETA, current throughput, live
 // concurrency with the controller's reason for it, error and skip counts
@@ -83,24 +204,26 @@ func (c *causeCounts) snapshot() map[string]int64 {
 type Stats struct {
 	Indexed int64 // entries successfully indexed (status='ok')
 	Skipped int64 // entries with no usable text (status='skipped')
-	Failed  int64 // entries that failed to index (status='failed', retryable)
+	Failed  int64 // distinct failures: a persistently failing entry counts once per distinct cause, not once per retry attempt
 
 	// Remaining is how many entries currently still need (re-)indexing,
 	// by the same criteria PendingEntryIDs uses — the denominator Task 7
 	// needs to render "N indexed of M" and derive an ETA from
-	// ThroughputPerSec. It is -1 if the count could not be read (logged,
-	// not fatal to the snapshot).
+	// ThroughputPerSec. Memoised behind DefaultRemainingCountTTL, so
+	// polling Stats() frequently does not repeatedly force a full,
+	// content-hashing scan. It is -1 if the underlying count could not be
+	// read (logged, not fatal to the rest of the snapshot).
 	Remaining int64
 
 	SkippedByReason map[string]int64 // skip reason -> count
-	FailedByReason  map[string]int64 // failure cause (the returned error's message) -> count
+	FailedByReason  map[string]int64 // failure cause -> count of distinct (id, cause) events, same de-duplication as Failed
 
 	Workers          int     // the controller's current worker count right now
 	ControllerReason string  // the controller's reason for that count
-	ThroughputPerSec float64 // (Indexed+Skipped+Failed) / time actually spent running batches -- excludes paused and outside-window time
+	ThroughputPerSec float64 // exponentially-weighted recent rate (entries actually attempted per second) -- reflects current speed, not a lifetime average
 
 	Paused bool // true between Pause() and the matching Resume()
-	Done   bool // true once a full sweep processed nothing at all, including no retries
+	Done   bool // true once a full sweep processed nothing at all, including no outstanding retries
 }
 
 // Backfill is the throttled backfill lane (spec §9.1, §9.2): a worker pool
@@ -114,35 +237,53 @@ type Stats struct {
 // its schedule window closed and reopened, simply rescans and finds that
 // everything already done is no longer pending (spec §10: "Backfill crash
 // or window close -> Resumes from the entry_index_state checkpoint").
+//
+// This is also the invariant RunLive's own coordination fix depends on
+// (Task 6 fix round 1, finding 3; see live.go's doc comment) — Backfill
+// must always rescan from its starting cursor on every process start, and
+// must never skip a run because an earlier one reported Done, or an entry
+// created during a shutdown window can become invisible to both lanes.
 type Backfill struct {
 	idx        *Indexer
 	controller *Controller
 
-	mu        sync.Mutex
-	cfg       BackfillConfig // PageSize/PollInterval are live-editable (spec §9.2); always read through pageSize()/pollInterval()
-	paused    bool
-	resumeCh  chan struct{}
-	done      bool
-	running   bool
-	startedAt time.Time
+	mu               sync.Mutex
+	cfg              BackfillConfig // PageSize/PollInterval are live-editable (spec §9.2); always read through pageSize()/pollInterval()
+	paused           bool
+	resumeCh         chan struct{}
+	done             bool
+	running          bool
+	startedAt        time.Time
+	startAfterCursor int64 // the id this run's pagination began after; scopes Remaining's PendingEntryCount query
 
 	indexed         atomic.Int64
 	skipped         atomic.Int64
 	failed          atomic.Int64
-	activeNanos     atomic.Int64 // cumulative wall-clock time spent inside runBatch, across every batch -- the ThroughputPerSec denominator
+	batchAttempted  atomic.Int64 // ids actually attempted (not backoff-skipped) in the batch currently/most recently running -- read-and-reset by start() between batches
 	skippedByReason *causeCounts
 	failedByReason  *causeCounts
+	retries         *retryTracker
+
+	throughputMu   sync.Mutex
+	throughputEWMA float64
+
+	remainingMu       sync.Mutex
+	remainingCached   int64
+	remainingCachedAt time.Time
+	remainingCountTTL time.Duration // defaults to DefaultRemainingCountTTL; same-package tests may set it directly for a short TTL
 }
 
 // NewBackfill builds a Backfill lane over idx, throttled by controller.
 func NewBackfill(idx *Indexer, controller *Controller, cfg BackfillConfig) *Backfill {
 	return &Backfill{
-		idx:             idx,
-		controller:      controller,
-		cfg:             cfg.withDefaults(),
-		resumeCh:        make(chan struct{}),
-		skippedByReason: newCauseCounts(),
-		failedByReason:  newCauseCounts(),
+		idx:               idx,
+		controller:        controller,
+		cfg:               cfg.withDefaults(),
+		resumeCh:          make(chan struct{}),
+		skippedByReason:   newCauseCounts(),
+		failedByReason:    newCauseCounts(),
+		retries:           newRetryTracker(),
+		remainingCountTTL: DefaultRemainingCountTTL,
 	}
 }
 
@@ -177,6 +318,12 @@ func (b *Backfill) pollInterval() time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.cfg.PollInterval
+}
+
+func (b *Backfill) boundStartAfter() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.startAfterCursor
 }
 
 // Pause requests that the lane stop starting new batches. A batch already
@@ -255,20 +402,27 @@ func (b *Backfill) Start(ctx context.Context) error {
 // it sits below the cursor, still status='failed' and therefore still
 // matched by PendingEntryIDs, but never fetched again until something
 // resets the cursor. Declaring the whole lane "done" the instant a sweep's
-// last page comes back empty is therefore wrong whenever that sweep saw
-// any failure: the backlog is not actually drained, just not visible from
+// last page comes back empty is therefore wrong whenever that sweep left
+// any entry outstanding (still failing, or merely cooling down under its
+// own backoff): the backlog is not actually drained, just not visible from
 // where the cursor happens to be sitting (fix round 1, finding 2). So: if
-// a sweep that reaches its end had at least one failure during it, the
-// cursor resets to startAfter and another sweep begins (after a
-// pollInterval pause, so a durably broken entry is retried once per sweep
-// rather than in a tight loop across sweeps — spec §10's "never retried in
-// a tight loop" is lane-agnostic). Only a sweep that reaches its end
-// having had zero failures is declared Done. For a corpus containing an
-// entry that fails forever, this means Start legitimately never returns
-// on its own (Stats().Done stays false, Stats().Failed keeps climbing by
-// one per sweep) until the caller cancels ctx or the entry starts
-// succeeding — which is the accurate state of the world, not a bug: the
-// backlog genuinely never reaches zero while something in it is stuck.
+// a sweep that reaches its end still has outstanding entries (per
+// retryTracker.hasOutstanding), the cursor resets to startAfter and
+// another sweep begins after a pollInterval pause; only a sweep that
+// reaches its end with nothing outstanding at all is declared Done.
+//
+// Resetting the cursor every pollInterval does not mean re-embedding
+// every outstanding entry every pollInterval, though: retryTracker gates
+// each entry's own next attempt behind its individual, escalating backoff
+// (fix round 2, finding 1 — fix round 1 introduced exactly the tight-loop
+// regression this replaces). A durably broken entry with nothing else
+// pending therefore still causes repeated, cheap PendingEntryIDs queries
+// every pollInterval, but its embedder is called on a rapidly widening
+// schedule, and Stats().Failed stops climbing once its cause stops
+// changing. For a corpus containing an entry that fails forever, Start
+// legitimately never returns on its own and Stats().Done never becomes
+// true — the accurate state of the world, not a bug: the backlog
+// genuinely never reaches zero while something in it is stuck.
 func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int64) error {
 	b.mu.Lock()
 	if b.running {
@@ -278,6 +432,7 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 	b.running = true
 	b.startedAt = time.Now()
 	b.done = false
+	b.startAfterCursor = startAfter
 	b.mu.Unlock()
 
 	// A fresh run's Stats() should reflect only this run's progress, not
@@ -286,9 +441,16 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 	b.indexed.Store(0)
 	b.skipped.Store(0)
 	b.failed.Store(0)
-	b.activeNanos.Store(0)
+	b.batchAttempted.Store(0)
 	b.skippedByReason.reset()
 	b.failedByReason.reset()
+	b.retries.reset()
+	b.throughputMu.Lock()
+	b.throughputEWMA = 0
+	b.throughputMu.Unlock()
+	b.remainingMu.Lock()
+	b.remainingCachedAt = time.Time{}
+	b.remainingMu.Unlock()
 
 	defer func() {
 		b.mu.Lock()
@@ -297,7 +459,6 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 	}()
 
 	cursor := startAfter
-	hadFailureThisSweep := false
 
 	for {
 		select {
@@ -349,20 +510,20 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 			}
 
 			if len(ids) > 0 {
-				failedBefore := b.failed.Load()
+				b.batchAttempted.Store(0)
 
 				batchStart := time.Now()
 				b.runBatch(ctx, ids, workers)
 				elapsed := time.Since(batchStart)
-				b.activeNanos.Add(int64(elapsed))
-				// Per-entry latency, not the whole page's: a short or
-				// upTo-thinned page must not read as an artificially fast
-				// batch, nor a full page after short ones as a degraded
-				// one (fix round 1, finding 6).
-				b.controller.Observe(elapsed / time.Duration(len(ids)))
 
-				if b.failed.Load() > failedBefore {
-					hadFailureThisSweep = true
+				attempted := b.batchAttempted.Load()
+				if attempted > 0 && elapsed > 0 {
+					// Per-entry latency, not the whole page's: a short,
+					// upTo-thinned, or mostly-backed-off-and-skipped page
+					// must not read as an artificially fast or slow
+					// batch (fix round 1, finding 6).
+					b.controller.Observe(elapsed / time.Duration(attempted))
+					b.updateThroughputEWMA(float64(attempted) / elapsed.Seconds())
 				}
 			}
 
@@ -372,7 +533,7 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 		}
 
 		if sweepEnded {
-			if !hadFailureThisSweep {
+			if !b.retries.hasOutstanding() {
 				b.markDone()
 				return nil
 			}
@@ -380,7 +541,6 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 				return nil
 			}
 			cursor = startAfter
-			hadFailureThisSweep = false
 			continue
 		}
 
@@ -398,11 +558,27 @@ func (b *Backfill) markDone() {
 	b.mu.Unlock()
 }
 
+func (b *Backfill) updateThroughputEWMA(rate float64) {
+	b.throughputMu.Lock()
+	defer b.throughputMu.Unlock()
+	if b.throughputEWMA == 0 {
+		b.throughputEWMA = rate
+		return
+	}
+	b.throughputEWMA = throughputEWMAAlpha*rate + (1-throughputEWMAAlpha)*b.throughputEWMA
+}
+
+func (b *Backfill) currentThroughput() float64 {
+	b.throughputMu.Lock()
+	defer b.throughputMu.Unlock()
+	return b.throughputEWMA
+}
+
 // runBatch indexes ids using up to workers goroutines pulling from a
 // shared channel — the concurrency lever spec §6.7 measured: several
 // goroutines sharing one unconstrained embedder session, never ORT thread
-// pinning. It returns once every id has been attempted or ctx is
-// cancelled, whichever comes first.
+// pinning. It returns once every id has been attempted (or skipped under
+// its own backoff) or ctx is cancelled, whichever comes first.
 func (b *Backfill) runBatch(ctx context.Context, ids []int64, workers int) {
 	if workers > len(ids) {
 		workers = len(ids)
@@ -452,23 +628,40 @@ func (b *Backfill) runBatch(ctx context.Context, ids []int64, workers int) {
 // the just-written index state to tell them apart and to recover the skip
 // reason for SkippedByReason.
 //
+// Before calling IndexEntry at all, process checks retryTracker: an id
+// still cooling down under its own backoff is skipped entirely, at zero
+// embedding cost (fix round 2, finding 1).
+//
 // An error caused by ctx being cancelled (a shutdown or interruption, not
 // a real embedding failure — see IndexEntry's own doc comment) is not
-// counted as a failure here either, mirroring IndexEntry's choice not to
-// write entry_index_state for it: a cancelled attempt was never actually
-// finished, so counting it would inflate Stats().Failed on every graceful
-// shutdown (fix round 1, finding 8).
+// counted as a failure, nor recorded in retryTracker, either: a cancelled
+// attempt was never actually finished, so treating it as this entry's
+// "latest cause" would be misleading, and counting it would inflate
+// Stats().Failed on every graceful shutdown (fix round 1, finding 8).
 func (b *Backfill) process(ctx context.Context, id int64) {
+	now := time.Now()
+	if !b.retries.shouldAttempt(id, now) {
+		return
+	}
+	b.batchAttempted.Add(1)
+
 	err := b.idx.IndexEntry(ctx, id)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
-		b.failed.Add(1)
-		b.failedByReason.add(err.Error())
+		cause := err.Error()
+		interval := b.pollInterval()
+		initialBackoff := interval * retryBackoffMultiple
+		maxBackoff := interval * retryBackoffCapMultiple
+		if countIt := b.retries.recordFailure(id, cause, now, initialBackoff, maxBackoff); countIt {
+			b.failed.Add(1)
+			b.failedByReason.add(cause)
+		}
 		slog.Error("backfill lane: unable to index entry", slog.Int64("entry_id", id), slog.Any("error", err))
 		return
 	}
+	b.retries.recordSuccess(id)
 
 	state, err := b.idx.store.EntryIndexState(id)
 	if err != nil {
@@ -495,6 +688,39 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 	b.indexed.Add(1)
 }
 
+// cachedRemaining returns Stats().Remaining, querying
+// store.PendingEntryCount at most once per remainingCountTTL and serving
+// the memoised value otherwise (fix round 2, finding 3). The query is
+// scoped to this run's own starting cursor (boundStartAfter), which lets
+// Postgres skip content-hashing anything at or below it via the primary
+// key index — a partial mitigation on a fresh, cursor-0 backfill, but a
+// real one on a resumed run.
+func (b *Backfill) cachedRemaining() int64 {
+	b.remainingMu.Lock()
+	ttl := b.remainingCountTTL
+	if ttl <= 0 {
+		ttl = DefaultRemainingCountTTL
+	}
+	fresh := !b.remainingCachedAt.IsZero() && time.Since(b.remainingCachedAt) < ttl
+	cached := b.remainingCached
+	b.remainingMu.Unlock()
+	if fresh {
+		return cached
+	}
+
+	count, err := b.idx.store.PendingEntryCount(b.boundStartAfter())
+	if err != nil {
+		slog.Error("backfill lane: unable to count remaining pending entries for Stats()", slog.Any("error", err))
+		return -1
+	}
+
+	b.remainingMu.Lock()
+	b.remainingCached = count
+	b.remainingCachedAt = time.Now()
+	b.remainingMu.Unlock()
+	return count
+}
+
 // Stats returns a snapshot of the lane's current progress.
 func (b *Backfill) Stats() Stats {
 	b.mu.Lock()
@@ -502,31 +728,16 @@ func (b *Backfill) Stats() Stats {
 	done := b.done
 	b.mu.Unlock()
 
-	indexed := b.indexed.Load()
-	skipped := b.skipped.Load()
-	failed := b.failed.Load()
-
-	var throughput float64
-	if active := time.Duration(b.activeNanos.Load()); active > 0 {
-		throughput = float64(indexed+skipped+failed) / active.Seconds()
-	}
-
-	remaining, err := b.idx.store.PendingEntryCount()
-	if err != nil {
-		slog.Error("backfill lane: unable to count remaining pending entries for Stats()", slog.Any("error", err))
-		remaining = -1
-	}
-
 	return Stats{
-		Indexed:          indexed,
-		Skipped:          skipped,
-		Failed:           failed,
-		Remaining:        remaining,
+		Indexed:          b.indexed.Load(),
+		Skipped:          b.skipped.Load(),
+		Failed:           b.failed.Load(),
+		Remaining:        b.cachedRemaining(),
 		SkippedByReason:  b.skippedByReason.snapshot(),
 		FailedByReason:   b.failedByReason.snapshot(),
 		Workers:          b.controller.Workers(),
 		ControllerReason: b.controller.Reason(),
-		ThroughputPerSec: throughput,
+		ThroughputPerSec: b.currentThroughput(),
 		Paused:           paused,
 		Done:             done,
 	}

@@ -7,8 +7,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -46,6 +48,37 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 
 func (f *fakeEmbedder) Dimensions() int { return 384 }
 func (f *fakeEmbedder) Close() error    { return nil }
+
+// batchRecordingEmbedder records how many texts each Embed call received,
+// so a test can observe the actual runtime batch size IndexEntry used
+// (fix round 2, finding 2).
+type batchRecordingEmbedder struct {
+	mu         sync.Mutex
+	batchSizes []int
+}
+
+func (b *batchRecordingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	b.mu.Lock()
+	b.batchSizes = append(b.batchSizes, len(texts))
+	b.mu.Unlock()
+
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, 384)
+	}
+	return out, nil
+}
+
+func (b *batchRecordingEmbedder) Dimensions() int { return 384 }
+func (b *batchRecordingEmbedder) Close() error    { return nil }
+
+func (b *batchRecordingEmbedder) sizes() []int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]int, len(b.batchSizes))
+	copy(out, b.batchSizes)
+	return out
+}
 
 // testEnv opens both a *store.Store (the code under test) and a raw *sql.DB
 // (for fixture setup — package store's own db field is unexported and this
@@ -387,5 +420,64 @@ func TestIndexEntryEmbeddingFailureMarksFailedAndRetryable(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected failed entry #%d to still be in the pending set (retryable)", entryID)
+	}
+}
+
+// 6. (Fix round 2, finding 2.) SetBatchSize is the runtime-editable knob
+// spec §9.2 actually names ("batch size — passages per forward pass; the
+// main lever on CPU efficiency"), distinct from Backfill.SetPageSize
+// (entry ids fetched per pagination page). It clamps to
+// [MinBatchSize, MaxBatchSize] — spec §6.7's measured sweet spot, where
+// batch 64 was slower than batch 8 — and takes effect on the next
+// IndexEntry call.
+func TestIndexerSetBatchSizeClampsAndTakesEffect(t *testing.T) {
+	s, db := testEnv(t)
+
+	// Enough short sentences that Split produces well over MaxBatchSize
+	// passages, so the runtime batch size is directly observable via how
+	// many texts each Embed call receives.
+	var sb strings.Builder
+	sb.WriteString("<p>")
+	for i := 0; i < 1000; i++ {
+		sb.WriteString(fmt.Sprintf("Sentence number %d for the batch size test. ", i))
+	}
+	sb.WriteString("</p>")
+	entryID := createTestEntry(t, db, "batchsize-test", sb.String())
+
+	be := &batchRecordingEmbedder{}
+	idx := New(s, be)
+
+	if got := idx.BatchSize(); got != DefaultBatchSize {
+		t.Fatalf("expected a fresh Indexer to start at DefaultBatchSize=%d, got %d", DefaultBatchSize, got)
+	}
+
+	idx.SetBatchSize(1_000_000) // absurdly high; must clamp down
+	if got := idx.BatchSize(); got != MaxBatchSize {
+		t.Fatalf("expected SetBatchSize to clamp down to MaxBatchSize=%d, got %d", MaxBatchSize, got)
+	}
+
+	idx.SetBatchSize(0) // absurdly low (and the zero value); must clamp up
+	if got := idx.BatchSize(); got != MinBatchSize {
+		t.Fatalf("expected SetBatchSize to clamp up to MinBatchSize=%d, got %d", MinBatchSize, got)
+	}
+
+	idx.SetBatchSize(MinBatchSize) // a valid in-range value takes effect exactly
+	if got := idx.BatchSize(); got != MinBatchSize {
+		t.Fatalf("expected SetBatchSize(%d) to take effect exactly, got %d", MinBatchSize, got)
+	}
+
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry failed: %v", err)
+	}
+
+	sizes := be.sizes()
+	if len(sizes) < 2 {
+		t.Fatalf("test setup invalid: expected multiple embed batches with this much content, got %d", len(sizes))
+	}
+	for _, n := range sizes {
+		if n > MinBatchSize {
+			t.Fatalf("expected every Embed call to receive at most %d texts (the batch size in effect), got %d in %v",
+				MinBatchSize, n, sizes)
+		}
 	}
 }

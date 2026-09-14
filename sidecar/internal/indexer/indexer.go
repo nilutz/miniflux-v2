@@ -9,6 +9,7 @@ package indexer // import "miniflux.app/v2/sidecar/internal/indexer"
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"miniflux.app/v2/sidecar/internal/embed"
 	"miniflux.app/v2/sidecar/internal/passage"
@@ -17,18 +18,58 @@ import (
 
 // DefaultBatchSize is the number of passages embedded per forward pass. The
 // spike (spec §6.7) measured a sweet spot of 8-32 passages per batch, with
-// batch 64 slower than batch 8; do not raise this without re-measuring.
+// batch 64 slower than batch 8; DefaultBatchSize is the starting value
+// SetBatchSize's own clamp (see MinBatchSize/MaxBatchSize) is centred on.
 const DefaultBatchSize = 16
+
+// MinBatchSize and MaxBatchSize bound the runtime-configurable embedding
+// batch size (spec §9.2's third live-editable knob: "batch size —
+// passages per forward pass; the main lever on CPU efficiency"). The
+// spike (spec §6.7) measured batch 64 as slower than batch 8, so
+// SetBatchSize clamps into this range rather than accepting anything —
+// treat a value outside it as a regression, not an optimisation.
+const (
+	MinBatchSize = 8
+	MaxBatchSize = 32
+)
 
 // Indexer indexes one entry at a time into search.passages.
 type Indexer struct {
 	store    *store.Store
 	embedder embed.Embedder
+
+	mu        sync.Mutex
+	batchSize int // live-editable (spec §9.2); guarded by mu, always read via BatchSize()
 }
 
-// New builds an Indexer over the given store and embedder.
+// New builds an Indexer over the given store and embedder, with the
+// embedding batch size starting at DefaultBatchSize.
 func New(s *store.Store, e embed.Embedder) *Indexer {
-	return &Indexer{store: s, embedder: e}
+	return &Indexer{store: s, embedder: e, batchSize: DefaultBatchSize}
+}
+
+// SetBatchSize live-edits the number of passages embedded per forward
+// pass, clamping to [MinBatchSize, MaxBatchSize] (spec §6.7's measured
+// sweet spot) rather than accepting anything outside it. Takes effect on
+// the next IndexEntry call to start batching passages; an entry already
+// mid-batch keeps the size it started with.
+func (idx *Indexer) SetBatchSize(n int) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if n < MinBatchSize {
+		n = MinBatchSize
+	}
+	if n > MaxBatchSize {
+		n = MaxBatchSize
+	}
+	idx.batchSize = n
+}
+
+// BatchSize returns the current embedding batch size.
+func (idx *Indexer) BatchSize() int {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return idx.batchSize
 }
 
 // IndexEntry indexes a single entry: it loads the entry's content, and if
@@ -75,9 +116,10 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 		return nil
 	}
 
+	batchSize := idx.BatchSize()
 	rows := make([]store.PassageRow, len(passages))
-	for batchStart := 0; batchStart < len(passages); batchStart += DefaultBatchSize {
-		batchEnd := min(batchStart+DefaultBatchSize, len(passages))
+	for batchStart := 0; batchStart < len(passages); batchStart += batchSize {
+		batchEnd := min(batchStart+batchSize, len(passages))
 
 		texts := make([]string, batchEnd-batchStart)
 		for i := batchStart; i < batchEnd; i++ {

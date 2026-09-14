@@ -238,13 +238,15 @@ func TestRunLiveSurvivesOneEntryFailing(t *testing.T) {
 
 // 3. RunLive exits cleanly on context cancellation, and promptly — it must
 // not wait out a full poll interval, let alone longer. This test exercises
-// the exported RunLive directly (unbounded, startAfter=0), the only test
-// in this file that does, to prove the public entry point is wired
-// correctly and not just runLive. It creates no entries of its own and
-// keeps its window deliberately short (one tick) to minimise — it cannot
-// eliminate, since it deliberately exercises the unbounded path — the
-// chance of touching a fixture row from a concurrently running package's
-// test (see runLive's doc comment).
+// the exported RunLive directly (unbounded upTo; startAfter is whatever
+// RunLive's own store.MaxEntryID snapshot resolves to at the moment it
+// starts, not 0 — see RunLive's doc comment, fix round 1 finding 3), the
+// only test in this file that does, to prove the public entry point is
+// wired correctly and not just runLive. It creates no entries of its own
+// and keeps its window deliberately short (one tick) to minimise — it
+// cannot eliminate, since it deliberately exercises the unbounded path —
+// the chance of touching a fixture row from a concurrently running
+// package's test (see runLive's doc comment).
 func TestRunLiveExitsOnContextCancellation(t *testing.T) {
 	s, _ := testEnv(t)
 	idx := New(s, &fakeEmbedder{})
@@ -452,5 +454,52 @@ func TestRunLiveDoesNotBlockNewerEntriesOnPersistentFailure(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runLive did not return after cancellation")
+	}
+}
+
+// 7. (Fix round 1, finding 3; test added fix round 2.) RunLive actually
+// skips pre-existing entries at startup — not merely that store.MaxEntryID
+// itself works in isolation (already covered in the store package), but
+// that the exported RunLive genuinely uses it as a cursor floor and never
+// touches anything at or below it, no matter how long it keeps running.
+// This is deterministic, not a race: an entry created before RunLive's
+// startup snapshot has an id at or below that snapshot by construction, so
+// "id > lastSeen" can never match it on any subsequent tick.
+func TestRunLiveSkipsPreexistingEntries(t *testing.T) {
+	s, db := testEnv(t)
+
+	// Created BEFORE RunLive starts: must never be touched, no matter how
+	// long RunLive runs, since its cursor starts at (at least) this
+	// entry's id.
+	oldID := createTestEntry(t, db, "live-preexisting-old",
+		"<p>Pre-existing entry that must be left to the backfill lane.</p>")
+
+	idx := New(s, &fakeEmbedder{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunLive(ctx, idx, pollInterval) }()
+
+	// Let RunLive take its startup snapshot before the newer entry exists.
+	time.Sleep(pollInterval)
+	newID := createTestEntry(t, db, "live-preexisting-new",
+		"<p>Newly arrived entry that RunLive must still index promptly.</p>")
+
+	waitFor(t, 2*time.Second, "the newly arrived entry indexed", func() bool {
+		return entryStatus(t, db, newID) == "ok"
+	})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunLive returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunLive did not return after cancellation")
+	}
+
+	if entryStatus(t, db, oldID) != "" {
+		t.Fatalf("expected the pre-existing entry #%d to be left untouched by RunLive, got status %q", oldID, entryStatus(t, db, oldID))
 	}
 }

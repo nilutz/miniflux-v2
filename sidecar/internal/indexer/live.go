@@ -84,6 +84,21 @@ type retryState struct {
 // falls back to the same safe, self-healing behaviour described above. If
 // the snapshot query itself fails, RunLive logs the error and falls back
 // to starting at 0 rather than refusing to start the live lane at all.
+//
+// This coordination is safe only because of an invariant Backfill upholds
+// on its side (Task 6 fix round 2): Backfill always rescans from its own
+// starting cursor on every process start — it persists no cursor of its
+// own across restarts, and never skips a run just because an earlier one
+// reported Done. If a future change ever violates that (persisting a
+// backfill cursor across restarts, say, or treating a prior Done as
+// "nothing to do this time") an entry created during a window where
+// neither lane happens to be running becomes invisible to BOTH of them
+// forever: RunLive's snapshot has already moved past it by the time the
+// next live-lane instance starts, and a backfill that trusts a stale
+// Done, or a persisted cursor already past that id, will never look at it
+// either. Nothing enforces this today beyond the two lanes' current
+// implementations agreeing on it; whoever changes either side needs to
+// keep it true.
 func RunLive(ctx context.Context, ix *Indexer, interval time.Duration) error {
 	startAfter, err := ix.store.MaxEntryID()
 	if err != nil {

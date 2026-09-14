@@ -116,6 +116,28 @@ func (e *blockOnMarkerEmbedder) Embed(ctx context.Context, texts []string) ([][]
 func (e *blockOnMarkerEmbedder) Dimensions() int { return 384 }
 func (e *blockOnMarkerEmbedder) Close() error    { return nil }
 
+// variableDelayEmbedder always succeeds, sleeping delay (settable live,
+// via an atomic so a test can change it between phases without racing the
+// worker goroutine) before returning. Used to prove Stats().ThroughputPerSec
+// tracks recent batches rather than a lifetime average: a test can run a
+// slow phase, then a fast one, and check the reported rate follows.
+type variableDelayEmbedder struct {
+	delay atomic.Int64 // nanoseconds
+}
+
+func (d *variableDelayEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	if ns := d.delay.Load(); ns > 0 {
+		time.Sleep(time.Duration(ns))
+	}
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, 384)
+	}
+	return out, nil
+}
+func (d *variableDelayEmbedder) Dimensions() int { return 384 }
+func (d *variableDelayEmbedder) Close() error    { return nil }
+
 // runStartAsync runs a Backfill's start in a goroutine and returns a
 // channel that receives its error when it returns.
 func runStartAsync(b *Backfill, ctx context.Context, startAfter int64, upTo *atomic.Int64) chan error {
@@ -669,4 +691,177 @@ func TestBackfillStartIsNotReentrant(t *testing.T) {
 
 	cancel() // unblocks the first call's blocked embed call too
 	waitDone(t, done, 2*time.Second, "first Backfill.start")
+}
+
+// 9. (Fix round 2, finding 1 -- regression fix.) The rescan loop backs off
+// per entry instead of hammering a durably failing one every sweep, and
+// Stats().Failed does not grow without bound while the SAME cause keeps
+// repeating: it counts distinct problems, not attempts.
+//
+// Before this fix, fix round 1's Done-semantics change (finding 2) reset
+// the cursor and reattempted every still-failing entry on every sweep,
+// gated only by a flat pollInterval pause between sweeps -- at a 20ms
+// test pollInterval that is dozens of embed calls a second, forever, for
+// one permanently broken entry. This test lets real wall-clock time pass
+// and checks that only a handful of attempts happened, and that the
+// failure count never climbed past 1.
+func TestBackfillRescanBacksOffAndDoesNotInflateFailedCount(t *testing.T) {
+	s, db := testEnv(t)
+
+	marker := "PERMANENT-FAIL-MARKER-backoff"
+	entryID := createTestEntry(t, db, "backfill-backoff",
+		"<p>Entry containing "+marker+" that always fails to embed, forever.</p>")
+
+	fe := &failMarkerEmbedder{failMarker: marker}
+	idx := New(s, fe)
+	ctrlCfg, bfCfg := backfillTestConfig() // PollInterval: 20ms
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runStartAsync(b, ctx, entryID-1, boundedUpTo(entryID))
+
+	waitFor(t, 2*time.Second, "the entry recorded failed at least once", func() bool {
+		return entryStatus(t, db, entryID) == "failed"
+	})
+
+	// Let real time pass: at the pre-fix, unthrottled retry cadence (one
+	// attempt roughly every pollInterval=20ms), this window is long
+	// enough for on the order of 100 embed calls. With per-entry backoff
+	// (base = pollInterval*retryBackoffMultiple, capped at
+	// pollInterval*retryBackoffCapMultiple -- see start's doc comment,
+	// reusing live.go's own backoff constants), it should be retried only
+	// a handful of times.
+	time.Sleep(2 * time.Second)
+
+	cancel()
+	waitDone(t, done, 2*time.Second, "Backfill.start")
+
+	calls := fe.failCalls.Load()
+	if calls < 1 {
+		t.Fatal("expected at least one embed call")
+	}
+	if calls > 10 {
+		t.Fatalf("expected the permanently-failing entry to be retried only a handful of times over 2s under backoff, got %d embed calls", calls)
+	}
+
+	stats := b.Stats()
+	if stats.Failed != 1 {
+		t.Fatalf("expected Stats().Failed to stay at exactly 1 for a persistently-failing entry with an unchanged cause, got %d", stats.Failed)
+	}
+	if len(stats.FailedByReason) != 1 {
+		t.Fatalf("expected exactly one distinct failure cause recorded, got %d: %v", len(stats.FailedByReason), stats.FailedByReason)
+	}
+	for cause, count := range stats.FailedByReason {
+		if count != 1 {
+			t.Fatalf("expected cause %q to be counted exactly once despite repeated attempts, got %d", cause, count)
+		}
+	}
+	if stats.Done {
+		t.Fatal("expected Stats().Done to remain false while the entry is still failing")
+	}
+}
+
+// 10. (Fix round 2, finding 3.) Stats() no longer performs a blocking,
+// unbounded full-corpus scan on every call: its Remaining figure is
+// memoised behind a TTL, so a second call within that window returns the
+// cached value rather than re-querying, even though the real pending
+// count changed in between.
+func TestBackfillStatsMemoisesRemainingCount(t *testing.T) {
+	s, db := testEnv(t)
+
+	entryID := createTestEntry(t, db, "backfill-remaining-cache",
+		"<p>Entry whose pending status changes between two Stats() calls, to prove Remaining is cached rather than re-queried.</p>")
+
+	idx := New(s, &fakeEmbedder{})
+	ctrlCfg, bfCfg := backfillTestConfig()
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+	b.remainingCountTTL = 10 * time.Second // long enough that this test's own two calls land inside the same window
+
+	firstStart := time.Now()
+	first := b.Stats().Remaining
+	firstElapsed := time.Since(firstStart)
+	if first < 1 {
+		t.Fatalf("expected at least 1 pending entry (our own fixture), got %d", first)
+	}
+
+	// Index the entry directly, bypassing Backfill, so the real pending
+	// count changes between the two Stats() calls below.
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry failed: %v", err)
+	}
+
+	secondStart := time.Now()
+	second := b.Stats().Remaining
+	secondElapsed := time.Since(secondStart)
+	t.Logf("Stats() timing: first call (query) = %v, second call (cached) = %v", firstElapsed, secondElapsed)
+	if second != first {
+		t.Fatalf("expected Stats().Remaining to still return the cached value %d within the TTL window, got %d -- "+
+			"it appears to have re-queried instead of serving the memoised count", first, second)
+	}
+
+	// And it does eventually refresh once the TTL elapses.
+	b.remainingCountTTL = 1 * time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+	third := b.Stats().Remaining
+	if third < 0 {
+		t.Fatalf("expected a non-negative refreshed Remaining, got %d", third)
+	}
+}
+
+// 11. (Fix round 2, finding 4.) ThroughputPerSec reflects recent batches,
+// not a lifetime average: once a slow phase is followed by a fast one,
+// the reported rate rises to track the fast phase rather than staying
+// pinned near the slow phase's rate the way dividing lifetime work by
+// lifetime active time would.
+func TestBackfillThroughputReflectsRecentBatchesNotLifetimeAverage(t *testing.T) {
+	s, db := testEnv(t)
+
+	const nSlow = 3
+	const nFast = 5
+	var ids []int64
+	for i := 0; i < nSlow+nFast; i++ {
+		id := createTestEntry(t, db, "throughput-"+string(rune('a'+i)),
+			"<p>Entry "+string(rune('a'+i))+" for the throughput EWMA test.</p>")
+		ids = append(ids, id)
+	}
+	firstID, lastID := ids[0], ids[len(ids)-1]
+
+	de := &variableDelayEmbedder{}
+	de.delay.Store(int64(150 * time.Millisecond)) // slow phase
+	idx := New(s, de)
+	ctrlCfg, bfCfg := backfillTestConfig() // PageSize=1, MaxWorkers=1: strictly sequential by id
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runStartAsync(b, ctx, firstID-1, boundedUpTo(lastID))
+
+	waitFor(t, 5*time.Second, "slow phase entries indexed", func() bool {
+		return entryStatus(t, db, ids[nSlow-1]) == "ok"
+	})
+	slowThroughput := b.Stats().ThroughputPerSec
+	if slowThroughput <= 0 {
+		t.Fatalf("expected a positive throughput after the slow phase, got %f", slowThroughput)
+	}
+	if slowThroughput > 10 {
+		t.Fatalf("expected a slow throughput reading during the 150ms/entry phase, got %f/s", slowThroughput)
+	}
+
+	de.delay.Store(0) // fast phase: no artificial delay from here on
+
+	waitFor(t, 5*time.Second, "all entries indexed", func() bool {
+		return entryStatus(t, db, lastID) == "ok"
+	})
+	fastThroughput := b.Stats().ThroughputPerSec
+
+	cancel()
+	waitDone(t, done, 2*time.Second, "Backfill.start")
+
+	if fastThroughput <= slowThroughput*2 {
+		t.Fatalf("expected throughput to rise substantially once the slow phase ended (recent-weighted, not a lifetime average): slow=%.2f/s fast=%.2f/s",
+			slowThroughput, fastThroughput)
+	}
 }
