@@ -62,8 +62,8 @@ func createTestEntry(t *testing.T, s *Storage, username string) (entryID int64, 
 	}
 
 	if err := s.db.QueryRow(
-		`INSERT INTO entries (title, hash, url, published_at, changed_at, user_id, feed_id, content)
-		 VALUES ('Test entry', $1, 'https://example.org/post', now(), now(), $2, $3, '<p>excerpt</p>')
+		`INSERT INTO entries (title, hash, url, published_at, changed_at, user_id, feed_id, content, author)
+		 VALUES ('Test entry', $1, 'https://example.org/post', now(), now(), $2, $3, '<p>excerpt</p>', '')
 		 RETURNING id`,
 		"hash-"+username, userID, feedID,
 	).Scan(&entryID); err != nil {

@@ -185,6 +185,14 @@ func (h *handler) findEntries(w http.ResponseWriter, r *http.Request, feedID int
 		WithTags(tags...).
 		WithEnclosures()
 
+	// "The unread list": a query that asks for unread status and nothing
+	// else drops hidden entries, exactly like the unread badge counters.
+	// Any other query (no status filter, status=read, browsing a feed or a
+	// category) is unaffected, per spec §13.3.
+	if len(statuses) == 1 && statuses[0] == model.EntryStatusUnread {
+		builder = builder.WithHidden(false)
+	}
+
 	if request.HasQueryParam(r, "globally_visible") {
 		globallyVisible := request.QueryBoolParam(r, "globally_visible", true)
 
@@ -235,6 +243,13 @@ func (h *handler) setEntryStatusAndStarredHandler(w http.ResponseWriter, r *http
 		}
 	}
 
+	if entriesStatusUpdateRequest.Hidden != nil {
+		if err := h.store.SetEntriesHiddenState(request.UserID(r), entriesStatusUpdateRequest.EntryIDs, *entriesStatusUpdateRequest.Hidden); err != nil {
+			response.JSONServerError(w, r, err)
+			return
+		}
+	}
+
 	response.NoContent(w, r)
 }
 
@@ -246,6 +261,21 @@ func (h *handler) toggleStarredHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.ToggleStarred(request.UserID(r), entryID); err != nil {
+		response.JSONServerError(w, r, err)
+		return
+	}
+
+	response.NoContent(w, r)
+}
+
+func (h *handler) toggleHiddenHandler(w http.ResponseWriter, r *http.Request) {
+	entryID := request.RouteInt64Param(r, "entryID")
+	if entryID == 0 {
+		response.JSONBadRequest(w, r, errors.New("invalid entry ID"))
+		return
+	}
+
+	if err := h.store.ToggleHidden(request.UserID(r), entryID); err != nil {
 		response.JSONServerError(w, r, err)
 		return
 	}

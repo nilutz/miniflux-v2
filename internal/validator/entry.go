@@ -19,16 +19,18 @@ func ValidateEntriesStatusUpdateRequest(request *model.EntriesStatusUpdateReques
 	return ValidateEntryStatus(request.Status)
 }
 
-// ValidateEntriesStatusAndStarredUpdateRequest validates a status and/or starred update
-// for a list of entries. At least one of the status or starred fields must be specified.
-// This is used by the API, which can update the read status, the starred state, or both.
+// ValidateEntriesStatusAndStarredUpdateRequest validates a status, starred
+// and/or hidden update for a list of entries. At least one of the status,
+// starred or hidden fields must be specified. This is used by the API, which
+// can update the read status, the starred state, the hidden state, or any
+// combination of them.
 func ValidateEntriesStatusAndStarredUpdateRequest(request *model.EntriesStatusUpdateRequest) error {
 	if len(request.EntryIDs) == 0 {
 		return errors.New(`the list of entries cannot be empty`)
 	}
 
-	if request.Status == "" && request.Starred == nil {
-		return errors.New(`either the status or the starred field must be specified`)
+	if request.Status == "" && request.Starred == nil && request.Hidden == nil {
+		return errors.New(`the status, starred or hidden field must be specified`)
 	}
 
 	if request.Status != "" {

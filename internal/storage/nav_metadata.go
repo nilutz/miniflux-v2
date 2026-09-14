@@ -26,6 +26,7 @@ func (s *Storage) GetNavMetadata(userID int64) (NavMetadata, error) {
 			   JOIN categories c ON c.id = f.category_id
 			  WHERE e.user_id = $1
 			    AND e.status = 'unread'
+			    AND e.hidden IS FALSE
 			    AND f.hide_globally IS FALSE
 			    AND c.hide_globally IS FALSE
 			) AS count_unread,

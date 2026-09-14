@@ -33,6 +33,20 @@ var forkMigrations = [...]func(tx *sql.Tx) error{
 		_, err = tx.Exec(`UPDATE feeds SET crawler = true WHERE crawler = false`)
 		return err
 	},
+	func(tx *sql.Tx) (err error) {
+		// A separate boolean, exactly like `starred`, rather than a third
+		// `status` value: see spec §13.3. This keeps every existing
+		// status-handling code path (including Fever and Google Reader,
+		// which have no concept of hidden) unchanged.
+		//
+		// No dedicated index: the existing (user_id, status, ...) indexes
+		// already carry the unread-list query, and EXPLAIN ANALYZE against
+		// a 300k-row synthetic table showed the extra `hidden IS FALSE`
+		// filter adding well under a millisecond even when most unread
+		// entries were hidden.
+		_, err = tx.Exec(`ALTER TABLE entries ADD COLUMN hidden boolean not null default false`)
+		return err
+	},
 }
 
 var forkSchemaVersion = len(forkMigrations)

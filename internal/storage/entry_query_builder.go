@@ -68,6 +68,19 @@ func (e *EntryQueryBuilder) WithStarred(starred bool) *EntryQueryBuilder {
 	return e
 }
 
+// WithHidden adds a hidden filter. This is opt-in, exactly like WithStarred:
+// callers that want "the unread list" call it explicitly with false, while
+// Fever, Google Reader, search, and feed/category browsing never call it, so
+// a hidden entry stays reachable there (spec §13.3).
+func (e *EntryQueryBuilder) WithHidden(hidden bool) *EntryQueryBuilder {
+	if hidden {
+		e.conditions = append(e.conditions, "e.hidden is true")
+	} else {
+		e.conditions = append(e.conditions, "e.hidden is false")
+	}
+	return e
+}
+
 // BeforeChangedDate adds a condition < changed_at
 func (e *EntryQueryBuilder) BeforeChangedDate(date time.Time) *EntryQueryBuilder {
 	e.conditions = append(e.conditions, "e.changed_at < $"+strconv.Itoa(len(e.args)+1))
@@ -316,6 +329,7 @@ func (e *EntryQueryBuilder) fetchEntries(withCount bool) (model.Entries, int, er
 			` + e.contentColumn() + `,
 			e.status,
 			e.starred,
+			e.hidden,
 			e.reading_time,
 			e.created_at,
 			e.changed_at,
@@ -388,6 +402,7 @@ func (e *EntryQueryBuilder) fetchEntries(withCount bool) (model.Entries, int, er
 			&entry.Content,
 			&entry.Status,
 			&entry.Starred,
+			&entry.Hidden,
 			&entry.ReadingTime,
 			&entry.CreatedAt,
 			&entry.ChangedAt,

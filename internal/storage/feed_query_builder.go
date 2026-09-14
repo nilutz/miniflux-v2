@@ -31,11 +31,13 @@ type feedQueryBuilder struct {
 // NewFeedQueryBuilder returns a new FeedQueryBuilder.
 func (s *Storage) NewFeedQueryBuilder(userID int64) *feedQueryBuilder {
 	return &feedQueryBuilder{
-		db:                s.db,
-		args:              []any{userID},
-		conditions:        []string{"f.user_id = $1"},
-		counterArgs:       []any{userID, model.EntryStatusRead, model.EntryStatusUnread},
-		counterConditions: []string{"e.user_id = $1", "e.status IN ($2, $3)"},
+		db:          s.db,
+		args:        []any{userID},
+		conditions:  []string{"f.user_id = $1"},
+		counterArgs: []any{userID, model.EntryStatusRead, model.EntryStatusUnread},
+		// A hidden entry drops out of the unread counter only (spec §13.3);
+		// the read counter is unaffected by the flag.
+		counterConditions: []string{"e.user_id = $1", "(e.status = $2 OR (e.status = $3 AND e.hidden IS FALSE))"},
 	}
 }
 

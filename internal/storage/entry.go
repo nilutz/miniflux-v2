@@ -483,6 +483,36 @@ func (s *Storage) ToggleStarred(userID int64, entryID int64) error {
 	return nil
 }
 
+// SetEntriesHiddenState updates the hidden state for the given list of entries.
+func (s *Storage) SetEntriesHiddenState(userID int64, entryIDs []int64, hidden bool) error {
+	query := `UPDATE entries SET hidden=$1, changed_at=now() WHERE user_id=$2 AND id=ANY($3)`
+	if _, err := s.db.Exec(query, hidden, userID, pq.Array(entryIDs)); err != nil {
+		return fmt.Errorf(`store: unable to update the hidden state %v: %v`, entryIDs, err)
+	}
+
+	return nil
+}
+
+// ToggleHidden toggles entry hidden value.
+func (s *Storage) ToggleHidden(userID int64, entryID int64) error {
+	query := `UPDATE entries SET hidden = NOT hidden, changed_at=now() WHERE user_id=$1 AND id=$2`
+	result, err := s.db.Exec(query, userID, entryID)
+	if err != nil {
+		return fmt.Errorf(`store: unable to toggle hidden flag for entry #%d: %v`, entryID, err)
+	}
+
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf(`store: unable to toggle hidden flag for entry #%d: %v`, entryID, err)
+	}
+
+	if count == 0 {
+		return errors.New(`store: nothing has been updated`)
+	}
+
+	return nil
+}
+
 // FlushHistory deletes all read entries (non-starred, non-shared) and records tombstones to prevent re-ingestion.
 func (s *Storage) FlushHistory(userID int64) error {
 	query := `

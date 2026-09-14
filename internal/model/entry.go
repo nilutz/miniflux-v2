@@ -41,6 +41,7 @@ type Entry struct {
 	Author      string        `json:"author"`
 	ShareCode   string        `json:"share_code"`
 	Starred     bool          `json:"starred"`
+	Hidden      bool          `json:"hidden"`
 	ReadingTime int           `json:"reading_time"`
 	Enclosures  EnclosureList `json:"enclosures"`
 	Feed        *Feed         `json:"feed,omitempty"`
@@ -82,6 +83,7 @@ type EntriesStatusUpdateRequest struct {
 	EntryIDs []int64 `json:"entry_ids"`
 	Status   string  `json:"status"`
 	Starred  *bool   `json:"starred"`
+	Hidden   *bool   `json:"hidden"`
 }
 
 // EntryUpdateRequest represents a request to update an entry.

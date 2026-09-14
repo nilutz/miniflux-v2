@@ -139,7 +139,7 @@ func (s *Storage) CategoriesWithFeedCount(userID int64, sortOrder string) (model
 			SELECT f.category_id, count(*) AS unread_count
 			FROM entries e
 			INNER JOIN feeds f ON f.id = e.feed_id
-			WHERE e.user_id = $2 AND e.status = $1
+			WHERE e.user_id = $2 AND e.status = $1 AND e.hidden IS FALSE
 			GROUP BY f.category_id
 		) uc ON uc.category_id = c.id
 		WHERE
