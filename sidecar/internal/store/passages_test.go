@@ -18,7 +18,7 @@ func TestReplacePassagesWritesPassagesAndOKState(t *testing.T) {
 	embedding := make([]float32, 384)
 	embedding[0] = 0.5
 	if err := s.ReplacePassages(entryID, "hash-1", []PassageRow{
-		{Ordinal: 0, Text: "Some content.", CharStart: 0, CharEnd: 13, Embedding: embedding},
+		{Ordinal: 0, Text: "Some content.", CharStart: 0, CharEnd: 13, Source: "content", Embedding: embedding},
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,6 +55,49 @@ func TestReplacePassagesWritesPassagesAndOKState(t *testing.T) {
 	}
 }
 
+// TestReplacePassagesStoresSourcePerPassage pins that 'source' round-trips
+// exactly per row: a title passage and a content passage written in the
+// same call must come back tagged with their own source, not the other
+// one's -- a later query filtering or weighting by source would silently
+// mix them up otherwise.
+func TestReplacePassagesStoresSourcePerPassage(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntry(t, s, "replace-source", "<p>Some content.</p>")
+
+	if err := s.ReplacePassages(entryID, "hash-source", []PassageRow{
+		{Ordinal: 0, Text: "A Title", CharStart: 0, CharEnd: 7, Source: "title", Embedding: make([]float32, 384)},
+		{Ordinal: 1, Text: "Some content.", CharStart: 0, CharEnd: 13, Source: "content", Embedding: make([]float32, 384)},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rows, err := s.db.Query(`SELECT ordinal, source FROM search.passages WHERE entry_id=$1 ORDER BY ordinal`, entryID)
+	if err != nil {
+		t.Fatalf("unable to query passages: %v", err)
+	}
+	defer rows.Close()
+
+	got := map[int]string{}
+	for rows.Next() {
+		var ordinal int
+		var source string
+		if err := rows.Scan(&ordinal, &source); err != nil {
+			t.Fatalf("unable to scan passage: %v", err)
+		}
+		got[ordinal] = source
+	}
+	if got[0] != "title" {
+		t.Fatalf("expected ordinal 0 to have source 'title', got %q", got[0])
+	}
+	if got[1] != "content" {
+		t.Fatalf("expected ordinal 1 to have source 'content', got %q", got[1])
+	}
+}
+
 func TestReplacePassagesReplacesOldPassages(t *testing.T) {
 	s := testStore(t)
 	if err := s.Migrate(); err != nil {
@@ -64,14 +107,14 @@ func TestReplacePassagesReplacesOldPassages(t *testing.T) {
 	entryID := createTestEntry(t, s, "replace-swap", "<p>First version.</p>")
 
 	if err := s.ReplacePassages(entryID, "hash-old", []PassageRow{
-		{Ordinal: 0, Text: "old passage one", CharStart: 0, CharEnd: 16, Embedding: make([]float32, 384)},
-		{Ordinal: 1, Text: "old passage two", CharStart: 16, CharEnd: 32, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "old passage one", CharStart: 0, CharEnd: 16, Source: "content", Embedding: make([]float32, 384)},
+		{Ordinal: 1, Text: "old passage two", CharStart: 16, CharEnd: 32, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("unable to write first passage set: %v", err)
 	}
 
 	if err := s.ReplacePassages(entryID, "hash-new", []PassageRow{
-		{Ordinal: 0, Text: "new passage", CharStart: 0, CharEnd: 11, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "new passage", CharStart: 0, CharEnd: 11, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("unable to write second passage set: %v", err)
 	}
@@ -116,7 +159,7 @@ func TestReplacePassagesRollsBackEntirelyOnFailure(t *testing.T) {
 	// Establish a known-good prior state so we can prove it survives the
 	// failed replacement untouched.
 	if err := s.ReplacePassages(entryID, "hash-good", []PassageRow{
-		{Ordinal: 0, Text: "prior passage", CharStart: 0, CharEnd: 13, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "prior passage", CharStart: 0, CharEnd: 13, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("unable to write the prior good state: %v", err)
 	}
@@ -125,8 +168,8 @@ func TestReplacePassagesRollsBackEntirelyOnFailure(t *testing.T) {
 	// constraint on the second INSERT, after the DELETE and the first
 	// INSERT of this call have already run on the same transaction.
 	err := s.ReplacePassages(entryID, "hash-bad", []PassageRow{
-		{Ordinal: 0, Text: "conflicting one", CharStart: 0, CharEnd: 15, Embedding: make([]float32, 384)},
-		{Ordinal: 0, Text: "conflicting two", CharStart: 0, CharEnd: 15, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "conflicting one", CharStart: 0, CharEnd: 15, Source: "content", Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "conflicting two", CharStart: 0, CharEnd: 15, Source: "content", Embedding: make([]float32, 384)},
 	})
 	if err == nil {
 		t.Fatal("expected an error from a duplicate-ordinal batch")
@@ -209,7 +252,7 @@ func TestMarkEntryFailedLeavesExistingPassagesInPlace(t *testing.T) {
 	entryID := createTestEntry(t, s, "fail-keeps-old", "<p>Still here.</p>")
 
 	if err := s.ReplacePassages(entryID, "hash-good", []PassageRow{
-		{Ordinal: 0, Text: "still here", CharStart: 0, CharEnd: 10, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "still here", CharStart: 0, CharEnd: 10, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("unable to write the prior good state: %v", err)
 	}

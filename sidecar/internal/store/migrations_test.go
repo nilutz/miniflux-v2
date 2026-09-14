@@ -4,7 +4,9 @@
 package store // import "miniflux.app/v2/sidecar/internal/store"
 
 import (
+	"database/sql"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +105,37 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 	if err := s.Migrate(); err != nil {
 		t.Fatalf("second migrate failed: %v", err)
+	}
+}
+
+// TestMigrateAddsPassagesSourceColumn pins migration 3: search.passages
+// gains a NOT NULL 'source' column defaulting to 'content', so pre-task-1.5
+// rows (all of which are body passages) remain valid without a backfill of
+// their own, and the indexer can write 'title' rows going forward.
+func TestMigrateAddsPassagesSourceColumn(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	var dataType, isNullable string
+	var columnDefault sql.NullString
+	err := s.db.QueryRow(`
+		SELECT data_type, is_nullable, column_default
+		FROM information_schema.columns
+		WHERE table_schema='search' AND table_name='passages' AND column_name='source'
+	`).Scan(&dataType, &isNullable, &columnDefault)
+	if err != nil {
+		t.Fatalf("expected search.passages.source to exist: %v", err)
+	}
+	if dataType != "text" {
+		t.Fatalf("expected source to be text, got %q", dataType)
+	}
+	if isNullable != "NO" {
+		t.Fatalf("expected source to be NOT NULL, got is_nullable=%q", isNullable)
+	}
+	if !strings.Contains(columnDefault.String, "content") {
+		t.Fatalf("expected source's default to mention 'content', got %q", columnDefault.String)
 	}
 }

@@ -429,7 +429,11 @@ func TestBackfillStatsReportsProgressAndCauses(t *testing.T) {
 
 	okID := createTestEntry(t, db, "backfill-stats-ok",
 		"<p>A perfectly normal entry that indexes successfully.</p>")
-	skipID := createTestEntry(t, db, "backfill-stats-skip",
+	// An empty title, not just script/style-only content: since task 1.5,
+	// a non-empty title alone is enough to index an entry (by its title)
+	// rather than skip it, so this fixture needs both to be unusable to
+	// still genuinely exercise the "skipped" outcome this test asserts on.
+	skipID := createTestEntryWithTitle(t, db, "backfill-stats-skip", "",
 		"<script>var x = 1;</script><style>p { color: red; }</style>")
 	failMarker := "FAIL-MARKER-backfill-stats"
 	failID := createTestEntry(t, db, "backfill-stats-fail",
@@ -1064,10 +1068,17 @@ func TestBackfillNoticesContentChangeAfterDoneWithoutRestart(t *testing.T) {
 		"<p>The full scraped article body, containing "+fullTextMarker+", far longer than the excerpt was.</p>")
 
 	// Wait on the committed row, not merely on the embedder call: the
-	// passages are written after the forward pass returns.
+	// passages are written after the forward pass returns. Scoped to
+	// source='content': createTestEntry's fixture has a non-empty title,
+	// so ordinal 0 is now a title passage (task 1.5) that never carries
+	// either marker -- the body text lands in the content passages that
+	// follow it.
 	passageText := func() string {
 		var text string
-		if err := db.QueryRow(`SELECT text FROM search.passages WHERE entry_id=$1 ORDER BY ordinal LIMIT 1`, entryID).Scan(&text); err != nil {
+		if err := db.QueryRow(
+			`SELECT text FROM search.passages WHERE entry_id=$1 AND source='content' ORDER BY ordinal LIMIT 1`,
+			entryID,
+		).Scan(&text); err != nil {
 			return ""
 		}
 		return text

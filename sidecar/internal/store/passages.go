@@ -12,15 +12,21 @@ import (
 )
 
 // PassageRow is one passage ready to be written to search.passages: its
-// text, its byte offsets into the entry's extracted plaintext, and its
-// already-computed embedding. It is the store package's own row type so
-// that package store never imports package passage — the indexer converts
-// between passage.Passage and PassageRow.
+// text, its byte offsets into its own source string, its source ("title" or
+// "content" — task 1.5), and its already-computed embedding. It is the
+// store package's own row type so that package store never imports package
+// passage — the indexer converts between passage.Passage and PassageRow.
+//
+// CharStart/CharEnd are only meaningful relative to Source: a "title"
+// passage's offsets index into the entry's title, a "content" passage's
+// index into passage.ExtractText(entry.Content) — two different strings.
+// A consumer that slices the wrong one silently highlights the wrong text.
 type PassageRow struct {
 	Ordinal   int
 	Text      string
 	CharStart int
 	CharEnd   int
+	Source    string
 	Embedding []float32
 }
 
@@ -71,8 +77,8 @@ func (s *Store) ReplacePassages(entryID int64, contentHash string, passages []Pa
 	}
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO search.passages (entry_id, ordinal, text, char_start, char_end, embedding)
-		VALUES ($1, $2, $3, $4, $5, $6::public.vector)
+		INSERT INTO search.passages (entry_id, ordinal, text, char_start, char_end, embedding, source)
+		VALUES ($1, $2, $3, $4, $5, $6::public.vector, $7)
 	`)
 	if err != nil {
 		return fmt.Errorf("store: unable to prepare passage insert: %w", err)
@@ -80,7 +86,7 @@ func (s *Store) ReplacePassages(entryID int64, contentHash string, passages []Pa
 	defer stmt.Close()
 
 	for _, p := range passages {
-		if _, err := stmt.Exec(entryID, p.Ordinal, p.Text, p.CharStart, p.CharEnd, vectorLiteral(p.Embedding)); err != nil {
+		if _, err := stmt.Exec(entryID, p.Ordinal, p.Text, p.CharStart, p.CharEnd, vectorLiteral(p.Embedding), p.Source); err != nil {
 			return fmt.Errorf("store: unable to insert passage %d for entry #%d: %w", p.Ordinal, entryID, err)
 		}
 	}

@@ -16,6 +16,15 @@ import (
 // removed when the test finishes.
 func createTestEntry(t *testing.T, s *Store, username, content string) int64 {
 	t.Helper()
+	return createTestEntryWithTitle(t, s, username, "Test entry", content)
+}
+
+// createTestEntryWithTitle is createTestEntry with a caller-chosen title,
+// for tests that need to exercise the title itself (an empty title, a
+// title that changes independently of content, a title with distinctive
+// multi-byte content).
+func createTestEntryWithTitle(t *testing.T, s *Store, username, title, content string) int64 {
+	t.Helper()
 
 	var userID int64
 	if err := s.db.QueryRow(
@@ -48,9 +57,9 @@ func createTestEntry(t *testing.T, s *Store, username, content string) int64 {
 	var entryID int64
 	if err := s.db.QueryRow(
 		`INSERT INTO entries (title, hash, url, published_at, changed_at, user_id, feed_id, content)
-		 VALUES ('Test entry', $1, 'https://example.org/'||$2, now(), now(), $3, $4, $5)
+		 VALUES ($1, $2, 'https://example.org/'||$3, now(), now(), $4, $5, $6)
 		 RETURNING id`,
-		"hash-"+username, username, userID, feedID, content,
+		title, "hash-"+username, username, userID, feedID, content,
 	).Scan(&entryID); err != nil {
 		t.Fatalf("unable to create entry: %v", err)
 	}
@@ -67,6 +76,14 @@ func updateEntryContent(t *testing.T, s *Store, entryID int64, content string) {
 
 	if _, err := s.db.Exec(`UPDATE entries SET content=$1, changed_at=now() WHERE id=$2`, content, entryID); err != nil {
 		t.Fatalf("unable to update entry content: %v", err)
+	}
+}
+
+func updateEntryTitle(t *testing.T, s *Store, entryID int64, title string) {
+	t.Helper()
+
+	if _, err := s.db.Exec(`UPDATE entries SET title=$1, changed_at=now() WHERE id=$2`, title, entryID); err != nil {
+		t.Fatalf("unable to update entry title: %v", err)
 	}
 }
 
@@ -87,6 +104,9 @@ func TestEntryForIndexingReturnsContentAndHash(t *testing.T) {
 	}
 	if entry.Content != "<p>Hello world.</p>" {
 		t.Fatalf("unexpected content: %q", entry.Content)
+	}
+	if entry.Title != "Test entry" {
+		t.Fatalf("unexpected title: %q", entry.Title)
 	}
 	if entry.ContentHash == "" {
 		t.Fatal("expected a non-empty content hash")
@@ -126,6 +146,41 @@ func TestEntryForIndexingChangesHashWhenContentChanges(t *testing.T) {
 
 	if before.ContentHash == after.ContentHash {
 		t.Fatal("expected content hash to change when content changes")
+	}
+}
+
+// TestEntryForIndexingChangesHashWhenTitleChangesButContentDoesNot is the
+// regression guard for the gap this task exists to close: before task 1.5,
+// content_hash covered only the entry's content, so editing only its title
+// (a headline fix, a feed re-publishing with a corrected title) left the
+// recorded hash unchanged and the entry silently un-reindexed forever —
+// its old, now-wrong title passage (or, before this task, no title passage
+// at all) would never be refreshed.
+func TestEntryForIndexingChangesHashWhenTitleChangesButContentDoesNot(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntryWithTitle(t, s, "entryfor-title-changed", "Original Title", "<p>Body never changes.</p>")
+
+	before, err := s.EntryForIndexing(entryID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updateEntryTitle(t, s, entryID, "Completely Different Title")
+
+	after, err := s.EntryForIndexing(entryID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if before.ContentHash == after.ContentHash {
+		t.Fatal("expected content hash to change when only the title changes")
+	}
+	if after.Title != "Completely Different Title" {
+		t.Fatalf("expected the new title to be returned, got %q", after.Title)
 	}
 }
 
@@ -177,7 +232,7 @@ func TestPendingEntryIDsExcludesUpToDateOKEntry(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "Already indexed.", CharStart: 0, CharEnd: 17, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "Already indexed.", CharStart: 0, CharEnd: 17, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("unable to replace passages: %v", err)
 	}
@@ -207,7 +262,7 @@ func TestPendingEntryIDsIncludesChangedEntry(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "Before edit.", CharStart: 0, CharEnd: 12, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "Before edit.", CharStart: 0, CharEnd: 12, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("unable to replace passages: %v", err)
 	}
@@ -227,6 +282,48 @@ func TestPendingEntryIDsIncludesChangedEntry(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected changed entry #%d to be pending again, got %v", entryID, ids)
+	}
+}
+
+// TestPendingEntryIDsIncludesEntryWhoseTitleChanged mirrors
+// TestPendingEntryIDsIncludesChangedEntry but edits only the title,
+// content held fixed — the same gap TestEntryForIndexingChangesHash...
+// covers, exercised through the SQL-side predicate PendingEntryIDs
+// actually uses in the backfill, not just the Go-side hash function.
+func TestPendingEntryIDsIncludesEntryWhoseTitleChanged(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntryWithTitle(t, s, "pending-title-changed", "Before Title", "<p>Stable body.</p>")
+
+	entry, err := s.EntryForIndexing(entryID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
+		{Ordinal: 0, Text: "Before Title", CharStart: 0, CharEnd: 12, Source: "title", Embedding: make([]float32, 384)},
+		{Ordinal: 1, Text: "Stable body.", CharStart: 0, CharEnd: 12, Source: "content", Embedding: make([]float32, 384)},
+	}); err != nil {
+		t.Fatalf("unable to replace passages: %v", err)
+	}
+
+	updateEntryTitle(t, s, entryID, "After Title")
+
+	ids, err := s.PendingEntryIDs(entryID-1, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	found := false
+	for _, id := range ids {
+		if id == entryID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected entry #%d, whose title changed, to be pending again, got %v", entryID, ids)
 	}
 }
 
@@ -291,7 +388,7 @@ func pendingSnapshot(t *testing.T, s *Store, afterID int64) (count int64, ids []
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5($2 || coalesce(e.content, ''))
+		    OR s.content_hash <> md5($2 || coalesce(e.title, '') || coalesce(e.content, ''))
 		  )
 	`
 
@@ -374,7 +471,7 @@ func TestPendingEntryCountMatchesPendingEntryIDs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "a", CharStart: 0, CharEnd: 1, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "a", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("unable to replace passages: %v", err)
 	}
@@ -456,7 +553,7 @@ func TestPipelineVersionBumpMakesIndexedEntriesPendingAgain(t *testing.T) {
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
 		Ordinal: 0, Text: "Content that never changes at all.", CharStart: 0, CharEnd: 34,
-		Embedding: make([]float32, 384),
+		Source: "content", Embedding: make([]float32, 384),
 	}}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}
@@ -542,7 +639,7 @@ func TestPendingEntryCountApproxTracksTheExactCount(t *testing.T) {
 		t.Fatalf("EntryForIndexing failed: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}
@@ -577,7 +674,7 @@ func TestPendingEntryCountApproxTracksTheExactCount(t *testing.T) {
 
 	// The documented divergence: content edited after a successful index.
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 384)},
 	}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}

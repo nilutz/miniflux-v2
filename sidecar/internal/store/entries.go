@@ -11,11 +11,12 @@ import (
 	"fmt"
 )
 
-// Entry is the subset of a Miniflux entry the indexer needs: its raw
-// content and a hash of that content, used to detect edits that require a
-// full re-index.
+// Entry is the subset of a Miniflux entry the indexer needs: its title and
+// raw content, and a hash covering both, used to detect edits that require
+// a full re-index.
 type Entry struct {
 	ID          int64
+	Title       string
 	Content     string
 	ContentHash string
 }
@@ -47,7 +48,16 @@ type Entry struct {
 //	1 — initial pipeline (task 3).
 //	2 — ExtractText collapses Unicode whitespace (U+00A0, the rest of
 //	    \p{Z}, and U+FEFF), not only ASCII \s.
-const PipelineVersion = "2"
+//	3 — (task 1.5) the entry's title is now indexed as its own passage
+//	    (source='title', ordinal 0) alongside its body passages
+//	    (source='content'), and contentHash now covers the title as well
+//	    as the content -- so a title-only edit re-offers the entry too,
+//	    not just a body edit. Bumping this re-derives every already-
+//	    indexed entry's hash from the new formula on its own, but the
+//	    version is still bumped explicitly per this file's own rule: what
+//	    search.passages stores changed, independently of whether
+//	    ExtractText/Split's output for a given content string changed.
+const PipelineVersion = "3"
 
 // pipelineVersion is the value actually used by contentHash and by the
 // pending-set predicate. It is a var, not the constant directly, purely so
@@ -57,26 +67,31 @@ const PipelineVersion = "2"
 var pipelineVersion = PipelineVersion
 
 // contentHash returns the hash recorded in
-// search.entry_index_state.content_hash for a given piece of entry content.
-// It covers the pipeline version as well as the content itself, so a
-// pipeline change invalidates stored passages exactly like an edited entry
-// does (see PipelineVersion).
+// search.entry_index_state.content_hash for a given entry title and
+// content. It covers the pipeline version, the title and the content, so a
+// pipeline change, a title edit, or a content edit each invalidate stored
+// passages exactly like one another (see PipelineVersion) — a title-only
+// edit must re-offer the entry too, since it changes what the (task 1.5)
+// title passage should contain.
 //
 // It must agree, byte for byte, with the hash PendingEntryIDs computes in
-// SQL, md5(pipeline version || coalesce(entry content, empty string)) —
-// both sides hash the empty string for a NULL/absent content column — or a
-// changed entry could be silently missed, or an unchanged one endlessly
-// re-queued.
-func contentHash(content string) string {
-	sum := md5.Sum([]byte(pipelineVersion + content))
+// SQL, md5(pipeline version || coalesce(entry title, ”) || coalesce(entry
+// content, ”)) — both sides hash the empty string for a NULL/absent
+// column — or a changed entry could be silently missed, or an unchanged one
+// endlessly re-queued. Title is never NULL in practice (public.entries.title
+// is NOT NULL), but coalescing it on the SQL side costs nothing and keeps
+// the two sides symmetric with how content is already handled.
+func contentHash(title, content string) string {
+	sum := md5.Sum([]byte(pipelineVersion + title + content))
 	return hex.EncodeToString(sum[:])
 }
 
-// EntryForIndexing loads one entry's content from public.entries (read-only)
-// and computes its content hash.
+// EntryForIndexing loads one entry's title and content from public.entries
+// (read-only) and computes its content hash.
 func (s *Store) EntryForIndexing(entryID int64) (*Entry, error) {
+	var title string
 	var content sql.NullString
-	err := s.db.QueryRow(`SELECT content FROM entries WHERE id=$1`, entryID).Scan(&content)
+	err := s.db.QueryRow(`SELECT title, content FROM entries WHERE id=$1`, entryID).Scan(&title, &content)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("store: entry #%d does not exist: %w", entryID, err)
 	}
@@ -86,16 +101,17 @@ func (s *Store) EntryForIndexing(entryID int64) (*Entry, error) {
 
 	return &Entry{
 		ID:          entryID,
+		Title:       title,
 		Content:     content.String,
-		ContentHash: contentHash(content.String),
+		ContentHash: contentHash(title, content.String),
 	}, nil
 }
 
 // PendingEntryIDs returns up to limit entry ids greater than afterID that
 // need (re-)indexing: entries absent from entry_index_state, entries whose
-// last attempt failed, or entries whose content has changed since it was
-// last indexed. Ascending id order lets the caller checkpoint on the last id
-// it processed.
+// last attempt failed, or entries whose title or content has changed since
+// they were last indexed. Ascending id order lets the caller checkpoint on
+// the last id it processed.
 func (s *Store) PendingEntryIDs(afterID int64, limit int) ([]int64, error) {
 	query := `
 		SELECT e.id
@@ -105,7 +121,7 @@ func (s *Store) PendingEntryIDs(afterID int64, limit int) ([]int64, error) {
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5($3 || coalesce(e.content, ''))
+		    OR s.content_hash <> md5($3 || coalesce(e.title, '') || coalesce(e.content, ''))
 		  )
 		ORDER BY e.id ASC
 		LIMIT $2
@@ -168,7 +184,7 @@ func (s *Store) PendingEntryCount(afterID int64) (int64, error) {
 		  AND (
 		    s.entry_id IS NULL
 		    OR s.status = 'failed'
-		    OR s.content_hash <> md5($2 || coalesce(e.content, ''))
+		    OR s.content_hash <> md5($2 || coalesce(e.title, '') || coalesce(e.content, ''))
 		  )
 	`, afterID, pipelineVersion).Scan(&count)
 	if err != nil {

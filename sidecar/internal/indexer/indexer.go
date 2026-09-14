@@ -158,18 +158,24 @@ func (idx *Indexer) BatchSize() int {
 // IndexEntry indexes a single entry: it loads the entry's content, and if
 // its content hash matches what is already recorded as successfully
 // indexed, returns immediately without doing any work (in particular,
-// without calling the embedder — see spec §10, "entry unchanged"). Text is
-// extracted from the entry's HTML; an entry with no usable text is recorded
-// as skipped and is not treated as an error. Otherwise the text is split
-// into passages and embedded in batches of BatchSize() (DefaultBatchSize
-// unless SetBatchSize has live-edited it — spec §9.2); an embedding
-// failure records the entry as failed (retryable later) and IndexEntry
-// returns the error — unless the failure was ctx being cancelled mid-embed
-// (a caller shutting down or interrupting a batch, not a real embedder
-// failure), in which case entry_index_state is left untouched entirely, so
-// a graceful shutdown never manufactures a spurious "failed" row. Passages
-// are written, and the entry recorded ok, in a single atomic replace —
-// IndexEntry never marks an entry ok on a partial result.
+// without calling the embedder — see spec §10, "entry unchanged"). The
+// entry's title becomes its own passage (ordinal 0, source="title",
+// offsets into the title itself — task 1.5), skipped only if the title is
+// empty or all whitespace; text is extracted from the entry's HTML and
+// split into body passages (source="content", offsets into that extracted
+// plaintext, ordinals following the title). An entry with neither a usable
+// title nor usable body text is recorded as skipped and is not treated as
+// an error — one with a usable title but no usable body still indexes,
+// by its title alone. Every passage, title and body alike, is embedded in
+// batches of BatchSize() (DefaultBatchSize unless SetBatchSize has
+// live-edited it — spec §9.2); an embedding failure records the entry as
+// failed (retryable later) and IndexEntry returns the error — unless the
+// failure was ctx being cancelled mid-embed (a caller shutting down or
+// interrupting a batch, not a real embedder failure), in which case
+// entry_index_state is left untouched entirely, so a graceful shutdown
+// never manufactures a spurious "failed" row. Passages are written, and
+// the entry recorded ok, in a single atomic replace — IndexEntry never
+// marks an entry ok on a partial result.
 func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	entry, err := idx.store.EntryForIndexing(entryID)
 	if err != nil {
@@ -184,30 +190,54 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 		return nil
 	}
 
-	text := passage.ExtractText(entry.Content)
-	if text == "" {
-		if err := idx.store.MarkEntrySkipped(entryID, entry.ContentHash, "no usable text extracted from entry content"); err != nil {
+	// title's offsets are into the title itself -- a completely different
+	// string from bodyText below. Never conflate the two: see PassageRow's
+	// doc comment on why that hazard has no error, only wrong highlights.
+	title := strings.TrimSpace(entry.Title)
+
+	bodyText := passage.ExtractText(entry.Content)
+	var bodyPassages []passage.Passage
+	if bodyText != "" {
+		bodyPassages = passage.Split(bodyText, passage.DefaultSplitOptions())
+	}
+
+	if title == "" && len(bodyPassages) == 0 {
+		reason := "no usable text extracted from entry content"
+		if bodyText != "" {
+			reason = "no passages produced from extracted text"
+		}
+		if err := idx.store.MarkEntrySkipped(entryID, entry.ContentHash, reason); err != nil {
 			return fmt.Errorf("%w #%d: %w", errMarkSkipped, entryID, err)
 		}
 		return nil
 	}
 
-	passages := passage.Split(text, passage.DefaultSplitOptions())
-	if len(passages) == 0 {
-		if err := idx.store.MarkEntrySkipped(entryID, entry.ContentHash, "no passages produced from extracted text"); err != nil {
-			return fmt.Errorf("%w #%d: %w", errMarkSkipped, entryID, err)
-		}
-		return nil
+	// combined lays the title passage (if any) at index 0 -- giving it
+	// ordinal 0 -- followed by the body passages, so a single batching
+	// loop below embeds both kinds uniformly. Embedding the title costs
+	// one extra short forward pass per entry, negligible against the
+	// entry's own 4-6 body passages.
+	type sourcedPassage struct {
+		text               string
+		charStart, charEnd int
+		source             string
+	}
+	var combined []sourcedPassage
+	if title != "" {
+		combined = append(combined, sourcedPassage{text: title, charStart: 0, charEnd: len(title), source: "title"})
+	}
+	for _, p := range bodyPassages {
+		combined = append(combined, sourcedPassage{text: p.Text, charStart: p.CharStart, charEnd: p.CharEnd, source: "content"})
 	}
 
 	batchSize := idx.BatchSize()
-	rows := make([]store.PassageRow, len(passages))
-	for batchStart := 0; batchStart < len(passages); batchStart += batchSize {
-		batchEnd := min(batchStart+batchSize, len(passages))
+	rows := make([]store.PassageRow, len(combined))
+	for batchStart := 0; batchStart < len(combined); batchStart += batchSize {
+		batchEnd := min(batchStart+batchSize, len(combined))
 
 		texts := make([]string, batchEnd-batchStart)
 		for i := batchStart; i < batchEnd; i++ {
-			texts[i-batchStart] = passages[i].Text
+			texts[i-batchStart] = combined[i].text
 		}
 
 		vectors, err := idx.embedder.Embed(ctx, texts)
@@ -231,12 +261,13 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 		}
 
 		for i, vector := range vectors {
-			p := passages[batchStart+i]
+			cp := combined[batchStart+i]
 			rows[batchStart+i] = store.PassageRow{
 				Ordinal:   batchStart + i,
-				Text:      p.Text,
-				CharStart: p.CharStart,
-				CharEnd:   p.CharEnd,
+				Text:      cp.text,
+				CharStart: cp.charStart,
+				CharEnd:   cp.charEnd,
+				Source:    cp.source,
 				Embedding: vector,
 			}
 		}

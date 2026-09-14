@@ -16,6 +16,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"miniflux.app/v2/sidecar/internal/passage"
 	"miniflux.app/v2/sidecar/internal/store"
 )
 
@@ -120,6 +121,14 @@ func testEnv(t *testing.T) (*store.Store, *sql.DB) {
 // removed when the test finishes.
 func createTestEntry(t *testing.T, db *sql.DB, username, content string) int64 {
 	t.Helper()
+	return createTestEntryWithTitle(t, db, username, "Test entry", content)
+}
+
+// createTestEntryWithTitle is createTestEntry with a caller-chosen title,
+// for tests exercising title indexing itself (task 1.5): an empty title,
+// a title distinct from the body, a title edited independently of content.
+func createTestEntryWithTitle(t *testing.T, db *sql.DB, username, title, content string) int64 {
+	t.Helper()
 
 	var userID int64
 	if err := db.QueryRow(
@@ -152,9 +161,9 @@ func createTestEntry(t *testing.T, db *sql.DB, username, content string) int64 {
 	var entryID int64
 	if err := db.QueryRow(
 		`INSERT INTO entries (title, hash, url, published_at, changed_at, user_id, feed_id, content)
-		 VALUES ('Test entry', $1, 'https://example.org/'||$2, now(), now(), $3, $4, $5)
+		 VALUES ($1, $2, 'https://example.org/'||$3, now(), now(), $4, $5, $6)
 		 RETURNING id`,
-		"hash-"+username, username, userID, feedID, content,
+		title, "hash-"+username, username, userID, feedID, content,
 	).Scan(&entryID); err != nil {
 		t.Fatalf("unable to create entry: %v", err)
 	}
@@ -172,6 +181,52 @@ func updateEntryContent(t *testing.T, db *sql.DB, entryID int64, content string)
 	if _, err := db.Exec(`UPDATE entries SET content=$1, changed_at=now() WHERE id=$2`, content, entryID); err != nil {
 		t.Fatalf("unable to update entry content: %v", err)
 	}
+}
+
+func updateEntryTitleAndContent(t *testing.T, db *sql.DB, entryID int64, title, content string) {
+	t.Helper()
+
+	if _, err := db.Exec(`UPDATE entries SET title=$1, content=$2, changed_at=now() WHERE id=$3`, title, content, entryID); err != nil {
+		t.Fatalf("unable to update entry title/content: %v", err)
+	}
+}
+
+// passageRow is what these tests read back from search.passages to check
+// the indexer's output, source and offsets included.
+type passageRow struct {
+	Ordinal   int
+	Text      string
+	CharStart int
+	CharEnd   int
+	Source    string
+	Dims      int
+}
+
+func passagesFor(t *testing.T, db *sql.DB, entryID int64) []passageRow {
+	t.Helper()
+
+	rows, err := db.Query(
+		`SELECT ordinal, text, char_start, char_end, source, vector_dims(embedding)
+		 FROM search.passages WHERE entry_id=$1 ORDER BY ordinal`,
+		entryID,
+	)
+	if err != nil {
+		t.Fatalf("unable to query passages: %v", err)
+	}
+	defer rows.Close()
+
+	var out []passageRow
+	for rows.Next() {
+		var p passageRow
+		if err := rows.Scan(&p.Ordinal, &p.Text, &p.CharStart, &p.CharEnd, &p.Source, &p.Dims); err != nil {
+			t.Fatalf("unable to scan passage: %v", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("unable to read passages: %v", err)
+	}
+	return out
 }
 
 // 1. A plain entry indexes: passages are written, each with a non-null
@@ -221,12 +276,232 @@ func TestIndexEntryIndexesAPlainEntry(t *testing.T) {
 	}
 }
 
-// 2. An entry with no usable text is skipped: no passages written,
-// status='skipped', reason non-empty, and a second IndexEntry call does not
-// re-embed it; the entry also stays out of the pending set (not retried).
+// 1a. (Task 1.5) Indexing an entry produces a title passage: ordinal 0,
+// source='title', text exactly the entry's title, offsets spanning the
+// whole title -- and the body's passages follow it as source='content'
+// with ordinals from 1. This is the regression Task 1.5 exists to prevent:
+// before it, a query matching only the title (e.g. "Why Raft is hard" for
+// a post whose body never repeats "Raft") had nothing to find.
+func TestIndexEntryCreatesATitlePassageAndContentPassages(t *testing.T) {
+	s, db := testEnv(t)
+	const title = "Why Raft is hard"
+	entryID := createTestEntryWithTitle(t, db, "index-title-basic", title,
+		"<p>Distributed consensus protocols are notoriously difficult to implement correctly in practice.</p>")
+
+	idx := New(s, &fakeEmbedder{})
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry failed: %v", err)
+	}
+
+	passages := passagesFor(t, db, entryID)
+	if len(passages) < 2 {
+		t.Fatalf("expected at least a title passage and a content passage, got %d: %+v", len(passages), passages)
+	}
+
+	titlePassage := passages[0]
+	if titlePassage.Ordinal != 0 {
+		t.Fatalf("expected the title passage at ordinal 0, got %d", titlePassage.Ordinal)
+	}
+	if titlePassage.Source != "title" {
+		t.Fatalf("expected source 'title', got %q", titlePassage.Source)
+	}
+	if titlePassage.Text != title {
+		t.Fatalf("expected the title passage's text to be exactly the title %q, got %q", title, titlePassage.Text)
+	}
+	if titlePassage.CharStart != 0 || titlePassage.CharEnd != len(title) {
+		t.Fatalf("expected title offsets [0,%d), got [%d,%d)", len(title), titlePassage.CharStart, titlePassage.CharEnd)
+	}
+	if titlePassage.Dims != 384 {
+		t.Fatalf("expected the title passage to be embedded (384 dims), got %d", titlePassage.Dims)
+	}
+
+	for _, p := range passages[1:] {
+		if p.Source != "content" {
+			t.Fatalf("expected every passage after the title to have source 'content', got %q at ordinal %d", p.Source, p.Ordinal)
+		}
+		if p.Ordinal < 1 {
+			t.Fatalf("expected content ordinals to start from 1 when a title passage exists, got %d", p.Ordinal)
+		}
+		if p.Text == title {
+			t.Fatalf("a content passage must not duplicate the title's text")
+		}
+	}
+}
+
+// 1b. (Task 1.5) An entry with an empty (or whitespace-only) title produces
+// no title passage at all -- not an empty one that would waste an ordinal
+// and an embedding call on nothing.
+func TestIndexEntryEmptyTitleProducesNoTitlePassage(t *testing.T) {
+	s, db := testEnv(t)
+	entryID := createTestEntryWithTitle(t, db, "index-title-empty", "",
+		"<p>Body text for an entry whose title is empty.</p>")
+
+	idx := New(s, &fakeEmbedder{})
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry failed: %v", err)
+	}
+
+	passages := passagesFor(t, db, entryID)
+	if len(passages) == 0 {
+		t.Fatal("expected content passages to still be written")
+	}
+	for _, p := range passages {
+		if p.Source == "title" {
+			t.Fatalf("expected no title passage for an entry with an empty title, got one: %+v", p)
+		}
+	}
+}
+
+func TestIndexEntryWhitespaceOnlyTitleProducesNoTitlePassage(t *testing.T) {
+	s, db := testEnv(t)
+	entryID := createTestEntryWithTitle(t, db, "index-title-whitespace", "   \t  ",
+		"<p>Body text for an entry whose title is only whitespace.</p>")
+
+	idx := New(s, &fakeEmbedder{})
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry failed: %v", err)
+	}
+
+	passages := passagesFor(t, db, entryID)
+	for _, p := range passages {
+		if p.Source == "title" {
+			t.Fatalf("expected no title passage for a whitespace-only title, got one: %+v", p)
+		}
+	}
+}
+
+// 1c. (Task 1.5) THE TRAP: a title passage's char_start/char_end must index
+// into the title itself, never into the body's extracted plaintext. The
+// title here is deliberately multi-byte (accented characters), and the
+// content is deliberately a very different length, so an implementation
+// that accidentally reused the content's plaintext or its length for the
+// title's offsets is caught rather than coincidentally passing.
+func TestIndexEntryTitleOffsetsIndexIntoTitleNotContentPlaintext(t *testing.T) {
+	s, db := testEnv(t)
+	const title = "Café Étude: naïve façade déjà vu" // multi-byte UTF-8, byte len != rune len
+	const contentHTML = "<p>This paragraph is unrelated in both length and vocabulary to the headline above, deliberately so that any offset computed against it instead of the title would be immediately, visibly wrong rather than passing by coincidence.</p>"
+	entryID := createTestEntryWithTitle(t, db, "index-title-trap", title, contentHTML)
+
+	idx := New(s, &fakeEmbedder{})
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry failed: %v", err)
+	}
+
+	passages := passagesFor(t, db, entryID)
+	if len(passages) < 2 {
+		t.Fatalf("expected a title passage and at least one content passage, got %d", len(passages))
+	}
+
+	titlePassage := passages[0]
+	if titlePassage.Source != "title" {
+		t.Fatalf("expected passages[0] to be the title passage, got source %q", titlePassage.Source)
+	}
+	if titlePassage.CharStart != 0 || titlePassage.CharEnd != len(title) {
+		t.Fatalf("expected title offsets [0,%d) (byte length of the title), got [%d,%d) -- "+
+			"if this equals a content-derived length instead, offsets were computed against the wrong source string",
+			len(title), titlePassage.CharStart, titlePassage.CharEnd)
+	}
+	// The offsets must be a valid, exact slice of the title itself.
+	if title[titlePassage.CharStart:titlePassage.CharEnd] != titlePassage.Text {
+		t.Fatalf("title[%d:%d] = %q, want the stored text %q",
+			titlePassage.CharStart, titlePassage.CharEnd, title[titlePassage.CharStart:titlePassage.CharEnd], titlePassage.Text)
+	}
+
+	// And content passages must be valid, exact slices of the content's
+	// OWN extracted plaintext -- not the title.
+	contentText := passage.ExtractText(contentHTML)
+	for _, p := range passages[1:] {
+		if p.CharEnd > len(contentText) {
+			t.Fatalf("content passage offsets [%d,%d) exceed the extracted plaintext's length %d", p.CharStart, p.CharEnd, len(contentText))
+		}
+		if contentText[p.CharStart:p.CharEnd] != p.Text {
+			t.Fatalf("content plaintext[%d:%d] = %q, want the stored text %q",
+				p.CharStart, p.CharEnd, contentText[p.CharStart:p.CharEnd], p.Text)
+		}
+	}
+}
+
+// 1d. (Task 1.5) An entry whose body has no usable text at all (e.g. a
+// link post with only a script tag) still indexes -- by its title alone --
+// rather than being skipped outright, now that the title carries its own
+// searchable passage.
+func TestIndexEntryTitleOnlyEntryWithNoUsableBodyIndexesJustTheTitle(t *testing.T) {
+	s, db := testEnv(t)
+	const title = "Headline Only Post"
+	entryID := createTestEntryWithTitle(t, db, "index-title-only", title,
+		"<script>var x = 1;</script><style>p { color: red; }</style>")
+
+	fe := &fakeEmbedder{}
+	idx := New(s, fe)
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry failed: %v", err)
+	}
+
+	passages := passagesFor(t, db, entryID)
+	if len(passages) != 1 {
+		t.Fatalf("expected exactly 1 passage (the title), got %d: %+v", len(passages), passages)
+	}
+	if passages[0].Source != "title" || passages[0].Text != title {
+		t.Fatalf("expected the sole passage to be the title, got %+v", passages[0])
+	}
+	if fe.calls.Load() == 0 {
+		t.Fatal("expected the embedder to be called for the title passage")
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM search.entry_index_state WHERE entry_id=$1`, entryID).Scan(&status); err != nil {
+		t.Fatalf("unable to read index state: %v", err)
+	}
+	if status != "ok" {
+		t.Fatalf("expected status 'ok' for a title-only entry, got %q", status)
+	}
+}
+
+// 1e. (Task 1.5) Re-indexing after both the title and the content change
+// replaces both kinds of passage atomically -- no orphaned title or body
+// passage from the previous version survives.
+func TestIndexEntryReindexReplacesTitleAndContentPassagesAtomically(t *testing.T) {
+	s, db := testEnv(t)
+	entryID := createTestEntryWithTitle(t, db, "index-title-reindex", "Original Title",
+		"<p>Original body text.</p>")
+
+	fe := &fakeEmbedder{}
+	idx := New(s, fe)
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("first IndexEntry failed: %v", err)
+	}
+
+	updateEntryTitleAndContent(t, db, entryID, "New Title", "<p>New body text entirely.</p>")
+
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("second IndexEntry failed: %v", err)
+	}
+
+	passages := passagesFor(t, db, entryID)
+	if len(passages) < 2 {
+		t.Fatalf("expected a title passage and at least one content passage after re-indexing, got %d", len(passages))
+	}
+	for _, p := range passages {
+		if strings.Contains(p.Text, "Original") {
+			t.Fatalf("found an orphaned passage from before the edit: %+v", p)
+		}
+	}
+	if passages[0].Source != "title" || passages[0].Text != "New Title" {
+		t.Fatalf("expected the title passage to be updated to 'New Title', got %+v", passages[0])
+	}
+}
+
+// 2. An entry with no usable text ANYWHERE -- no title and no usable body
+// -- is skipped: no passages written, status='skipped', reason non-empty,
+// and a second IndexEntry call does not re-embed it; the entry also stays
+// out of the pending set (not retried). (Task 1.5 changed what "no usable
+// text" means: an entry with a usable title but no usable body no longer
+// takes this path -- see TestIndexEntryTitleOnlyEntryWithNoUsableBody...
+// below -- so this fixture must have an empty title too, to still
+// genuinely exercise "nothing to index at all".)
 func TestIndexEntryWithNoUsableTextIsSkipped(t *testing.T) {
 	s, db := testEnv(t)
-	entryID := createTestEntry(t, db, "index-empty",
+	entryID := createTestEntryWithTitle(t, db, "index-empty", "",
 		"<script>var x = 1;</script><style>p { color: red; }</style>")
 
 	fe := &fakeEmbedder{}
@@ -278,9 +553,12 @@ func TestIndexEntryWithNoUsableTextIsSkipped(t *testing.T) {
 	}
 }
 
-// 3. Re-indexing is atomic: index an entry, change its content, re-index,
-// and the passage set matches the new content exactly — no orphans from the
-// first pass.
+// 3. Re-indexing is atomic: index an entry, change its content (title held
+// fixed), re-index, and the passage set matches the new content exactly —
+// no orphans from the first pass. The fixture's title ("Test entry", from
+// createTestEntry) is unchanged across the edit, so it is expected to
+// still appear as the title passage; only the source='content' passages
+// are checked against the old/new body text.
 func TestIndexEntryReplacesPassagesOnContentChange(t *testing.T) {
 	s, db := testEnv(t)
 	entryID := createTestEntry(t, db, "index-reindex",
@@ -300,24 +578,22 @@ func TestIndexEntryReplacesPassagesOnContentChange(t *testing.T) {
 		t.Fatalf("second IndexEntry failed: %v", err)
 	}
 
-	rows, err := db.Query(`SELECT text FROM search.passages WHERE entry_id=$1 ORDER BY ordinal`, entryID)
-	if err != nil {
-		t.Fatalf("unable to query passages: %v", err)
-	}
-	defer rows.Close()
-
-	var texts []string
-	for rows.Next() {
-		var text string
-		if err := rows.Scan(&text); err != nil {
-			t.Fatalf("unable to scan passage: %v", err)
-		}
-		texts = append(texts, text)
-	}
-	if len(texts) == 0 {
+	passages := passagesFor(t, db, entryID)
+	if len(passages) == 0 {
 		t.Fatal("expected passages after re-indexing")
 	}
-	for _, text := range texts {
+
+	var bodyTexts []string
+	for _, p := range passages {
+		if p.Source == "title" {
+			continue
+		}
+		bodyTexts = append(bodyTexts, p.Text)
+	}
+	if len(bodyTexts) == 0 {
+		t.Fatal("expected body passages after re-indexing")
+	}
+	for _, text := range bodyTexts {
 		if strings.Contains(text, "Original content") {
 			t.Fatalf("found an orphaned passage from the first pass: %q", text)
 		}

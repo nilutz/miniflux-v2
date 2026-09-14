@@ -66,6 +66,29 @@ var migrations = [...]func(tx *sql.Tx) error{
 		`)
 		return err
 	},
+	func(tx *sql.Tx) error {
+		// Task 1.5: entry titles are now indexed as their own passages
+		// (ordinal 0, source='title'), alongside body passages
+		// (source='content'). DEFAULT 'content' backfills every existing
+		// row correctly with no data migration of its own: every passage
+		// written before this column existed is, definitionally, a body
+		// passage.
+		//
+		// passages_bm25_idx deliberately still covers only (id, text), not
+		// (id, text, source): no BM25 query today filters or weights by
+		// source, so widening it now would be paying an index-size and
+		// reindex cost against a need Task 2 hasn't shown yet. Filtering
+		// by source, if it turns out to matter, can fall back to the same
+		// "overfetch from BM25, then filter in the join" pattern already
+		// used for feed/date/status filters -- or the index can be
+		// rebuilt to include it later; either is cheap at this corpus's
+		// current size. See the task 1.5 report for the full trade-off.
+		_, err := tx.Exec(`
+			ALTER TABLE search.passages
+				ADD COLUMN source text NOT NULL DEFAULT 'content';
+		`)
+		return err
+	},
 }
 
 var schemaVersion = len(migrations)
