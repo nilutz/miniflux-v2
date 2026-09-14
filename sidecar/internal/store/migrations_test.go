@@ -69,6 +69,32 @@ func TestMigrateInstallsBothExtensions(t *testing.T) {
 	}
 }
 
+func TestMigrateCreatesIndexes(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	// These are built in migration 2, separately from the table in
+	// migration 1, precisely so a reindex can drop and rebuild them
+	// without touching the data — verify they actually exist.
+	for _, index := range []string{"passages_embedding_idx", "passages_bm25_idx"} {
+		var exists bool
+		err := s.db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM pg_indexes
+				WHERE schemaname='search' AND tablename='passages' AND indexname=$1
+			)`, index).Scan(&exists)
+		if err != nil {
+			t.Fatalf("unable to inspect indexes: %v", err)
+		}
+		if !exists {
+			t.Fatalf("expected index search.%s on passages to exist", index)
+		}
+	}
+}
+
 func TestMigrateIsIdempotent(t *testing.T) {
 	s := testStore(t)
 

@@ -5,6 +5,7 @@ package store // import "miniflux.app/v2/sidecar/internal/store"
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -15,8 +16,14 @@ import (
 // only, never reorder.
 var migrations = [...]func(tx *sql.Tx) error{
 	func(tx *sql.Tx) error {
+		// vector, its column type, and its operator class are all fully
+		// schema-qualified so this migration never depends on the
+		// connection's search_path (some hardened Postgres installs narrow
+		// the default search_path to exclude public). pg_search's own
+		// control file always installs it into the "paradedb" schema
+		// regardless of search_path, so it needs no such qualification.
 		_, err := tx.Exec(`
-			CREATE EXTENSION IF NOT EXISTS vector;
+			CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;
 			CREATE EXTENSION IF NOT EXISTS pg_search;
 
 			CREATE TABLE search.passages (
@@ -26,7 +33,7 @@ var migrations = [...]func(tx *sql.Tx) error{
 				text       text NOT NULL,
 				char_start int NOT NULL,
 				char_end   int NOT NULL,
-				embedding  vector(384),
+				embedding  public.vector(384),
 				UNIQUE (entry_id, ordinal)
 			);
 
@@ -47,10 +54,11 @@ var migrations = [...]func(tx *sql.Tx) error{
 	},
 	func(tx *sql.Tx) error {
 		// Built separately from the table so a reindex can drop and rebuild
-		// them without touching the data.
+		// them without touching the data. vector_cosine_ops is schema-
+		// qualified for the same search_path-independence reason as above.
 		_, err := tx.Exec(`
 			CREATE INDEX passages_embedding_idx
-				ON search.passages USING hnsw (embedding vector_cosine_ops);
+				ON search.passages USING hnsw (embedding public.vector_cosine_ops);
 
 			CREATE INDEX passages_bm25_idx
 				ON search.passages USING bm25 (id, text)
@@ -74,7 +82,9 @@ func (s *Store) Migrate() error {
 	}
 
 	var currentVersion int
-	s.db.QueryRow(`SELECT version FROM search.schema_version`).Scan(&currentVersion)
+	if err := s.db.QueryRow(`SELECT version FROM search.schema_version`).Scan(&currentVersion); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("store: unable to read schema version: %w", err)
+	}
 
 	slog.Info("Running sidecar migrations",
 		slog.Int("current_version", currentVersion),
