@@ -642,6 +642,15 @@ Minimum interval in minutes for the round robin scheduler\&.
 .br
 Default is 60 minutes\&.
 .TP
+.B SEARCH_SIDECAR_URL
+Base URL of the search sidecar service (e.g\&. \fBhttp://127.0.0.1:8081\fR)
+used by the search page\&. When unset, the search page uses Miniflux's
+built-in full-text search unchanged; it also falls back to it for a
+single request whenever the sidecar cannot be reached or returns an
+error\&.
+.br
+Default is empty (disabled)\&.
+.TP
 .B TRUSTED_REVERSE_PROXY_NETWORKS
 A comma-separated list of networks (CIDR notation) allowed to use the proxy
 authentication header, \fBX-Forwarded-For\fR,

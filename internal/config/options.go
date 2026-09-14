@@ -574,6 +574,16 @@ func NewConfigOptions() *configOptions {
 					return validateGreaterOrEqualThan(rawValue, 1)
 				},
 			},
+			// SEARCH_SIDECAR_URL is empty by default: the search page
+			// (internal/ui/search.go) falls back to the pre-existing
+			// WithSearchQuery path unchanged whenever it is unset, which
+			// is what makes this fork safe to merge before any sidecar
+			// is deployed (docs/superpowers/specs/2026-09-12-miniflux-search-design.md §8.2-8.3).
+			"SEARCH_SIDECAR_URL": {
+				parsedStringValue: "",
+				rawValue:          "",
+				valueType:         stringType,
+			},
 			"TRUSTED_REVERSE_PROXY_NETWORKS": {
 				parsedStringList: []string{},
 				rawValue:         "",
@@ -997,6 +1007,14 @@ func (c *configOptions) SchedulerRoundRobinMaxInterval() time.Duration {
 
 func (c *configOptions) SchedulerRoundRobinMinInterval() time.Duration {
 	return c.options["SCHEDULER_ROUND_ROBIN_MIN_INTERVAL"].parsedDuration
+}
+
+// SearchSidecarURL returns the base URL of the search sidecar service
+// used by the search page. Empty by default, which disables the feature
+// and leaves search behaving exactly as it does without this option set
+// — see this key's own comment in the options map above.
+func (c *configOptions) SearchSidecarURL() string {
+	return c.options["SEARCH_SIDECAR_URL"].parsedStringValue
 }
 
 func (c *configOptions) TrustedReverseProxyNetworks() []string {
