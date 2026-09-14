@@ -60,17 +60,26 @@ type BackfillController interface {
 	ApplyConfig(indexer.ConfigPatch) (indexer.RuntimeConfig, error)
 }
 
-// Server is the sidecar's status and admin HTTP server (spec §9.4).
+// Server is the sidecar's status and admin HTTP server (spec §9.4), and,
+// since task 7, its read-only search HTTP API (spec §6.3-6.4, §7).
 type Server struct {
 	backfill BackfillController
+	searcher SearchService
+	entries  EntryLookup
 	tmpl     *template.Template
 	mux      *http.ServeMux
 }
 
-// New builds a Server over backfill. It parses the embedded status page
-// template eagerly so a malformed template fails at startup, not on the
-// first request.
-func New(backfill BackfillController) (*Server, error) {
+// New builds a Server over backfill (control endpoints), searcher
+// (GET /api/search and /api/similar) and entries (loaded per result to
+// build a highlighted search.BuildSnippet — see search_handlers.go). It
+// parses the embedded status page template eagerly so a malformed
+// template fails at startup, not on the first request.
+//
+// searcher and entries may be nil in tests that never exercise the search
+// routes (see server_test.go, which only cares about the backfill control
+// endpoints); cmd/sidecar always supplies both.
+func New(backfill BackfillController, searcher SearchService, entries EntryLookup) (*Server, error) {
 	tmpl, err := template.New("status.html").Funcs(template.FuncMap{
 		"comma": commaInt,
 	}).ParseFS(templateFS, "templates/status.html")
@@ -78,7 +87,7 @@ func New(backfill BackfillController) (*Server, error) {
 		return nil, fmt.Errorf("web: unable to parse status template: %w", err)
 	}
 
-	s := &Server{backfill: backfill, tmpl: tmpl}
+	s := &Server{backfill: backfill, searcher: searcher, entries: entries, tmpl: tmpl}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -87,6 +96,13 @@ func New(backfill BackfillController) (*Server, error) {
 	mux.HandleFunc("POST /api/backfill/resume", s.handleResume)
 	mux.HandleFunc("GET /api/backfill/config", s.handleGetConfig)
 	mux.HandleFunc("POST /api/backfill/config", s.handleSetConfig)
+
+	// GET /api/search and GET /api/similar (search_handlers.go) do NOT
+	// carry sameOriginOrNoOrigin's check — see that function's own doc
+	// comment on handleSearch/handleSimilar for why a read-only endpoint
+	// on this loopback-bound server does not need it.
+	mux.HandleFunc("GET /api/search", s.handleSearch)
+	mux.HandleFunc("GET /api/similar", s.handleSimilar)
 	s.mux = mux
 
 	return s, nil

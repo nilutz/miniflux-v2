@@ -31,6 +31,7 @@ import (
 
 	"miniflux.app/v2/sidecar/internal/embed/onnx"
 	"miniflux.app/v2/sidecar/internal/indexer"
+	"miniflux.app/v2/sidecar/internal/search"
 	"miniflux.app/v2/sidecar/internal/store"
 	"miniflux.app/v2/sidecar/internal/web"
 )
@@ -252,7 +253,16 @@ func run() error {
 		slog.Float64("idle_resweep_interval_seconds", effective.IdleResweepIntervalSecs),
 	)
 
-	adminServer, err := web.New(backfill)
+	// The Searcher is built over the same *store.Store as the indexing
+	// lanes, with the same embedder passed to Semantic/Hybrid/Passages
+	// query embedding (spec §6.5) that the lanes use for passage
+	// embedding — one ONNX Runtime session shared by every query and
+	// index path, not a second one stood up for search. s itself also
+	// satisfies web.EntryLookup (EntryForIndexing, EntryIndexState) with
+	// no adaptation, so it is passed to web.New a second time for that.
+	searcher := search.NewSearcher(s, search.WithEmbedder(embedder))
+
+	adminServer, err := web.New(backfill, searcher, s)
 	if err != nil {
 		return fmt.Errorf("sidecar: unable to build admin server: %w", err)
 	}

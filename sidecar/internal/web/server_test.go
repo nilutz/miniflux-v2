@@ -100,7 +100,10 @@ func (f *fakeBackfill) appliedPatches() []indexer.ConfigPatch {
 
 func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	t.Helper()
-	srv, err := New(fb)
+	// nil, nil: these tests exercise only the backfill control endpoints,
+	// never GET /api/search or /api/similar (see search_handlers_test.go
+	// for those, with their own fakeSearcher/fakeEntries).
+	srv, err := New(fb, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
