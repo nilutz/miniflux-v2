@@ -88,9 +88,37 @@ func (f Filters) empty() bool {
 // that also matched, best-first, including Best itself at index 0 — kept
 // for callers that need the full per-entry set rather than only the one
 // chosen as the snippet (see aggregate in fuse.go).
+//
+// DO NOT SORT, THRESHOLD, OR COMPARE Score ACROSS MODES. Score is
+// copied verbatim from Best.Score, and Best.Score's units AND ITS
+// DIRECTION both depend on which Mode produced the result:
+//
+//	Mode          Score is                       Better is
+//	------------  -----------------------------  -----------
+//	ModeKeyword   paradedb.score() (BM25)        LARGER
+//	ModeSemantic  cosine distance, 0..2          SMALLER
+//	ModeHybrid    RRF fused score, ~0..2/(k+1)   LARGER
+//
+// So `sort.Slice(hits, byScoreDescending)` is correct for two of the
+// three modes and silently inverts the ranking for the third, and a
+// threshold like `Score > 0.5` means three unrelated things. The results
+// Search returns are ALREADY in the correct order for their mode —
+// aggregate (fuse.go) preserves the order of the ranked passage list it
+// is given, whichever direction that list was sorted in — so a caller
+// should treat slice position as the ranking and Score as a display and
+// debugging value only.
+//
+// PassageHit's own comment has carried this warning since task 2;
+// EntryHit's did not, which left the entry-level type — the one an HTTP
+// handler actually serialises — as the easy place to get it wrong.
 type EntryHit struct {
-	EntryID  int64
-	Score    float64
+	EntryID int64
+
+	// Score is Best.Score verbatim. Its direction is mode-dependent:
+	// see the type's own comment above before sorting or thresholding
+	// on it.
+	Score float64
+
 	Best     PassageHit
 	Passages []PassageHit
 }

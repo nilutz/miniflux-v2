@@ -15,13 +15,34 @@ import (
 )
 
 // candidateMultiplier is how many times limit's worth of candidates are
-// pulled from passages_bm25_idx before Filters is applied. The index
-// covers only (id, text) — it cannot push a feed/category/date/status
-// predicate into its own scan — so a candidate set that already matches
-// the final limit exactly would come back short after filtering removes
-// some of it. 5x is generous enough that a filter excluding up to 80% of
-// an unfiltered ranking still leaves a full page of results, without
+// pulled from passages_bm25_idx (and, in semantic.go/similar.go, from
+// passages_embedding_idx) before Filters is applied. The index covers
+// only (id, text) — it cannot push a feed/category/date/status predicate
+// into its own scan — so a candidate set that already matches the final
+// limit exactly would come back short after filtering removes some of
+// it. 5x is generous enough that a filter excluding up to 80% of an
+// unfiltered ranking still leaves a full page of results, without
 // pulling in enough of the corpus's long BM25 tail to matter for latency.
+//
+// BEWARE THE AMPLIFICATION. This is the inner of two independent 5x
+// multipliers, and they COMPOUND. A caller's Request.Limit is multiplied
+// by searchCandidateMultiplier (fuse.go, 5x) at the fusion boundary
+// before it is handed to Lexical/Semantic as *their* limit, which then
+// multiplies it by candidateMultiplier (5x) again to size its own index
+// scan. The total amplification from Request.Limit to rows asked of an
+// index is therefore 25x, not 5x:
+//
+//	Request.Limit=10  ->  50 per channel  ->  250 index candidates
+//	Request.Limit=40  ->  200 per channel ->  1000 index candidates
+//	Request.Limit=100 -> 500 per channel  -> 2500 index candidates (clamped)
+//
+// Each multiplier's comment used to describe only its own layer, which
+// is exactly how a Critical went unnoticed for a full review cycle: the
+// semantic path feeds this product into `SET LOCAL hnsw.ef_search`,
+// which pgvector caps at 1000 (see maxVectorCandidates in semantic.go),
+// so every hybrid search asking for more than 40 results failed
+// outright. Any change to either constant must be reasoned about as a
+// change to the product.
 const candidateMultiplier = 5
 
 // minCandidates is a floor under candidateMultiplier*limit so that a
@@ -33,6 +54,14 @@ const minCandidates = 50
 // ask ParadeDB to rank and return, regardless of how large limit or
 // candidateMultiplier's product gets — a defensive ceiling against a
 // caller-supplied limit turning one query into a full-table scan.
+//
+// This ceiling is LEXICAL-ONLY and is purely self-imposed: ParadeDB has
+// no server-side limit of its own that 2000 corresponds to. The vector
+// path must NOT reuse it — pgvector imposes a real, database-enforced
+// ceiling on hnsw.ef_search that is half this value, so semantic.go and
+// similar.go clamp against maxVectorCandidates instead. Reusing this
+// constant there is what caused the Critical documented on
+// candidateMultiplier above.
 const maxCandidates = 2000
 
 // Searcher runs retrieval queries against search.passages and

@@ -31,9 +31,17 @@ const rrfK = 60
 // alone; one present in both sums both contributions, which is what lets
 // cross-channel agreement outrank a strong showing in a single channel
 // (TestRRFRewardsAppearingInBothLists). Either argument may be nil or
-// empty -- ModeKeyword and ModeSemantic (search.go) fuse a real list
-// against nothing, which degenerates to that list's own ranking with a
-// rewritten Score.
+// empty, in which case fusion degenerates to the other list's own
+// ranking with a rewritten Score.
+//
+// No production caller relies on that degenerate case. An earlier version
+// of this comment claimed ModeKeyword and ModeSemantic "fuse a real list
+// against nothing"; they do not, and never did -- both aggregate their
+// single channel's raw hits directly (see Search below) and never call
+// Fuse at all. The comment described a design that was not built, which
+// is worse than no comment: it sent a reader looking for the mode
+// dispatch in the wrong file. Fuse has exactly two callers, ModeHybrid
+// and ModePassages, and both always pass two real lists.
 //
 // The returned hits are the union of both inputs by PassageID, ordered by
 // fused score descending, each carrying that fused score as its own Score
@@ -123,14 +131,39 @@ func aggregate(hits []PassageHit) []EntryHit {
 const defaultSearchLimit = 10
 
 // searchCandidateMultiplier is how many times Request.Limit's worth of
-// candidates ModeHybrid and ModePassages retrieve from EACH channel
-// (lexical and semantic) before fusing. Retrieving only Limit's worth
-// from each channel would silently starve Fuse: a passage strong in only
-// one channel needs that channel's own ranking to reach deep enough for
-// it to appear at all, or it never gets the chance to be rewarded (or
-// even considered) by fusion. This mirrors candidateMultiplier's own
-// reasoning in lexical.go, applied one layer up at the fusion boundary
-// rather than the post-retrieval filter boundary.
+// passages EVERY mode retrieves before aggregating or fusing.
+//
+// Two distinct things need it, for two distinct reasons:
+//
+//   - ModeHybrid and ModePassages retrieve this many from EACH channel
+//     before fusing. Retrieving only Limit's worth from each would
+//     silently starve Fuse: a passage strong in only one channel needs
+//     that channel's own ranking to reach deep enough for it to appear
+//     at all, or it never gets the chance to be rewarded (or even
+//     considered) by fusion.
+//
+//   - ModeKeyword and ModeSemantic retrieve this many before
+//     aggregating. Retrieval is passage-level and results are
+//     entry-level, so several passages of one entry collapse into a
+//     single EntryHit: N retrieved passages yield at most N entries and
+//     routinely far fewer. Asking retrieval for exactly Limit passages
+//     therefore cannot fill Limit entries except in the degenerate case
+//     where no entry matches twice.
+//
+// The second reason was missed originally, and the cost was not merely a
+// user-visible "ask for ten, get three" bug: it structurally confounded
+// the task 4 evaluation, which compared a full-fat ModeHybrid against
+// ModeKeyword and ModeSemantic baselines that could only fill three or
+// four of their ten slots. Applying one multiplier uniformly across all
+// four modes is what makes the modes comparable at all.
+//
+// BEWARE THE AMPLIFICATION: this multiplier COMPOUNDS with
+// candidateMultiplier (lexical.go, also 5x), which Lexical and Semantic
+// apply again to whatever limit they are handed here. One Request.Limit
+// becomes 25x that many rows asked of an index. See candidateMultiplier's
+// own comment for the worked numbers and for the Critical that product
+// caused in the semantic path, where it is bounded by pgvector's
+// hnsw.ef_search ceiling (maxVectorCandidates, semantic.go).
 const searchCandidateMultiplier = 5
 
 // Search runs q against this Searcher's retrieval, dispatching on q.Mode
@@ -139,6 +172,14 @@ const searchCandidateMultiplier = 5
 // both channels with Fuse before aggregating; ModePassages runs the same
 // fused retrieval as ModeHybrid but returns a flat, passage-first ranked
 // list instead (spec §6.4's "extractive answer to RAG").
+//
+// Every mode retrieves searchCandidateMultiplier * q.Limit passages
+// before aggregating or fusing, so every mode can actually return
+// q.Limit entries when the corpus can supply them. This uniformity is
+// load-bearing twice over: it is what makes "ask for ten, get ten" true
+// in the single-channel modes, and it is what makes a comparison between
+// the modes (the recall evaluation) measure retrieval quality rather
+// than measuring which mode was allowed to fill its result page.
 //
 // A zero or negative q.Limit is treated as defaultSearchLimit rather than
 // returning nothing -- unlike Lexical/Semantic's own zero-limit handling,
@@ -150,24 +191,27 @@ func (s *Searcher) Search(ctx context.Context, q Request) (Response, error) {
 		limit = defaultSearchLimit
 	}
 
+	// Every mode over-fetches by the same factor before aggregating or
+	// fusing, because every mode retrieves passages and (except
+	// ModePassages) reports entries. See searchCandidateMultiplier.
+	candidates := limit * searchCandidateMultiplier
+
 	switch q.Mode {
 	case ModeKeyword:
-		hits, err := s.Lexical(ctx, q.Query, limit, q.Filters)
+		hits, err := s.Lexical(ctx, q.Query, candidates, q.Filters)
 		if err != nil {
 			return Response{}, fmt.Errorf("search: keyword search failed: %w", err)
 		}
 		return Response{Mode: q.Mode, Entries: truncateEntries(aggregate(hits), limit)}, nil
 
 	case ModeSemantic:
-		hits, err := s.Semantic(ctx, q.Query, limit, q.Filters)
+		hits, err := s.Semantic(ctx, q.Query, candidates, q.Filters)
 		if err != nil {
 			return Response{}, fmt.Errorf("search: semantic search failed: %w", err)
 		}
 		return Response{Mode: q.Mode, Entries: truncateEntries(aggregate(hits), limit)}, nil
 
 	case ModeHybrid, ModePassages:
-		candidates := limit * searchCandidateMultiplier
-
 		lexHits, err := s.Lexical(ctx, q.Query, candidates, q.Filters)
 		if err != nil {
 			return Response{}, fmt.Errorf("search: hybrid search's lexical half failed: %w", err)

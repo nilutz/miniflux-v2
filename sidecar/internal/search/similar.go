@@ -201,9 +201,11 @@ func selectSeedIndices(n, maxSeeds int) []int {
 // excluding every passage belonging to excludeEntryID, applying f after
 // retrieval, and returns up to limit hits ordered best-first. Its SQL
 // shape mirrors Semantic's own (semantic.go) -- the same candidates CTE,
-// the same over-fetch/clamp against candidateMultiplier/minCandidates/
-// maxCandidates, the same SET LOCAL hnsw.ef_search ahead of the query it
-// configures, for the identical reason documented on Semantic. It is
+// the same over-fetch/clamp (vectorCandidates, semantic.go — which
+// ceilings the count at pgvector's own hnsw.ef_search maximum of 1000,
+// NOT at lexical.go's self-imposed maxCandidates of 2000), the same SET
+// LOCAL hnsw.ef_search ahead of the query it configures, for the
+// identical reason documented on Semantic. It is
 // kept separate from Semantic rather than sharing its code because the
 // two differ in the one place that matters here: this method's query
 // vector comes from an already-indexed passage, not from embedding a
@@ -224,13 +226,7 @@ func (s *Searcher) nearestExcludingEntry(ctx context.Context, vec []float32, lim
 		return nil, nil
 	}
 
-	candidates := limit * candidateMultiplier
-	if candidates < minCandidates {
-		candidates = minCandidates
-	}
-	if candidates > maxCandidates {
-		candidates = maxCandidates
-	}
+	candidates := vectorCandidates(limit)
 
 	var b strings.Builder
 	args := []any{vectorLiteral(vec), excludeEntryID, candidates}

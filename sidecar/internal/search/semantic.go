@@ -31,6 +31,88 @@ type txBeginner interface {
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 }
 
+// maxEfSearch is pgvector's own hard ceiling on hnsw.ef_search, read
+// directly off the live database rather than assumed:
+//
+//	SELECT name, min_val, max_val FROM pg_settings WHERE name = 'hnsw.ef_search';
+//	      name       | min_val | max_val
+//	-----------------+---------+---------
+//	 hnsw.ef_search  | 1       | 1000
+//
+// (pgvector 0.8.4.) Passing anything above it to SET LOCAL fails the
+// statement outright — `ERROR: 1005 is outside the valid range for
+// parameter "hnsw.ef_search" (1 .. 1000)` — which is why this ceiling is
+// a constant the candidate arithmetic is clamped against rather than a
+// value the code hopes it never reaches.
+//
+// There is a second, nastier reason this clamp exists, and it is the one
+// worth remembering. hnsw.ef_search only becomes a real, range-checked
+// GUC once pgvector's module has actually been loaded into the backend.
+// On a freshly handed-out pooled connection it is still a *placeholder*
+// GUC, and PostgreSQL accepts any value for a placeholder. Verified
+// against this database:
+//
+//	BEGIN;
+//	SET LOCAL hnsw.ef_search = 1005;      -- WARNING, not ERROR; "SET" returned
+//	SELECT current_setting('hnsw.ef_search');   -- '1005'
+//	SELECT count(*) FROM search.passages;       -- loads the module
+//	SELECT current_setting('hnsw.ef_search');   -- '40' — silently discarded
+//
+// lib/pq surfaces a WARNING only through a NoticeHandler, and none is
+// configured on this driver, so on a cold connection an out-of-range
+// value produced no error at all: the setting was quietly reverted to
+// the default of 40 mid-query and the scan truncated to ~40 rows. That
+// is precisely the silent-truncation failure the SET LOCAL work exists
+// to eliminate, re-entering through a different door. An in-range value
+// has no such problem — it survives the module load intact (verified the
+// same way with 1000) — so clamping is a complete fix for both variants
+// and no NoticeHandler is required.
+const maxEfSearch = 1000
+
+// maxVectorCandidates caps how many candidates a single vector retrieval
+// (Semantic, or similar.go's nearestExcludingEntry) will ask
+// passages_embedding_idx for. It is deliberately equal to maxEfSearch
+// and deliberately NOT lexical.go's maxCandidates.
+//
+// The two must agree because they describe one thing from two sides: the
+// candidates CTE's LIMIT is how many rows the index scan is asked to
+// produce, and hnsw.ef_search is how wide that scan searches in order to
+// produce them. Letting the LIMIT exceed what ef_search can cover is the
+// original silent-truncation bug (the scan just returns fewer rows, with
+// no error); clamping them to the same number keeps the request and the
+// search width honest with each other at every limit.
+//
+// Consequence worth knowing at the call site: above a per-channel limit
+// of 200, the effective over-fetch ratio degrades below
+// candidateMultiplier's nominal 5x (at limit 500 it is 2x, at 1000 it is
+// 1x), so a Filters predicate narrow enough to exclude most of the
+// unfiltered ranking can under-fill a very large page. That is a
+// deliberate trade against the alternative — asking the index for more
+// rows than its search width can find, and silently getting fewer.
+const maxVectorCandidates = maxEfSearch
+
+// vectorCandidates returns how many candidates a vector retrieval should
+// ask passages_embedding_idx for, given the caller's own limit: limit
+// over-fetched by candidateMultiplier, floored at minCandidates so a
+// tiny limit still leaves a narrow filter something to work with, and
+// ceilinged at maxVectorCandidates so the value can always be handed
+// verbatim to SET LOCAL hnsw.ef_search.
+//
+// Semantic and nearestExcludingEntry share this rather than repeating
+// the three-line clamp, so the invariant "the candidate LIMIT and
+// hnsw.ef_search are the same number, and that number is always within
+// pgvector's range" holds in exactly one place instead of two.
+func vectorCandidates(limit int) int {
+	candidates := limit * candidateMultiplier
+	if candidates < minCandidates {
+		candidates = minCandidates
+	}
+	if candidates > maxVectorCandidates {
+		candidates = maxVectorCandidates
+	}
+	return candidates
+}
+
 // Semantic ranks passages by cosine distance (embedding <=> query vector,
 // public.vector_cosine_ops — the same operator class passages_embedding_idx
 // is built on) against query's own embedding, applying f after retrieval,
@@ -79,13 +161,7 @@ func (s *Searcher) Semantic(ctx context.Context, query string, limit int, f Filt
 		return nil, fmt.Errorf("search: unable to embed query: %w", err)
 	}
 
-	candidates := limit * candidateMultiplier
-	if candidates < minCandidates {
-		candidates = minCandidates
-	}
-	if candidates > maxCandidates {
-		candidates = maxCandidates
-	}
+	candidates := vectorCandidates(limit)
 
 	var b strings.Builder
 	args := []any{vectorLiteral(vec), candidates}
@@ -131,7 +207,9 @@ func (s *Searcher) Semantic(ctx context.Context, query string, limit int, f Filt
 	defer tx.Rollback()
 
 	// hnsw.ef_search (pgvector's HNSW search-time candidate list, default
-	// 40) must be raised to at least candidates — the LIMIT the query
+	// 40) must be raised to at least candidates — and never above
+	// maxEfSearch, which vectorCandidates already guarantees for the
+	// value used here — the LIMIT the query
 	// below asks its own index scan for — or the scan silently returns
 	// fewer rows than requested, not an error, just quietly short. This
 	// has to be its own statement, executed strictly before the query it
