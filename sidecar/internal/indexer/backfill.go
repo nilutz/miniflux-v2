@@ -51,10 +51,44 @@ const DefaultRemainingCountTTL = 45 * time.Second
 // still smoothing out one-off jitter.
 const throughputEWMAAlpha = 0.3
 
+// DefaultIdleResweepInterval is how long a drained lane waits before
+// sweeping the table again.
+//
+// A drained lane must keep sweeping, because nothing else re-examines
+// entries below the live lane's cursor. RunLive only ever looks at
+// id > lastSeen, seeded from the highest entry id that existed at startup
+// — so once Backfill.Start returned on a clean sweep, spec §10's "entry
+// content changed -> content_hash mismatch triggers re-index" held only
+// for entries above that cursor, or until the next process restart. That
+// is not hypothetical: P0's scrape-backfill CLI rewrites entries.content
+// for precisely the old entries this excluded, so the sidecar would index
+// them from their RSS excerpts, report Done, and never notice when the
+// real article text landed underneath (whole-branch review, finding 3).
+//
+// 15 minutes is chosen against the cost of the sweep itself, not against
+// any latency requirement: a drained sweep is a single PendingEntryIDs
+// query returning nothing, so this is four cheap queries an hour, while
+// still being far longer than PollInterval so a genuine drain cannot spin
+// hot.
+const DefaultIdleResweepInterval = 15 * time.Minute
+
 // BackfillConfig configures a Backfill lane.
 type BackfillConfig struct {
 	PageSize     int           // pending entry ids fetched per page/batch
 	PollInterval time.Duration // wait between checks while idle (schedule window closed, a fetch error, or outstanding retries cooling down)
+
+	// IdleResweepInterval is how long to wait, after a sweep that found
+	// nothing left to do, before sweeping again. Ignored entirely when
+	// StopWhenDrained is set.
+	IdleResweepInterval time.Duration
+
+	// StopWhenDrained makes Start return once a sweep completes with
+	// nothing pending and nothing outstanding, instead of idling and
+	// sweeping again. Production leaves this false — see
+	// DefaultIdleResweepInterval for why a lane that stops is a
+	// correctness problem, not merely an idle one. Tests set it so a
+	// drained lane is observable as a returning call.
+	StopWhenDrained bool
 }
 
 func (cfg BackfillConfig) withDefaults() BackfillConfig {
@@ -63,6 +97,9 @@ func (cfg BackfillConfig) withDefaults() BackfillConfig {
 	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = DefaultBackfillPollInterval
+	}
+	if cfg.IdleResweepInterval <= 0 {
+		cfg.IdleResweepInterval = DefaultIdleResweepInterval
 	}
 	return cfg
 }
@@ -281,7 +318,14 @@ type Stats struct {
 	ThroughputPerSec float64 // exponentially-weighted recent rate (entries actually attempted per second) -- reflects current speed, not a lifetime average
 
 	Paused bool // true between Pause() and the matching Resume()
-	Done   bool // true once a full sweep processed nothing at all, including no outstanding retries
+
+	// Done reports that the backlog is currently drained: the most recent
+	// full sweep found nothing pending and left nothing outstanding. It
+	// is not a terminal state — the lane keeps sweeping every
+	// IdleResweepInterval, and Done goes back to false as soon as a sweep
+	// finds work again (an edited entry, a newly scraped body, a fresh
+	// import). Only a lane configured with StopWhenDrained stops here.
+	Done bool
 }
 
 // Backfill is the throttled backfill lane (spec §9.1, §9.2): a worker pool
@@ -369,6 +413,16 @@ func (b *Backfill) SetPollInterval(d time.Duration) {
 	}
 }
 
+// SetIdleResweepInterval live-edits how long a drained lane waits before
+// sweeping again. Values <= 0 are ignored.
+func (b *Backfill) SetIdleResweepInterval(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if d > 0 {
+		b.cfg.IdleResweepInterval = d
+	}
+}
+
 func (b *Backfill) pageSize() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -379,6 +433,18 @@ func (b *Backfill) pollInterval() time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.cfg.PollInterval
+}
+
+func (b *Backfill) idleResweepInterval() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cfg.IdleResweepInterval
+}
+
+func (b *Backfill) stopWhenDrained() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cfg.StopWhenDrained
 }
 
 func (b *Backfill) boundStartAfter() int64 {
@@ -431,15 +497,20 @@ func (b *Backfill) waitWhilePaused(ctx context.Context) bool {
 }
 
 // Start runs the backfill lane: it pages through pending entry ids and
-// indexes them with a worker pool sized by the Controller, until either
-// ctx is cancelled or a full sweep finds no pending work left at all —
-// including no entries left to retry (see start's doc comment for what
-// "a full sweep" means). Draining the backlog to completion is this
-// lane's job — unlike the always-on live lane, "nothing left pending" is
-// an expected, successful way for it to stop, not an error to retry past.
-// It never idles forever waiting for new entries to arrive; that is
-// RunLive's job. Start returns nil in every case, mirroring RunLive:
-// cancellation is the expected way to stop it early, not a failure.
+// indexes them with a worker pool sized by the Controller, until ctx is
+// cancelled. A sweep that finds no pending work left at all — including
+// no entries left to retry (see start's doc comment for what "a full
+// sweep" means) — sets Stats().Done and then idles for
+// IdleResweepInterval before sweeping again; it does not return. Only a
+// lane configured with StopWhenDrained returns there.
+//
+// That it keeps sweeping is load-bearing, not tidiness: the live lane
+// only ever looks at ids above the highest one that existed when the
+// process started, so a drained lane that returned left everything below
+// that cursor with nothing watching it — and P0's scrape-backfill CLI
+// rewrites entries.content for exactly those old entries (see
+// DefaultIdleResweepInterval). Start returns nil in every case, mirroring
+// RunLive: cancellation is the expected way to stop it, not a failure.
 //
 // Start is not re-entrant: calling it while a previous call on the same
 // Backfill is still running returns an error immediately rather than
@@ -487,6 +558,11 @@ func (b *Backfill) Start(ctx context.Context) error {
 // its own backoff) is never pruned, only one the database has stopped
 // offering at all.
 //
+// A sweep that ends with nothing outstanding is the drained case: Done is
+// set, the lane waits IdleResweepInterval rather than pollInterval, and
+// then sweeps again from startAfter. Done is therefore a live flag rather
+// than a latch — the next sweep to find work clears it again.
+//
 // Resetting the cursor every pollInterval does not mean re-embedding
 // every outstanding entry every pollInterval, though: retryTracker gates
 // each entry's own next attempt behind its individual, escalating backoff
@@ -495,8 +571,8 @@ func (b *Backfill) Start(ctx context.Context) error {
 // pending therefore still causes repeated, cheap PendingEntryIDs queries
 // every pollInterval, but its embedder is called on a rapidly widening
 // schedule, and Stats().Failed stops climbing once its cause stops
-// changing. For a corpus containing an entry that fails forever, Start
-// legitimately never returns on its own and Stats().Done never becomes
+// changing. For a corpus containing an entry that fails forever, Stats().Done
+// never becomes
 // true — the accurate state of the world, not a bug: the backlog
 // genuinely never reaches zero while something in it is stuck.
 func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int64) error {
@@ -594,6 +670,11 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 			}
 
 			if len(ids) > 0 {
+				// A sweep that finds work is no longer drained. Done is
+				// now a live "is the backlog currently empty" flag, not
+				// a one-way latch, because the lane keeps sweeping past
+				// its first clean pass.
+				b.setDone(false)
 				b.batchAttempted.Store(0)
 
 				batchStart := time.Now()
@@ -642,11 +723,22 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 			// lane's own retry path) and must stop pinning Done open
 			// (fix round 3, finding 1).
 			b.retries.pruneNotIn(seenTrackedIDs)
+
+			wait := b.pollInterval()
 			if !b.retries.hasOutstanding() {
-				b.markDone()
-				return nil
+				// Genuinely drained. Report it, and then — unless the
+				// caller explicitly asked for a one-shot — keep
+				// sweeping, because nothing else ever re-examines
+				// entries below the live lane's cursor (see
+				// DefaultIdleResweepInterval; whole-branch review,
+				// finding 3).
+				b.setDone(true)
+				if b.stopWhenDrained() {
+					return nil
+				}
+				wait = b.idleResweepInterval()
 			}
-			if !sleepCtx(ctx, b.pollInterval()) {
+			if !sleepCtx(ctx, wait) {
 				return nil
 			}
 			cursor = startAfter
@@ -662,9 +754,9 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 	}
 }
 
-func (b *Backfill) markDone() {
+func (b *Backfill) setDone(done bool) {
 	b.mu.Lock()
-	b.done = true
+	b.done = done
 	b.mu.Unlock()
 }
 

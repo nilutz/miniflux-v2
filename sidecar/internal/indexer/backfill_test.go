@@ -18,9 +18,15 @@ import (
 // order. Tests that don't care about ordering still use it for simplicity;
 // none of these tests are about proving concurrency itself (the controller
 // tests own that), just correct sequencing, pausing and resumption.
+//
+// StopWhenDrained is set because these tests observe a drained lane as a
+// returning start() call. Production leaves it false and keeps sweeping —
+// see DefaultIdleResweepInterval, and
+// TestBackfillNoticesContentChangeAfterDoneWithoutRestart for the
+// keeps-sweeping behaviour itself.
 func backfillTestConfig() (ControllerConfig, BackfillConfig) {
 	return ControllerConfig{MinWorkers: 1, MaxWorkers: 1, LatencyMargin: 1.5, LoadThreshold: 0.8},
-		BackfillConfig{PageSize: 1, PollInterval: 20 * time.Millisecond}
+		BackfillConfig{PageSize: 1, PollInterval: 20 * time.Millisecond, StopWhenDrained: true}
 }
 
 // markerCallCounts counts, per marker substring, how many Embed calls saw
@@ -1003,4 +1009,127 @@ func TestBackfillStartAlwaysReSweepsFromZeroRegardlessOfPriorDone(t *testing.T) 
 
 	cancel()
 	waitDone(t, done, 2*time.Second, "Backfill.Start")
+}
+
+// A content change BELOW the live lane's cursor, made after the backfill
+// lane has already reported Done, must be picked up by the same running
+// process — no restart (whole-branch fix wave, finding 3).
+//
+// This is the exact shape of P0's scrape-backfill CLI: it rewrites
+// entries.content for old entries, which is precisely the range RunLive's
+// "id > lastSeen" cursor excludes. Before the drained lane kept sweeping,
+// those entries stayed indexed from their RSS excerpts forever.
+func TestBackfillNoticesContentChangeAfterDoneWithoutRestart(t *testing.T) {
+	s, db := testEnv(t)
+
+	const excerptMarker = "EXCERPT-MARKER"
+	const fullTextMarker = "FULLTEXT-MARKER"
+
+	entryID := createTestEntry(t, db, "backfill-resweep-change",
+		"<p>Feed excerpt only, containing "+excerptMarker+" and nothing else of substance.</p>")
+
+	counts := newMarkerCallCounts()
+	idx := New(s, &countingEmbedder{counts: counts, markers: []string{excerptMarker, fullTextMarker}})
+
+	ctrlCfg, bfCfg := backfillTestConfig()
+	// The production configuration under test: the lane does NOT stop
+	// when drained, it idles and sweeps again.
+	bfCfg.StopWhenDrained = false
+	bfCfg.IdleResweepInterval = 30 * time.Millisecond
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bound := boundedUpTo(entryID)
+	done := runStartAsync(b, ctx, entryID-1, bound)
+
+	waitFor(t, 5*time.Second, "the excerpt to be indexed and the lane to report Done", func() bool {
+		return b.Stats().Done && counts.get(excerptMarker) > 0
+	})
+	if entryStatus(t, db, entryID) != "ok" {
+		t.Fatalf("expected entry #%d to be indexed from its excerpt, got %q", entryID, entryStatus(t, db, entryID))
+	}
+
+	// Start must still be running: a drained lane does not exit.
+	select {
+	case err := <-done:
+		t.Fatalf("Backfill.start returned (%v) after draining; it must keep sweeping so a later content change is noticed", err)
+	default:
+	}
+
+	// The scraper lands the real article text underneath.
+	updateEntryContent(t, db, entryID,
+		"<p>The full scraped article body, containing "+fullTextMarker+", far longer than the excerpt was.</p>")
+
+	// Wait on the committed row, not merely on the embedder call: the
+	// passages are written after the forward pass returns.
+	passageText := func() string {
+		var text string
+		if err := db.QueryRow(`SELECT text FROM search.passages WHERE entry_id=$1 ORDER BY ordinal LIMIT 1`, entryID).Scan(&text); err != nil {
+			return ""
+		}
+		return text
+	}
+	waitFor(t, 5*time.Second, "the re-scraped content to be re-indexed without a restart", func() bool {
+		return counts.get(fullTextMarker) > 0 && strings.Contains(passageText(), fullTextMarker)
+	})
+	if got := passageText(); !strings.Contains(got, fullTextMarker) {
+		t.Fatalf("expected the stored passage to carry the re-scraped body, got %q", got)
+	}
+
+	cancel()
+	waitDone(t, done, 5*time.Second, "Backfill.start after cancellation")
+}
+
+// Pause and Resume must still behave on a lane that keeps sweeping after
+// it has reported Done — before the re-sweep, Pause() there set paused on
+// a lane with nothing left running at all.
+func TestBackfillPauseAfterDoneStopsTheNextSweep(t *testing.T) {
+	s, db := testEnv(t)
+
+	const marker = "PAUSE-AFTER-DONE"
+	entryID := createTestEntry(t, db, "backfill-pause-after-done",
+		"<p>Initial body for the pause-after-done test.</p>")
+
+	counts := newMarkerCallCounts()
+	idx := New(s, &countingEmbedder{counts: counts, markers: []string{marker}})
+
+	ctrlCfg, bfCfg := backfillTestConfig()
+	bfCfg.StopWhenDrained = false
+	bfCfg.IdleResweepInterval = 20 * time.Millisecond
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := runStartAsync(b, ctx, entryID-1, boundedUpTo(entryID))
+
+	waitFor(t, 5*time.Second, "the lane to drain", func() bool { return b.Stats().Done })
+
+	b.Pause()
+	waitFor(t, 5*time.Second, "the pause to be visible in Stats()", func() bool { return b.Stats().Paused })
+
+	updateEntryContent(t, db, entryID,
+		"<p>Rewritten body containing "+marker+", landed while the lane is paused.</p>")
+
+	// Give the lane several idle-resweep intervals to prove it is not
+	// sweeping: nothing may be embedded while paused.
+	time.Sleep(10 * bfCfg.IdleResweepInterval)
+	if got := counts.get(marker); got != 0 {
+		t.Fatalf("expected a paused lane to embed nothing, but the rewritten body was embedded %d time(s)", got)
+	}
+
+	b.Resume()
+	waitFor(t, 5*time.Second, "the resumed lane to pick up the change", func() bool {
+		return counts.get(marker) > 0
+	})
+	if b.Stats().Paused {
+		t.Fatal("expected Stats().Paused to be false after Resume")
+	}
+
+	cancel()
+	waitDone(t, done, 5*time.Second, "Backfill.start after cancellation")
 }
