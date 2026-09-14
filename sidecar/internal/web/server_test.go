@@ -229,6 +229,67 @@ func TestPauseRejectsCrossOriginRequest(t *testing.T) {
 	}
 }
 
+// TestBuildViewETAEdgeCases directly exercises buildView -- a pure function
+// -- against the three cases the brief singled out for scrutiny (an unknown
+// Remaining, a not-yet-established throughput, and Done overriding both)
+// plus a normal in-progress case, none of which any other test in this file
+// covered: they all go through the HTTP handlers with a single fixed Stats
+// value, never varying Remaining/ThroughputPerSec/Done independently enough
+// to hit these branches of buildView's own switch.
+func TestBuildViewETAEdgeCases(t *testing.T) {
+	tests := []struct {
+		name        string
+		stats       indexer.Stats
+		wantETA     string
+		wantTotal   int64
+		wantPercent float64
+	}{
+		{
+			name:        "remaining unknown (PendingEntryCount's documented -1 error sentinel)",
+			stats:       indexer.Stats{Indexed: 10, Skipped: 1, Failed: 0, Remaining: -1, ThroughputPerSec: 5},
+			wantETA:     "unknown",
+			wantTotal:   -1,
+			wantPercent: -1,
+		},
+		{
+			name:        "throughput not yet established -- cannot derive an ETA even though Remaining is known",
+			stats:       indexer.Stats{Indexed: 10, Skipped: 0, Failed: 0, Remaining: 90, ThroughputPerSec: 0},
+			wantETA:     "unknown",
+			wantTotal:   100,
+			wantPercent: 10,
+		},
+		{
+			name:        "done overrides throughput and remaining entirely",
+			stats:       indexer.Stats{Indexed: 100, Skipped: 0, Failed: 0, Remaining: 0, ThroughputPerSec: 0, Done: true},
+			wantETA:     "done",
+			wantTotal:   100,
+			wantPercent: 100,
+		},
+		{
+			name:        "normal in-progress case renders a duration from remaining/throughput",
+			stats:       indexer.Stats{Indexed: 100, Skipped: 0, Failed: 0, Remaining: 900, ThroughputPerSec: 5},
+			wantETA:     "3m", // 900 remaining / 5 per sec = 180s = 3m
+			wantTotal:   1000,
+			wantPercent: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := buildView(tt.stats)
+			if v.ETA != tt.wantETA {
+				t.Errorf("ETA = %q, want %q", v.ETA, tt.wantETA)
+			}
+			if v.Total != tt.wantTotal {
+				t.Errorf("Total = %d, want %d", v.Total, tt.wantTotal)
+			}
+			if v.PercentComplete != tt.wantPercent {
+				t.Errorf("PercentComplete = %v, want %v", v.PercentComplete, tt.wantPercent)
+			}
+		})
+	}
+}
+
 func TestPauseWithGetMethodNotAllowed(t *testing.T) {
 	fb := &fakeBackfill{}
 	handler := newTestServer(t, fb)

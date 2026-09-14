@@ -928,3 +928,79 @@ func TestBackfillPrunesRetryStateForEntryRemovedFromPendingSet(t *testing.T) {
 		t.Fatal("expected the unrelated healthy entry to still have been indexed")
 	}
 }
+
+// 13. (Fix round 1, review gap 1.) Exercises the PUBLIC Start(ctx) entry
+// point directly. Every other test in this file calls the internal
+// start(ctx, startAfter, upTo) via runStartAsync -- deliberately, to scope
+// each test to its own fixtures -- which means none of them would ever
+// notice if Start's own hardcoded `return b.start(ctx, 0, nil)` were
+// changed to seed from something other than 0, or wrapped in a check that
+// skips starting at all when Stats().Done was already true. That is
+// exactly the coordination invariant live.go's and backfill.go's own doc
+// comments describe as load-bearing: RunLive only ever covers entries
+// created after ITS OWN startup (it seeds from store.MaxEntryID()), which
+// is safe only because Backfill always re-sweeps everything else from
+// cursor 0, every process start, regardless of what any earlier run
+// reported. Breaking either half makes an entry created during a previous
+// shutdown window invisible to both lanes, silently and permanently.
+//
+// This test forces both halves of that failure mode into reach at once:
+//
+//  1. entryID is created BEFORE the Backfill under test is even
+//     constructed, so by the time Start(ctx) runs, store.MaxEntryID()
+//     would already return an id >= entryID -- if Start ever seeded from
+//     that (mirroring RunLive's own snapshot-based cursor, the exact
+//     mistake the invariant warns about) instead of a hardcoded 0,
+//     PendingEntryIDs' strict "id > afterID" would silently never return
+//     entryID again.
+//  2. b.done is forced true directly (same-package access to the
+//     unexported field) before Start is ever called, standing in for
+//     "a previous run on this lane already reported Done" -- exactly the
+//     state a `if !Stats().Done { return nil }`-shaped regression in
+//     Start would key off of.
+//
+// A correct Start(ctx) ignores both and indexes entryID anyway. See this
+// task's fix-round-1 report for the discrimination proof: temporarily
+// changing Start's hardcoded 0 to a large non-zero cursor makes this exact
+// test fail.
+func TestBackfillStartAlwaysReSweepsFromZeroRegardlessOfPriorDone(t *testing.T) {
+	s, db := testEnv(t)
+
+	// Created first, deliberately, so its id already exists before
+	// anything below runs -- see point 1 above.
+	entryID := createTestEntry(t, db, "backfill-public-start",
+		"<p>Entry that the public Start(ctx) entry point must still find.</p>")
+
+	idx := New(s, &fakeEmbedder{})
+	ctrlCfg, bfCfg := backfillTestConfig()
+	bfCfg.PageSize = 20 // this sweep is intentionally unbounded (unlike every other test's boundedUpTo); a larger page keeps it quick even if other packages' own fixtures are concurrently pending in the same real table.
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	// Simulates a previous run on this lane having already finished --
+	// see point 2 above. NewBackfill never sets this true itself, so
+	// forcing it here is the only way to put a fresh Backfill into the
+	// state a real prior completed run would leave, without waiting for
+	// or fabricating an actual first sweep.
+	b.mu.Lock()
+	b.done = true
+	b.mu.Unlock()
+	if !b.Stats().Done {
+		t.Fatal("test setup invalid: expected Stats().Done to read true before Start is ever called")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The real, exported entry point -- deliberately NOT runStartAsync,
+	// which only ever drives the internal start(ctx, startAfter, upTo).
+	done := make(chan error, 1)
+	go func() { done <- b.Start(ctx) }()
+
+	waitFor(t, 3*time.Second, "the pre-existing entry indexed via the public Start(ctx) entry point", func() bool {
+		return entryStatus(t, db, entryID) == "ok"
+	})
+
+	cancel()
+	waitDone(t, done, 2*time.Second, "Backfill.Start")
+}
