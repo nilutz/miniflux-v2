@@ -10,6 +10,7 @@ go 1.27.0
 require (
 	github.com/knights-analytics/hugot v0.7.8
 	github.com/lib/pq v1.12.3
+	golang.org/x/net v0.58.0
 )
 
 require (
