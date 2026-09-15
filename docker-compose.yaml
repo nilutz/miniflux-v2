@@ -124,14 +124,17 @@ services:
         condition: service_healthy
       # Ordering only, exactly as in docker-compose.dev.yaml: the sidecar
       # reads public.entries, so Miniflux's migrations must have created
-      # that table first. Compose cannot wait on "migrations finished",
-      # and adding a healthcheck to miniflux above does not change that
-      # for THIS dependency -- it stays service_started, not
-      # service_healthy, so the sidecar can still lose the race on a
-      # first-ever boot. It exits, and restart: unless-stopped brings it
-      # back once the table exists, same as in dev.
+      # that table first.
+      #
+      # service_healthy, unlike the dev stack's service_started: Miniflux
+      # runs its migrations synchronously (internal/cli/cli.go:223-230)
+      # BEFORE startDaemon binds the HTTP server, so /healthz cannot answer
+      # until they have finished. Waiting on health therefore does close the
+      # first-boot race rather than merely narrowing it -- worth having here
+      # even though dev tolerates the restart loop, because a production
+      # first boot that logs a sidecar crash is alarming for no reason.
       miniflux:
-        condition: service_started
+        condition: service_healthy
     environment:
       - SIDECAR_DATABASE_URL=postgres://${POSTGRES_USER:?POSTGRES_USER is required -- copy .env.example to .env and fill it in}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required -- copy .env.example to .env and fill it in}@db/${POSTGRES_DB:?POSTGRES_DB is required -- copy .env.example to .env and fill it in}?sslmode=disable
       # local runs the in-process ONNX embedder baked into the image (see
