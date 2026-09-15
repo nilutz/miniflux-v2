@@ -11,13 +11,28 @@ GO_TAGS := ORT
 # the suite that sweeps the entire entries table and rewrites
 # search.passages. That suite belongs on a throwaway database chosen
 # deliberately, never in CI and never by accident. See internal/testdb.
-HERMETIC_PKGS := ./internal/search/... ./internal/web/ ./internal/store/ ./internal/passage/
+#
+# internal/sidecarclient and internal/mcpserver (task 15, cmd/mcp's own
+# HTTP client and tool implementations) belong here too: both are tested
+# entirely against httptest, need no database and no native library, and
+# in fact must never gain either -- cmd/mcp is the one binary in this
+# module required to build with CGO_ENABLED=0 and no libtokenizers.a (see
+# build-mcp below).
+HERMETIC_PKGS := ./internal/search/... ./internal/web/ ./internal/store/ ./internal/passage/ ./internal/sidecarclient/... ./internal/mcpserver/...
 
 dev-db:
 	docker compose -f docker-compose.dev.yml up -d
 
 build:
 	go build -tags $(GO_TAGS) -o bin/sidecar ./cmd/sidecar
+
+# build-mcp builds the MCP server (task 15) with CGO explicitly disabled
+# and no CGO_LDFLAGS, proving it needs neither the native ONNX Runtime
+# library nor libtokenizers.a that ./cmd/sidecar requires -- see
+# cmd/mcp/main.go's own package doc comment for why that matters: this is
+# the binary meant to run on an operator's own laptop next to Claude Code.
+build-mcp:
+	CGO_ENABLED=0 go build -o bin/miniflux-mcp ./cmd/mcp
 
 # test runs everything, including the database-backed suites. Those read
 # SIDECAR_TEST_DATABASE_URL -- NOT SIDECAR_DATABASE_URL, which is what the

@@ -11,6 +11,7 @@ require (
 	github.com/daulet/tokenizers v1.27.0
 	github.com/knights-analytics/hugot v0.7.8
 	github.com/lib/pq v1.12.3
+	github.com/modelcontextprotocol/go-sdk v1.6.0
 	golang.org/x/net v0.58.0
 )
 
@@ -24,12 +25,17 @@ require (
 	github.com/gomlx/go-xla v0.4.5 // indirect
 	github.com/gomlx/gomlx v0.28.8 // indirect
 	github.com/gomlx/onnx-gomlx v0.5.5 // indirect
+	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/knights-analytics/ortgenai v0.3.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/segmentio/asm v1.1.3 // indirect
+	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yalue/onnxruntime_go v1.35.0 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/exp v0.0.0-20260824195058-e88cd73687aa // indirect
 	golang.org/x/image v0.45.0 // indirect
+	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect

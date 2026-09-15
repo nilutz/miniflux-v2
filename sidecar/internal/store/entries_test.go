@@ -6,6 +6,7 @@ package store // import "miniflux.app/v2/sidecar/internal/store"
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 )
 
@@ -192,6 +193,61 @@ func TestEntryForIndexingReturnsErrorForUnknownEntry(t *testing.T) {
 
 	if _, err := s.EntryForIndexing(context.Background(), -1); err == nil {
 		t.Fatal("expected an error for an entry id that does not exist")
+	}
+}
+
+// TestEntryArticleReturnsTitleURLPublishedAtAndContent covers task 15's
+// GET /api/article, which this method backs: it must return everything
+// that endpoint promises -- title, URL, published date and full content
+// -- by entry id, and nothing about feed/category/read state (see
+// ArticleDetail's own doc comment).
+func TestEntryArticleReturnsTitleURLPublishedAtAndContent(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID := createTestEntryWithTitle(t, s, "article-fetch", "An Article Title", "<p>full body</p>")
+
+	a, err := s.EntryArticle(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("EntryArticle: %v", err)
+	}
+	if a.ID != entryID {
+		t.Errorf("ID = %d, want %d", a.ID, entryID)
+	}
+	if a.Title != "An Article Title" {
+		t.Errorf("Title = %q, want %q", a.Title, "An Article Title")
+	}
+	if a.URL != "https://example.org/article-fetch" {
+		t.Errorf("URL = %q, want %q", a.URL, "https://example.org/article-fetch")
+	}
+	if a.PublishedAt.IsZero() {
+		t.Error("PublishedAt is zero, want the fixture's now()")
+	}
+	if a.Content != "<p>full body</p>" {
+		t.Errorf("Content = %q, want %q", a.Content, "<p>full body</p>")
+	}
+}
+
+// TestEntryArticleReturnsErrorForUnknownEntry is
+// TestEntryForIndexingReturnsErrorForUnknownEntry's counterpart for
+// EntryArticle: handleArticle (internal/web/article_handler.go)
+// distinguishes "no such entry" from every other failure via
+// errors.Is(err, sql.ErrNoRows), so the error EntryArticle returns for an
+// unknown id must actually wrap sql.ErrNoRows, not merely be non-nil.
+func TestEntryArticleReturnsErrorForUnknownEntry(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	_, err := s.EntryArticle(context.Background(), -1)
+	if err == nil {
+		t.Fatal("expected an error for an entry id that does not exist")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("error = %v, want it to wrap sql.ErrNoRows", err)
 	}
 }
 

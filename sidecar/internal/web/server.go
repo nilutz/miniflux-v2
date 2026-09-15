@@ -102,13 +102,27 @@ type EmbedderManager interface {
 	Switch(ctx context.Context, kind, remoteURL string, confirm bool) (indexer.SwitchResult, error)
 }
 
+// ArticleLookup is the subset of *store.Store that GET /api/article (task
+// 15) needs: one entry's full reader-facing content by id. Defined as an
+// interface, not *store.Store directly, for the same hermetic-tests reason
+// every other narrow interface in this file exists (see BackfillController's
+// own doc comment) — this package's suite must run with no database.
+// *store.Store satisfies it with no adaptation, the same way it already
+// satisfies EntryLookup and DatabaseMetricsSource.
+type ArticleLookup interface {
+	EntryArticle(ctx context.Context, entryID int64) (*store.ArticleDetail, error)
+}
+
 // Server is the sidecar's status and admin HTTP server (spec §9.4), and,
-// since task 7, its read-only search HTTP API (spec §6.3-6.4, §7).
+// since task 7, its read-only search HTTP API (spec §6.3-6.4, §7), and,
+// since task 15, GET /api/article — the full-content read the MCP server's
+// fetch_article tool wraps.
 type Server struct {
 	backfill BackfillController
 	live     LiveLane
 	searcher SearchService
 	entries  EntryLookup
+	articles ArticleLookup
 	metrics  DatabaseMetricsSource
 	manager  EmbedderManager
 	tmpl     *template.Template
@@ -118,21 +132,22 @@ type Server struct {
 // New builds a Server over backfill (control endpoints), live (the live
 // lane's own pause status — spec §13.1), searcher (GET /api/search and
 // /api/similar), entries (loaded per result to build a highlighted
-// search.BuildSnippet — see search_handlers.go), metrics (the
+// search.BuildSnippet — see search_handlers.go), articles (GET
+// /api/article's full-content read — see article_handler.go), metrics (the
 // database-size and health section — spec §13.2) and manager (the Model
 // section's embedder controls — Task 9, spec §13.1). It parses the
 // embedded status page template eagerly so a malformed template fails at
 // startup, not on the first request.
 //
-// live, searcher, entries, metrics and manager may all be nil in tests
-// that don't care about what they cover (see server_test.go); cmd/sidecar
-// always supplies all five. A nil live renders as "not paused" — the zero
-// value of indexer.LiveStats — rather than panicking; a nil (or erroring)
-// metrics source renders the database-size section as unavailable rather
-// than panicking or showing zeroes as if they were real (see view()); a
-// nil manager renders the Model section as unavailable the same way (see
-// modelView()).
-func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, metrics DatabaseMetricsSource, manager EmbedderManager) (*Server, error) {
+// live, searcher, entries, articles, metrics and manager may all be nil in
+// tests that don't care about what they cover (see server_test.go);
+// cmd/sidecar always supplies all six. A nil live renders as "not paused"
+// — the zero value of indexer.LiveStats — rather than panicking; a nil (or
+// erroring) metrics source renders the database-size section as
+// unavailable rather than panicking or showing zeroes as if they were real
+// (see view()); a nil manager renders the Model section as unavailable the
+// same way (see modelView()).
+func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, articles ArticleLookup, metrics DatabaseMetricsSource, manager EmbedderManager) (*Server, error) {
 	tmpl, err := template.New("status.html").Funcs(template.FuncMap{
 		"comma":    commaInt,
 		"bytesize": formatBytes,
@@ -141,7 +156,7 @@ func New(backfill BackfillController, live LiveLane, searcher SearchService, ent
 		return nil, fmt.Errorf("web: unable to parse status template: %w", err)
 	}
 
-	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, metrics: metrics, manager: manager, tmpl: tmpl}
+	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, articles: articles, metrics: metrics, manager: manager, tmpl: tmpl}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -155,12 +170,15 @@ func New(backfill BackfillController, live LiveLane, searcher SearchService, ent
 	mux.HandleFunc("POST /api/embedder/preview", s.handleEmbedderPreview)
 	mux.HandleFunc("POST /api/embedder/switch", s.handleEmbedderSwitch)
 
-	// GET /api/search and GET /api/similar (search_handlers.go) do NOT
-	// carry sameOriginOrNoOrigin's check — see that function's own doc
-	// comment on handleSearch/handleSimilar for why a read-only endpoint
-	// on this loopback-bound server does not need it.
+	// GET /api/search, GET /api/similar (search_handlers.go) and GET
+	// /api/article (article_handler.go) do NOT carry
+	// sameOriginOrNoOrigin's check — see handleSearch/handleSimilar's own
+	// doc comment for why a read-only endpoint on this loopback-bound
+	// server does not need it; handleArticle is the same shape of
+	// endpoint for the same reason.
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("GET /api/similar", s.handleSimilar)
+	mux.HandleFunc("GET /api/article", s.handleArticle)
 	s.mux = mux
 
 	return s, nil

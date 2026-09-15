@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Entry is the subset of a Miniflux entry the indexer needs: its title and
@@ -21,6 +22,39 @@ type Entry struct {
 	Title       string
 	Content     string
 	ContentHash string
+}
+
+// ArticleDetail is one entry's full reader-facing content: everything
+// task 15's GET /api/article needs to let an MCP client read an article
+// it found via search/similar, and nothing more (no feed, no category, no
+// read/starred status) — this is a read-only content endpoint, not a
+// second copy of Miniflux's own entry API.
+type ArticleDetail struct {
+	ID          int64
+	Title       string
+	URL         string
+	PublishedAt time.Time
+	Content     string
+}
+
+// EntryArticle loads one entry's full reader-facing content from
+// public.entries (read-only): title, URL, published date and content. It
+// takes a context for the same reason EntryForIndexing does -- this backs
+// an HTTP handler on the synchronous request path, not background work.
+func (s *Store) EntryArticle(ctx context.Context, entryID int64) (*ArticleDetail, error) {
+	var d ArticleDetail
+	var content sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT title, url, published_at, content FROM entries WHERE id=$1`, entryID).
+		Scan(&d.Title, &d.URL, &d.PublishedAt, &content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("store: entry #%d does not exist: %w", entryID, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: unable to fetch entry #%d: %w", entryID, err)
+	}
+	d.ID = entryID
+	d.Content = content.String
+	return &d, nil
 }
 
 // PipelineVersion identifies the derivation pipeline whose output is

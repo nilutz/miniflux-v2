@@ -129,10 +129,11 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	// nil for live: these tests exercise only the backfill control
 	// endpoints and don't care what the live lane's own pause state
 	// renders as (see TestStatusDistinguishesLiveLanePauseFromBackfill
-	// for that, via newTestServerWithLive). nil, nil, nil: no search
-	// service/entries/metrics source either -- see search_handlers_test.go
-	// for the first two and TestStatusPage*Metrics* below for the third.
-	srv, err := New(fb, nil, nil, nil, nil, nil)
+	// for that, via newTestServerWithLive). nil, nil, nil, nil: no search
+	// service/entries/articles/metrics source either -- see
+	// search_handlers_test.go and article_handler_test.go for the first
+	// three and TestStatusPage*Metrics* below for the fourth.
+	srv, err := New(fb, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -144,7 +145,7 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 // renders distinctly from the backfill lane's.
 func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.Handler {
 	t.Helper()
-	srv, err := New(fb, live, nil, nil, nil, nil)
+	srv, err := New(fb, live, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -156,7 +157,7 @@ func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.H
 // database-size section renders from it.
 func newTestServerWithMetrics(t *testing.T, fb *fakeBackfill, metrics DatabaseMetricsSource) http.Handler {
 	t.Helper()
-	srv, err := New(fb, nil, nil, nil, metrics, nil)
+	srv, err := New(fb, nil, nil, nil, nil, metrics, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -219,7 +220,7 @@ func (f *fakeEmbedderManager) switchCallCount() int {
 // EmbedderManager, for the tests that check the Model section (Task 9).
 func newTestServerWithManager(t *testing.T, fb *fakeBackfill, manager EmbedderManager) http.Handler {
 	t.Helper()
-	srv, err := New(fb, nil, nil, nil, nil, manager)
+	srv, err := New(fb, nil, nil, nil, nil, nil, manager)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

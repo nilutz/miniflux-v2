@@ -605,3 +605,108 @@ that is never stored, so changing how it is derived invalidates every stored
 offset with nothing else to detect it.
 `internal/passage`'s `TestPipelineOutputDigestIsStable` fails when that
 output changes, as a reminder.
+
+## The search HTTP API
+
+`internal/web/search_handlers.go` and `article_handler.go` serve three
+read-only, **unauthenticated** GET endpoints on the same admin server
+above:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/search?q=&mode=&limit=` | ranked results: `keyword` (BM25), `semantic` (vector), `hybrid` (both, default), or `passages` (paragraph-sized extracts) |
+| `GET /api/similar?entry_id=&limit=` | nearest neighbours for one entry, by vector similarity; no snippet |
+| `GET /api/article?entry_id=` | one entry's title, url, published date and full content (task 15) |
+
+All three also accept the filter parameters `parseFilters` documents in
+`search_handlers.go` (`user`, `feed`, `category`, `unread`, `starred`,
+`since`, `until`). There is no authentication on this server today — see
+that file's own package doc comment for why binding it to loopback (or a
+trusted LAN) is this API's only protection, and why the MCP server below
+talks to it over a local child process rather than opening its own
+network port.
+
+## The MCP server (`cmd/mcp`)
+
+`cmd/mcp` is a small, separate binary: an [MCP](https://modelcontextprotocol.io)
+server that Claude Code spawns locally over **stdio** and that calls the
+search HTTP API above. It is not another HTTP service, and it is not a
+CLI flag on `cmd/sidecar` — see `cmd/mcp/main.go`'s own package doc
+comment for why stdio, specifically, is the right transport here: the
+search API has no authentication, so serving MCP from it would open an
+unauthenticated search surface on the network, where a stdio child
+process Claude Code owns the pipes of adds none.
+
+It exposes three tools, each wrapping one endpoint above:
+
+| Tool | Wraps | Use it to |
+|---|---|---|
+| `search` | `GET /api/search` | find articles or passages relevant to a query; `mode` picks keyword/semantic/hybrid/passages retrieval — see the tool's own description (`internal/mcpserver/tools.go`) for what each is for |
+| `similar` | `GET /api/similar` | browse "more like this" from an article's entry_id |
+| `fetch_article` | `GET /api/article` | read one article's full text by entry_id, once search/similar have found it |
+
+`search` and `similar` results carry `entry_id`, `title`, `url`, a score,
+and (for `search`) a snippet — even though the two endpoints they wrap do
+not return title/url themselves (`entryResultView`/`similarEntryResultView`
+carry neither). `internal/mcpserver` fills those in itself, with one
+`GET /api/article` call per distinct entry id in a result set, so that a
+result is something an agent can act on without a second round trip just
+to find out what it is.
+
+### Building it
+
+```sh
+make build-mcp    # -> bin/miniflux-mcp, built with CGO_ENABLED=0 and no CGO_LDFLAGS
+```
+
+Unlike `make build` (`cmd/sidecar`, which requires `-tags ORT` and a linked
+`libtokenizers.a`), this binary needs no native library at all — it is a
+plain HTTP client. That is deliberate: it is the piece meant to run on an
+operator's own laptop next to Claude Code, not inside the container that
+runs the sidecar itself.
+
+### Installing it into Claude Code
+
+```sh
+claude mcp add miniflux-search \
+  --env SIDECAR_URL=http://localhost:8081 \
+  --env MINIFLUX_API_KEY=your-miniflux-api-key \
+  -- /path/to/bin/miniflux-mcp
+```
+
+Environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SIDECAR_URL` | `http://localhost:8081` | base URL of a running sidecar's admin server (`SIDECAR_ADMIN_ADDR` above, spelled out as a URL) |
+| `MINIFLUX_API_KEY` | *(none)* | a Miniflux API key, sent as the `X-Auth-Token` header on every request — see below |
+
+**`MINIFLUX_API_KEY` does nothing yet, and that is expected.** The search
+API above has no authentication today, so every tool call works with no
+key configured; `cmd/mcp` logs a warning to stderr when it is unset,
+nothing more. A follow-on task has the sidecar validate this header
+against `public.api_keys` — the same table and header
+`internal/api/middleware.go` already reads on the main Miniflux fork's own
+REST API — at which point every tool call **will** start failing with
+"sidecar rejected the API key" until this variable is set to a real key.
+Setting it now costs nothing and means that change requires no
+`claude mcp add` update later.
+
+### Failure modes
+
+Every tool call distinguishes three ways a request can fail, each with a
+different fix (`internal/sidecarclient`'s `UnreachableError`/`AuthError`/
+`APIError`):
+
+- **The sidecar is not running** (the common case — the stack gets torn
+  down routinely): `"sidecar unreachable at http://localhost:8081: ..."`.
+- **The sidecar rejected the API key** (401/403, once auth lands):
+  `"sidecar rejected the API key (HTTP 401): ... -- set MINIFLUX_API_KEY
+  to a valid Miniflux API key"`.
+- **The request itself was rejected** (400/404/500 — an unknown `mode`, an
+  unknown `entry_id`, ...): the sidecar's own error message.
+
+Zero results is none of the above: `search` and `similar` report it as a
+normal, successful result (`result_count: 0` plus an explanatory
+`message`), never as a tool error — the corpus can legitimately have
+nothing that matches a query, or be empty altogether.
