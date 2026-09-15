@@ -130,6 +130,24 @@ func TestValidateEntryOrder(t *testing.T) {
 	}
 }
 
+// TestValidateEntryOrderAcceptsHiddenAndStarred covers spec §13.3's two
+// new sort orders (task 10 part B), added alongside the pre-existing set
+// covered above - a fork addition kept separate so the two can be told
+// apart. It also re-proves rejection here: an allowlist test that only
+// ever asserts acceptance would still pass if ValidateEntryOrder were
+// replaced with a function that accepts everything.
+func TestValidateEntryOrderAcceptsHiddenAndStarred(t *testing.T) {
+	for _, order := range []string{"hidden", "starred"} {
+		if err := ValidateEntryOrder(order); err != nil {
+			t.Errorf("ValidateEntryOrder(%q) should not generate an error, got %v", order, err)
+		}
+	}
+
+	if err := ValidateEntryOrder("not_a_real_column"); err == nil {
+		t.Error(`ValidateEntryOrder should still reject a value that is not in the allowlist, even though "hidden" and "starred" were just added to it`)
+	}
+}
+
 func TestValidateEntryModification(t *testing.T) {
 	// Accepts no-op update.
 	if err := ValidateEntryModification(&model.EntryUpdateRequest{}); err != nil {

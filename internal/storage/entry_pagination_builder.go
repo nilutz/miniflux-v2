@@ -55,6 +55,24 @@ func (e *entryPaginationBuilder) WithHidden(hidden bool) *entryPaginationBuilder
 	return e
 }
 
+// WithNotHiddenOrEntryID excludes hidden entries from pagination while
+// always keeping the currently-viewed entry reachable as a neighbour,
+// mirroring WithStatusOrEntryID below: an entry hidden after the
+// surrounding list was rendered - or hidden from the entry page itself,
+// mid-view - must not become an unreachable dead end just because the
+// page it is being viewed from also has the "exclude hidden" filter on.
+func (e *entryPaginationBuilder) WithNotHiddenOrEntryID(entryID int64) *entryPaginationBuilder {
+	if entryID == 0 {
+		return e.WithHidden(false)
+	}
+
+	argN := len(e.args) + 1
+	e.conditions = append(e.conditions, fmt.Sprintf("(e.hidden is false OR e.id = $%d)", argN))
+	e.args = append(e.args, entryID)
+
+	return e
+}
+
 // WithFeedID adds feed_id to the condition.
 func (e *entryPaginationBuilder) WithFeedID(feedID int64) *entryPaginationBuilder {
 	if feedID != 0 {

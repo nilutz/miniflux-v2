@@ -52,6 +52,7 @@ func TestResolveSearchResults_NoSidecarConfigured(t *testing.T) {
 		"coffee",
 		"hybrid",
 		false,
+		false,
 		0,
 		10,
 		func(ids []int64) (model.Entries, error) {
@@ -100,6 +101,7 @@ func TestResolveSearchResults_SidecarUnreachableFallsBack(t *testing.T) {
 		"coffee",
 		"hybrid",
 		false,
+		false,
 		0,
 		10,
 		func(ids []int64) (model.Entries, error) {
@@ -138,7 +140,7 @@ func TestResolveSearchResults_SidecarNonOKFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, nil },
 		fallbackEntries,
 	)
@@ -164,7 +166,7 @@ func TestResolveSearchResults_SidecarMalformedBodyFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, nil },
 		fallbackEntries,
 	)
@@ -197,7 +199,7 @@ func TestResolveSearchResults_SidecarSuccessOrdersAndHydrates(t *testing.T) {
 
 	var hydratedIDs []int64
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) {
 			hydratedIDs = ids
 			// Return them out of order on purpose, to prove
@@ -255,7 +257,7 @@ func TestResolveSearchResults_PassagesModeBuildsOneRowPerPassage(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "passages", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "passages", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) {
 			return model.Entries{{ID: 5, Title: "Five"}}, nil
 		},
@@ -281,6 +283,89 @@ func TestResolveSearchResults_PassagesModeBuildsOneRowPerPassage(t *testing.T) {
 	}
 }
 
+// TestResolveSearchResults_ExcludeHiddenFiltersSidecarEntries proves the
+// exclude-hidden checkbox (task 10 part A) is honoured for sidecar-backed
+// modes too, even though the sidecar has no "not hidden" filter of its
+// own: resolveSearchResults drops hidden entries after hydration, using
+// the Hidden flag hydrate() already returns.
+func TestResolveSearchResults_ExcludeHiddenFiltersSidecarEntries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"mode":"hybrid","query":"coffee","entries":[
+			{"entry_id":5,"score":0.9,"snippet":{"text":"a","highlights":[]}},
+			{"entry_id":6,"score":0.8,"snippet":{"text":"b","highlights":[]}}
+		]}`))
+	}))
+	defer server.Close()
+
+	rows, count, degraded, err := resolveSearchResults(
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, true, 0, 10,
+		func(ids []int64) (model.Entries, error) {
+			return model.Entries{
+				{ID: 5, Title: "Hidden one", Hidden: true},
+				{ID: 6, Title: "Visible one", Hidden: false},
+			}, nil
+		},
+		func() (model.Entries, int, error) {
+			t.Fatal("fallback should not be called on a sidecar success")
+			return nil, 0, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if degraded {
+		t.Fatal("expected degraded=false: excluding hidden entries is not a degradation")
+	}
+	if count != 1 || len(rows) != 1 {
+		t.Fatalf("expected exactly the 1 non-hidden entry, got %d (count %d): %+v", len(rows), count, rows)
+	}
+	if rows[0].Entry.ID != 6 {
+		t.Fatalf("expected the surviving row to be the non-hidden entry (id 6), got %+v", rows[0].Entry)
+	}
+}
+
+// TestResolveSearchResults_ExcludeHiddenFiltersSidecarPassages is
+// TestResolveSearchResults_ExcludeHiddenFiltersSidecarEntries' passages
+// mode sibling: passages are aggregated through a different branch
+// (passageRows) with its own excludeHiddenRows call site.
+func TestResolveSearchResults_ExcludeHiddenFiltersSidecarPassages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"mode":"passages","query":"coffee","passages":[
+			{"entry_id":5,"passage_id":1,"ordinal":0,"score":0.9,"snippet":{"text":"a","highlights":[]}},
+			{"entry_id":6,"passage_id":2,"ordinal":0,"score":0.8,"snippet":{"text":"b","highlights":[]}}
+		]}`))
+	}))
+	defer server.Close()
+
+	rows, count, degraded, err := resolveSearchResults(
+		context.Background(), server.URL, testUserID, "coffee", "passages", false, true, 0, 10,
+		func(ids []int64) (model.Entries, error) {
+			return model.Entries{
+				{ID: 5, Title: "Hidden passage entry", Hidden: true},
+				{ID: 6, Title: "Visible passage entry", Hidden: false},
+			}, nil
+		},
+		func() (model.Entries, int, error) {
+			t.Fatal("fallback should not be called on a sidecar success")
+			return nil, 0, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if degraded {
+		t.Fatal("expected degraded=false: excluding hidden entries is not a degradation")
+	}
+	if count != 1 || len(rows) != 1 {
+		t.Fatalf("expected exactly the 1 non-hidden passage row, got %d (count %d): %+v", len(rows), count, rows)
+	}
+	if rows[0].Entry.ID != 6 {
+		t.Fatalf("expected the surviving row to be the non-hidden entry (id 6), got %+v", rows[0].Entry)
+	}
+}
+
 // TestResolveSearchResults_HydrateErrorFallsBack proves a failure while
 // loading full entry data for the sidecar's hit ids (a store error) also
 // falls back, rather than propagating a hard error to the page.
@@ -292,7 +377,7 @@ func TestResolveSearchResults_HydrateErrorFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, errors.New("store exploded") },
 		fallbackEntries,
 	)
@@ -317,7 +402,7 @@ func TestResolveSearchResults_PassagesHydrateErrorFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "passages", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "passages", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, errors.New("store exploded") },
 		fallbackEntries,
 	)
@@ -341,6 +426,7 @@ func TestParseSearchMode(t *testing.T) {
 		"keyword":  "keyword",
 		"semantic": "semantic",
 		"passages": "passages",
+		"fulltext": "fulltext",
 		"bogus":    "hybrid",
 		"Keyword":  "hybrid", // case-sensitive on purpose: this is a fixed <select> value, not free text
 	}
@@ -369,7 +455,7 @@ func TestResolveSearchResults_SendsTheUserScope(t *testing.T) {
 	defer server.Close()
 
 	_, _, _, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return model.Entries{}, nil },
 		func() (model.Entries, int, error) {
 			t.Fatal("fallback should not be called on a sidecar success")
@@ -398,7 +484,7 @@ func TestResolveSearchResults_OffsetFallbackIsDegraded(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 20, 10,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 20, 10,
 		func(ids []int64) (model.Entries, error) { return nil, nil },
 		fallbackEntries,
 	)
@@ -449,7 +535,7 @@ func TestResolveSearchResults_HonoursTheCappedLimit(t *testing.T) {
 	defer server.Close()
 
 	_, _, _, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, 0,
+		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0,
 		sidecarSearchLimit(100),
 		func(ids []int64) (model.Entries, error) { return model.Entries{}, nil },
 		func() (model.Entries, int, error) {

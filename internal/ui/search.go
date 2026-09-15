@@ -16,16 +16,27 @@ import (
 	"miniflux.app/v2/internal/ui/view"
 )
 
-// searchModes is the mode picker's four values (spec §6.3), in the order
+// searchModes is the mode picker's five values (spec §6.3), in the order
 // they are presented in. defaultSearchMode ("hybrid") is what an absent
 // or unrecognised "mode" query parameter - a bare /search?q=..., a stale
 // bookmark, a typo'd value - resolves to; that mirrors the sidecar's own
 // handling of a blank mode (sidecar/internal/web/search_handlers.go's
 // parseMode) and means a bad "mode" value degrades to a sensible default
 // rather than erroring the whole page.
-var searchModes = []string{"keyword", "semantic", "hybrid", "passages"}
+//
+// "fulltext" is the odd one out: unlike the other four, it never reaches
+// the sidecar at all. It runs Miniflux's own built-in full-text search
+// (the fallback closure below) directly, on request rather than only as a
+// degradation - see resolveSearchResults and showSearchPage's
+// availableSearchModes.
+var searchModes = []string{"keyword", "semantic", "hybrid", "passages", fullTextSearchMode}
 
 const defaultSearchMode = "hybrid"
+
+// fullTextSearchMode is the explicit fifth mode (spec §6.3 amendment,
+// task 10 part C). It is also the only mode offered when no sidecar is
+// configured at all - see availableSearchModes in showSearchPage.
+const fullTextSearchMode = "fulltext"
 
 // maxSidecarSearchLimit caps how many results the search page asks the
 // sidecar for, independently of the reader's own EntriesPerPage.
@@ -89,9 +100,45 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	searchQuery := request.QueryStringParam(r, "q", "")
-	searchMode := parseSearchMode(request.QueryStringParam(r, "mode", ""))
 	unreadOnly := request.QueryBoolParam(r, "unread", false)
+	// excludeHidden is a second, independent checkbox from unreadOnly
+	// (spec §13.3): unchecked, search keeps returning hidden entries -
+	// that default is not negotiable, hiding means "not now", not
+	// "never" - and ticking it excludes them via WithHidden(false),
+	// exactly like the unread list already does.
+	excludeHidden := request.QueryBoolParam(r, "excludeHidden", false)
 	offset := request.QueryIntParam(r, "offset", 0)
+
+	// The sort picker (spec §6.3 amendment, task 10 part B) defaults to
+	// the reader's saved preference and is overridable per view via the
+	// "order"/"direction" query parameters; parseEntryOrder/
+	// parseEntryDirection validate them and never let an unrecognised
+	// value reach EntryQueryBuilder.WithSorting.
+	searchOrder := parseEntryOrder(r, user.EntryOrder)
+	searchDirection := parseEntryDirection(r, user.EntryDirection)
+
+	sidecarURL := config.Opts.SearchSidecarURL()
+	sidecarConfigured := sidecarURL != ""
+
+	// availableSearchModes is what the picker actually offers.
+	// fullTextSearchMode is the one mode that works without a sidecar, so
+	// rather than hiding the whole picker when SEARCH_SIDECAR_URL is
+	// unset (as the four-mode picker used to), it is offered on its own:
+	// a picker showing a single usable option is more honest than no
+	// picker, and it keeps the rendered mode consistent with what
+	// actually ran instead of silently ignoring a stale "mode=hybrid"
+	// bookmark.
+	availableSearchModes := searchModes
+	defaultAvailableMode := defaultSearchMode
+	if !sidecarConfigured {
+		availableSearchModes = []string{fullTextSearchMode}
+		defaultAvailableMode = fullTextSearchMode
+	}
+
+	searchMode := parseSearchMode(request.QueryStringParam(r, "mode", ""))
+	if !sidecarConfigured {
+		searchMode = defaultAvailableMode
+	}
 
 	var rows []searchRow
 	var entriesCount int
@@ -100,7 +147,6 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 	if searchQuery != "" {
 		fallback := func() (model.Entries, int, error) {
 			builder := h.store.NewEntryQueryBuilder(user.ID).
-				WithSearchQuery(searchQuery).
 				WithoutContent().
 				WithOffset(offset).
 				WithLimit(user.EntriesPerPage)
@@ -108,6 +154,23 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 			if unreadOnly {
 				builder = builder.WithStatuses(model.EntryStatusUnread)
 			}
+			if excludeHidden {
+				builder = builder.WithHidden(false)
+			}
+
+			// The picker's chosen order (plus its stable secondary sort)
+			// is added before WithSearchQuery so it takes priority over
+			// the relevance ranking WithSearchQuery appends: WithSorting
+			// builds its ORDER BY in the order its calls were made, and a
+			// deliberately chosen column should win over the implicit
+			// "best match first" default, matching every other list page
+			// where the picker defaults to the saved preference. This
+			// only affects this fallback path - sidecar-backed modes
+			// return their own relevance order below and are never
+			// re-sorted by the picker (re-sorting ranked results by a
+			// column would discard the ranking).
+			builder = withStableEntrySorting(builder, searchOrder, searchDirection)
+			builder = builder.WithSearchQuery(searchQuery)
 
 			return builder.GetEntriesWithCount()
 		}
@@ -124,11 +187,12 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 
 		rows, entriesCount, degraded, err = resolveSearchResults(
 			r.Context(),
-			config.Opts.SearchSidecarURL(),
+			sidecarURL,
 			user.ID,
 			searchQuery,
 			searchMode,
 			unreadOnly,
+			excludeHidden,
 			offset,
 			sidecarSearchLimit(user.EntriesPerPage),
 			hydrate,
@@ -144,18 +208,24 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 	pagination := getPagination(h.routePath("/search"), entriesCount, offset, user.EntriesPerPage)
 	pagination.SearchQuery = searchQuery
 	pagination.UnreadOnly = unreadOnly
+	pagination.ExcludeHidden = excludeHidden
 	pagination.Mode = searchMode
+	pagination.Order = searchOrder
+	pagination.Direction = searchDirection
 
 	view.Set("searchQuery", searchQuery)
 	view.Set("searchMode", searchMode)
-	view.Set("searchModes", searchModes)
-	// searchModesAvailable gates the mode picker in the template. With
-	// SEARCH_SIDECAR_URL unset every mode resolves to the same built-in
-	// full-text search, so offering the choice would change the URL and
-	// nothing else - the one place the off switch would not be "exactly
-	// as before" (spec §8.2).
-	view.Set("searchModesAvailable", config.Opts.SearchSidecarURL() != "")
+	view.Set("searchModes", availableSearchModes)
+	// searchModesAvailable always renders the picker now (see
+	// availableSearchModes above): with no sidecar configured it still
+	// shows the one mode that works without one, rather than hiding the
+	// control outright.
+	view.Set("searchModesAvailable", true)
 	view.Set("searchUnreadOnly", unreadOnly)
+	view.Set("searchExcludeHidden", excludeHidden)
+	view.Set("searchOrder", searchOrder)
+	view.Set("searchDirection", searchDirection)
+	view.Set("searchSortOrders", searchSortOrders)
 	view.Set("searchRows", rows)
 	view.Set("total", entriesCount)
 	// searchDegraded surfaces the notice spec §8.3 calls for: the sidecar
@@ -176,6 +246,15 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 
 // resolveSearchResults returns the rows and total count to render on the
 // search page.
+//
+// When searchMode is fullTextSearchMode, fallback runs directly and
+// degraded is false, regardless of sidecarURL or offset: this is a
+// deliberate choice of Miniflux's own full-text search (spec §6.3's fifth
+// mode, task 10 part C), not a degradation, so the sidecar is never
+// called and no notice is shown. This check runs before every other
+// branch below precisely so it pre-empts them: fullTextSearchMode with a
+// non-zero offset must stay non-degraded too, unlike the ordinary
+// fallback-by-offset case.
 //
 // When sidecarURL is empty, fallback runs directly and degraded is false:
 // the feature is off, nothing failed, and the page must look exactly as
@@ -200,6 +279,14 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 // differently (spec §6.4): resp.Passages, not resp.Entries, carries the
 // ranked hits, one row per passage rather than per entry, and the same
 // entry can appear in more than one row.
+//
+// excludeHidden (spec §13.3, task 10 part A) is enforced twice, once per
+// source of rows: the fallback closure applies WithHidden(false) at the
+// SQL level, while sidecar-backed rows are filtered here, after
+// hydration, because the sidecar has no "not hidden" filter of its own
+// (spec §6.4 lists it as a future addition) - hydrate() already returns
+// each entry's Hidden flag, so no sidecar or searchclient change is
+// needed to honour the checkbox for ranked modes too.
 func resolveSearchResults(
 	ctx context.Context,
 	sidecarURL string,
@@ -207,6 +294,7 @@ func resolveSearchResults(
 	query string,
 	searchMode string,
 	unreadOnly bool,
+	excludeHidden bool,
 	offset int,
 	limit int,
 	hydrate func([]int64) (model.Entries, error),
@@ -215,6 +303,11 @@ func resolveSearchResults(
 	runFallback := func() ([]searchRow, int, error) {
 		entries, count, err := fallback()
 		return entryRows(entries), count, err
+	}
+
+	if searchMode == fullTextSearchMode {
+		rows, count, err := runFallback()
+		return rows, count, false, err
 	}
 
 	if sidecarURL == "" {
@@ -264,6 +357,9 @@ func resolveSearchResults(
 			rows, count, ferr := runFallback()
 			return rows, count, true, ferr
 		}
+		if excludeHidden {
+			rows = excludeHiddenRows(rows)
+		}
 		return rows, len(rows), false, nil
 	}
 
@@ -289,7 +385,23 @@ func resolveSearchResults(
 			rows = append(rows, searchRow{Entry: e, Segments: buildSnippetSegments(hit.Snippet)})
 		}
 	}
+	if excludeHidden {
+		rows = excludeHiddenRows(rows)
+	}
 	return rows, len(rows), false, nil
+}
+
+// excludeHiddenRows drops rows whose entry is hidden. See
+// resolveSearchResults' doc comment for why this is done here, after
+// hydration, rather than asked of the sidecar.
+func excludeHiddenRows(rows []searchRow) []searchRow {
+	kept := make([]searchRow, 0, len(rows))
+	for _, row := range rows {
+		if !row.Entry.Hidden {
+			kept = append(kept, row)
+		}
+	}
+	return kept
 }
 
 // entryRows wraps plain entries (the fallback path, which has no snippet

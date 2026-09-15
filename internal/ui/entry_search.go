@@ -22,6 +22,10 @@ func (h *handler) showSearchEntryPage(w http.ResponseWriter, r *http.Request) {
 	entryID := request.RouteInt64Param(r, "entryID")
 	searchQuery := request.QueryStringParam(r, "q", "")
 	unreadOnly := request.QueryBoolParam(r, "unread", false)
+	excludeHidden := request.QueryBoolParam(r, "excludeHidden", false)
+	searchMode := parseSearchMode(request.QueryStringParam(r, "mode", ""))
+	searchOrder := parseEntryOrder(r, user.EntryOrder)
+	searchDirection := parseEntryDirection(r, user.EntryDirection)
 
 	entry, err := h.store.NewEntryQueryBuilder(user.ID).
 		WithSearchQuery(searchQuery).
@@ -52,7 +56,7 @@ func (h *handler) showSearchEntryPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entryPaginationBuilder := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, user.EntryOrder, user.EntryDirection).
+	entryPaginationBuilder := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, searchOrder, searchDirection).
 		WithSearchQuery(searchQuery)
 	if unreadOnly {
 		if entry.Status == model.EntryStatusRead {
@@ -60,6 +64,9 @@ func (h *handler) showSearchEntryPage(w http.ResponseWriter, r *http.Request) {
 		} else {
 			entryPaginationBuilder = entryPaginationBuilder.WithStatus(model.EntryStatusUnread)
 		}
+	}
+	if excludeHidden {
+		entryPaginationBuilder = entryPaginationBuilder.WithNotHiddenOrEntryID(entry.ID)
 	}
 
 	prevEntry, nextEntry, err := entryPaginationBuilder.Entries()
@@ -81,6 +88,10 @@ func (h *handler) showSearchEntryPage(w http.ResponseWriter, r *http.Request) {
 	view := view.New(h.tpl, r)
 	view.Set("searchQuery", searchQuery)
 	view.Set("searchUnreadOnly", unreadOnly)
+	view.Set("searchExcludeHidden", excludeHidden)
+	view.Set("searchMode", searchMode)
+	view.Set("searchOrder", searchOrder)
+	view.Set("searchDirection", searchDirection)
 	view.Set("entry", entry)
 	view.Set("prevEntry", prevEntry)
 	view.Set("nextEntry", nextEntry)

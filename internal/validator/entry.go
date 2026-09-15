@@ -50,14 +50,18 @@ func ValidateEntryStatus(status string) error {
 	return fmt.Errorf(`invalid entry status, valid status values are: %q and %q`, model.EntryStatusRead, model.EntryStatusUnread)
 }
 
-// ValidateEntryOrder makes sure the sorting order is valid.
+// ValidateEntryOrder makes sure the sorting order is valid. "hidden" and
+// "starred" (spec §13.3) are entry-rating booleans, exactly like the
+// pre-existing "status": sorting by them groups entries into two buckets,
+// so callers that care about a deterministic sequence within a bucket
+// should add a stable secondary sort (e.g. published_at, then id).
 func ValidateEntryOrder(order string) error {
 	switch order {
-	case "id", "status", "changed_at", "published_at", "created_at", "category_title", "category_id", "title", "author":
+	case "id", "status", "changed_at", "published_at", "created_at", "category_title", "category_id", "title", "author", "hidden", "starred":
 		return nil
 	}
 
-	return errors.New(`invalid entry order, valid order values are: "id", "status", "changed_at", "published_at", "created_at", "category_title", "category_id", "title", "author"`)
+	return errors.New(`invalid entry order, valid order values are: "id", "status", "changed_at", "published_at", "created_at", "category_title", "category_id", "title", "author", "hidden", "starred"`)
 }
 
 // ValidateEntryModification makes sure the entry modification is valid.
