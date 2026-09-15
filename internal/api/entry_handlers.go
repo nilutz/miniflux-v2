@@ -244,11 +244,19 @@ func (h *handler) setEntryStatusAndStarredHandler(w http.ResponseWriter, r *http
 	}
 
 	if entriesStatusUpdateRequest.Hidden != nil {
-		// "" (hand): the caller supplied a specific, deliberate list of entry
-		// IDs, not "everything in some scope" — spec §13.3 reserves the
-		// 'bulk' reason for mass actions such as the subscribe-time backlog
-		// hide and the mark-all-as-hidden routes.
-		if err := h.store.SetEntriesHiddenState(request.UserID(r), entriesStatusUpdateRequest.EntryIDs, *entriesStatusUpdateRequest.Hidden, ""); err != nil {
+		// Spec §13.3, taken literally: "hidden by hand, one entry at a
+		// time." The server has no way to tell a human's single click from
+		// a script sweeping hundreds of ids through this same field, so the
+		// list length is the only signal available — a single id is what a
+		// hand action looks like (including a client that reimplements the
+		// single-entry hide button via this endpoint), anything longer is a
+		// scope, exactly like the mark-all-as-hidden routes, and must not
+		// be recorded as a hand judgement.
+		reason := ""
+		if len(entriesStatusUpdateRequest.EntryIDs) > 1 {
+			reason = model.EntryHiddenReasonBulk
+		}
+		if err := h.store.SetEntriesHiddenState(request.UserID(r), entriesStatusUpdateRequest.EntryIDs, *entriesStatusUpdateRequest.Hidden, reason); err != nil {
 			response.JSONServerError(w, r, err)
 			return
 		}
