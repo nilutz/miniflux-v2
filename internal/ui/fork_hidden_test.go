@@ -370,6 +370,139 @@ func TestUnreadEntryPaginationSkipsHiddenNeighbor(t *testing.T) {
 	}
 }
 
+// TestUnreadCategoryEntryPaginationSkipsHiddenNeighbor is
+// TestUnreadEntryPaginationSkipsHiddenNeighbor's category-scoped sibling.
+// showUnreadCategoryEntryPage has its own entryPaginationBuilder chain and
+// its own WithHidden(false) call site (internal/ui/unread_entry_category.go)
+// - proven here on its own, not folded into the plain /unread/entry test,
+// so removing it here alone (and not from unread_entry_feed.go too) is what
+// makes this test fail, rather than the two call sites masking each other.
+func TestUnreadCategoryEntryPaginationSkipsHiddenNeighbor(t *testing.T) {
+	db := uiHiddenTestDB(t)
+	store := storage.NewStorage(db)
+	h := newUIHiddenTestHandler(t, store)
+
+	username := "unread-category-pagination-hidden"
+	userID, categoryID, feedID := createUIHiddenTestUserAndFeed(t, db, username)
+
+	olderTitle := "Older category neighbour for " + username
+	olderID := insertUIHiddenTestEntry(t, db, userID, feedID, olderTitle, "hash-cat-older-"+username, time.Now().Add(-time.Hour))
+	newerID := insertUIHiddenTestEntry(t, db, userID, feedID, "Newer category entry for "+username, "hash-cat-newer-"+username, time.Now())
+
+	render := func() string {
+		r := withUIHiddenTestContext(httptest.NewRequest(http.MethodGet, "/unread/category/"+strconv.FormatInt(categoryID, 10)+"/entry/"+strconv.FormatInt(newerID, 10), nil), userID)
+		r.SetPathValue("categoryID", strconv.FormatInt(categoryID, 10))
+		r.SetPathValue("entryID", strconv.FormatInt(newerID, 10))
+		w := httptest.NewRecorder()
+		h.showUnreadCategoryEntryPage(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: %d, body: %s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	before := render()
+	if !strings.Contains(before, `title="`+olderTitle+`"`) {
+		t.Fatalf("expected the older entry %q to be offered as the previous entry before hiding it; body:\n%s", olderTitle, before)
+	}
+
+	if err := store.ToggleHidden(userID, olderID); err != nil {
+		t.Fatalf("unable to hide entry: %v", err)
+	}
+
+	after := render()
+	if strings.Contains(after, `title="`+olderTitle+`"`) {
+		t.Fatalf("expected the hidden entry %q to no longer be offered as the previous entry in the category-scoped unread view; body:\n%s", olderTitle, after)
+	}
+}
+
+// TestUnreadFeedEntryPaginationSkipsHiddenNeighbor is
+// TestUnreadEntryPaginationSkipsHiddenNeighbor's feed-scoped sibling; see
+// the category variant's comment for why it is proven independently.
+func TestUnreadFeedEntryPaginationSkipsHiddenNeighbor(t *testing.T) {
+	db := uiHiddenTestDB(t)
+	store := storage.NewStorage(db)
+	h := newUIHiddenTestHandler(t, store)
+
+	username := "unread-feed-pagination-hidden"
+	userID, _, feedID := createUIHiddenTestUserAndFeed(t, db, username)
+
+	olderTitle := "Older feed neighbour for " + username
+	olderID := insertUIHiddenTestEntry(t, db, userID, feedID, olderTitle, "hash-feed-older-"+username, time.Now().Add(-time.Hour))
+	newerID := insertUIHiddenTestEntry(t, db, userID, feedID, "Newer feed entry for "+username, "hash-feed-newer-"+username, time.Now())
+
+	render := func() string {
+		r := withUIHiddenTestContext(httptest.NewRequest(http.MethodGet, "/unread/feed/"+strconv.FormatInt(feedID, 10)+"/entry/"+strconv.FormatInt(newerID, 10), nil), userID)
+		r.SetPathValue("feedID", strconv.FormatInt(feedID, 10))
+		r.SetPathValue("entryID", strconv.FormatInt(newerID, 10))
+		w := httptest.NewRecorder()
+		h.showUnreadFeedEntryPage(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: %d, body: %s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	before := render()
+	if !strings.Contains(before, `title="`+olderTitle+`"`) {
+		t.Fatalf("expected the older entry %q to be offered as the previous entry before hiding it; body:\n%s", olderTitle, before)
+	}
+
+	if err := store.ToggleHidden(userID, olderID); err != nil {
+		t.Fatalf("unable to hide entry: %v", err)
+	}
+
+	after := render()
+	if strings.Contains(after, `title="`+olderTitle+`"`) {
+		t.Fatalf("expected the hidden entry %q to no longer be offered as the previous entry in the feed-scoped unread view; body:\n%s", olderTitle, after)
+	}
+}
+
+// TestUnreadPageOffsetFallbackExcludesHiddenEntry covers
+// showUnreadPage's second query, the offset-reset fallback taken when the
+// requested offset is stale or out of range (offset >= countUnread &&
+// countUnread > 0). It has its own WithHidden(false) call, separate from
+// the primary query's, and nothing else in this suite drives a request
+// down that branch.
+func TestUnreadPageOffsetFallbackExcludesHiddenEntry(t *testing.T) {
+	db := uiHiddenTestDB(t)
+	store := storage.NewStorage(db)
+	h := newUIHiddenTestHandler(t, store)
+
+	username := "unread-offset-fallback"
+	userID, _, feedID := createUIHiddenTestUserAndFeed(t, db, username)
+
+	hiddenTitle := "Fallback hidden entry for " + username
+	hiddenID := insertUIHiddenTestEntry(t, db, userID, feedID, hiddenTitle, "hash-fallback-hidden-"+username, time.Now())
+	visibleTitle := "Fallback visible entry for " + username
+	insertUIHiddenTestEntry(t, db, userID, feedID, visibleTitle, "hash-fallback-visible-"+username, time.Now())
+
+	if err := store.ToggleHidden(userID, hiddenID); err != nil {
+		t.Fatalf("unable to hide entry: %v", err)
+	}
+
+	// The one non-hidden entry makes countUnread 1; any offset >= 1 forces
+	// showUnreadPage's fallback branch, which re-runs the query with
+	// offset reset to 0.
+	r := withUIHiddenTestContext(httptest.NewRequest(http.MethodGet, "/unread?offset=50", nil), userID)
+	w := httptest.NewRecorder()
+	h.showUnreadPage(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: %d, body: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	if !strings.Contains(body, visibleTitle) {
+		t.Fatalf("expected the visible entry %q to appear via the offset-reset fallback query; body:\n%s", visibleTitle, body)
+	}
+	if strings.Contains(body, hiddenTitle) {
+		t.Fatalf("expected the hidden entry %q to stay excluded from the offset-reset fallback query; body:\n%s", hiddenTitle, body)
+	}
+	if !strings.Contains(body, `unread-counter">1<`) {
+		t.Fatalf("expected the fallback query's count to read 1, excluding the hidden entry; body:\n%s", body)
+	}
+}
+
 // TestToggleHiddenHandlerFlipsTheFlag exercises the UI route added for the
 // rating control, mirroring toggleStarred's own coverage.
 func TestToggleHiddenHandlerFlipsTheFlag(t *testing.T) {
