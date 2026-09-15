@@ -96,20 +96,57 @@ func TestEvalRecall(t *testing.T) {
 		t.Fatalf("loading eval queries: %v", err)
 	}
 
-	modes := []struct {
-		name string
-		mode search.Mode
-	}{
-		{"keyword", search.ModeKeyword},
-		{"semantic", search.ModeSemantic},
-		{"hybrid", search.ModeHybrid},
-		{"passages", search.ModePassages},
+	ctx := context.Background()
+	reports := runRecallEval(t, ctx, searcher, queries)
+
+	t.Logf("recall@%d by mode (%d queries):", evalK, len(queries))
+	for _, m := range evalModes {
+		r := reports[m.name]
+		t.Logf("  %-10s mean recall@%d = %.4f", m.name, evalK, r.MeanRecall)
 	}
 
-	ctx := context.Background()
-	reports := make(map[string]eval.Report, len(modes))
+	for _, m := range evalModes {
+		r := reports[m.name]
+		for _, pq := range r.PerQuery {
+			t.Logf("    [%-8s] recall=%.3f  %-70s  (%s)", m.name, pq.Recall, pq.Query.Text, pq.Query.Note)
+		}
+	}
 
-	for _, m := range modes {
+	hybrid := reports["hybrid"].MeanRecall
+	keyword := reports["keyword"].MeanRecall
+	semantic := reports["semantic"].MeanRecall
+	passages := reports["passages"].MeanRecall
+	t.Logf("summary: keyword=%.4f semantic=%.4f hybrid=%.4f passages=%.4f", keyword, semantic, hybrid, passages)
+
+	if hybrid+1e-9 < keyword || hybrid+1e-9 < semantic {
+		t.Logf("FINDING: hybrid (%.4f) did NOT beat both single-mode retrievals (keyword=%.4f, semantic=%.4f) on this eval set -- spec §6.3's central claim does not hold here; see the task report.", hybrid, keyword, semantic)
+	}
+}
+
+// evalModes is the fixed set of retrieval modes every recall-reporting run
+// in this package scores -- shared by TestEvalRecall and TestChunkingSweep
+// (task 3's sweep tool) so the two can never silently drift into scoring a
+// different set of modes from one another.
+var evalModes = []struct {
+	name string
+	mode search.Mode
+}{
+	{"keyword", search.ModeKeyword},
+	{"semantic", search.ModeSemantic},
+	{"hybrid", search.ModeHybrid},
+	{"passages", search.ModePassages},
+}
+
+// runRecallEval runs every query in queries through every mode in
+// evalModes against searcher, scoring each with eval.RecallAtK at evalK,
+// and returns one eval.Report per mode name. A Search failure is a hard
+// t.Fatalf: an error here means the run cannot be trusted at all, not a
+// data point to fold into the mean.
+func runRecallEval(t *testing.T, ctx context.Context, searcher *search.Searcher, queries []eval.Query) map[string]eval.Report {
+	t.Helper()
+
+	reports := make(map[string]eval.Report, len(evalModes))
+	for _, m := range evalModes {
 		perQuery := make([]eval.PerQueryResult, 0, len(queries))
 
 		for _, q := range queries {
@@ -129,29 +166,7 @@ func TestEvalRecall(t *testing.T) {
 
 		reports[m.name] = eval.NewReport(perQuery)
 	}
-
-	t.Logf("recall@%d by mode (%d queries):", evalK, len(queries))
-	for _, m := range modes {
-		r := reports[m.name]
-		t.Logf("  %-10s mean recall@%d = %.4f", m.name, evalK, r.MeanRecall)
-	}
-
-	for _, m := range modes {
-		r := reports[m.name]
-		for _, pq := range r.PerQuery {
-			t.Logf("    [%-8s] recall=%.3f  %-70s  (%s)", m.name, pq.Recall, pq.Query.Text, pq.Query.Note)
-		}
-	}
-
-	hybrid := reports["hybrid"].MeanRecall
-	keyword := reports["keyword"].MeanRecall
-	semantic := reports["semantic"].MeanRecall
-	passages := reports["passages"].MeanRecall
-	t.Logf("summary: keyword=%.4f semantic=%.4f hybrid=%.4f passages=%.4f", keyword, semantic, hybrid, passages)
-
-	if hybrid+1e-9 < keyword || hybrid+1e-9 < semantic {
-		t.Logf("FINDING: hybrid (%.4f) did NOT beat both single-mode retrievals (keyword=%.4f, semantic=%.4f) on this eval set -- spec §6.3's central claim does not hold here; see the task report.", hybrid, keyword, semantic)
-	}
+	return reports
 }
 
 // responseEntryIDs extracts a ranked list of distinct entry ids from resp,

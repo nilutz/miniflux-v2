@@ -180,12 +180,15 @@ type Indexer struct {
 	embedderMu sync.RWMutex
 	embedder   embed.Embedder
 
-	mu        sync.Mutex
-	batchSize int // live-editable (spec §9.2); guarded by mu, always read via BatchSize()
+	mu           sync.Mutex
+	batchSize    int                  // live-editable (spec §9.2); guarded by mu, always read via BatchSize()
+	splitOptions passage.SplitOptions // guarded by mu, always read via SplitOptions(); see SetSplitOptions
 }
 
 // New builds an Indexer over the given store and embedder, with the
-// embedding batch size starting at DefaultBatchSize.
+// embedding batch size starting at DefaultBatchSize and body-passage
+// chunking starting at passage.DefaultSplitOptions() — the same
+// production configuration every lane has always used.
 //
 // It records e's Identity() with the store (store.SetModelIdentity) before
 // returning, so that contentHash folds in the model actually configured
@@ -200,7 +203,32 @@ func New(s *store.Store, e embed.Embedder) *Indexer {
 	if e != nil {
 		store.SetModelIdentity(e.Identity())
 	}
-	return &Indexer{store: s, embedder: e, batchSize: DefaultBatchSize}
+	return &Indexer{store: s, embedder: e, batchSize: DefaultBatchSize, splitOptions: passage.DefaultSplitOptions()}
+}
+
+// SetSplitOptions replaces the chunking configuration IndexEntry passes to
+// passage.Split for body text, taking effect on the next IndexEntry call
+// exactly like SetBatchSize. Every production lane leaves this at
+// passage.DefaultSplitOptions() (New's starting value); it exists so the
+// chunking sweep tool (nomic migration plan, task 3 brief — see
+// cmd/sidecar's TestChunkingSweep) can re-index a corpus under a
+// candidate SplitOptions without a second copy of IndexEntry's logic.
+//
+// Unlike SetBatchSize this performs no clamping: an out-of-range or
+// nonsensical SplitOptions is exactly what a sweep may deliberately want
+// to measure the consequences of, so validating it here would get in the
+// way of the tool this method exists to serve.
+func (idx *Indexer) SetSplitOptions(opts passage.SplitOptions) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.splitOptions = opts
+}
+
+// SplitOptions returns the chunking configuration currently in effect.
+func (idx *Indexer) SplitOptions() passage.SplitOptions {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return idx.splitOptions
 }
 
 // SetBatchSize live-edits the number of passages embedded per forward
@@ -387,7 +415,7 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	bodyText := passage.ExtractText(entry.Content)
 	var bodyPassages []passage.Passage
 	if bodyText != "" {
-		bodyPassages = passage.Split(bodyText, passage.DefaultSplitOptions())
+		bodyPassages = passage.Split(bodyText, idx.SplitOptions())
 	}
 
 	if title == "" && len(bodyPassages) == 0 {

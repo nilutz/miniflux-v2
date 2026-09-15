@@ -120,3 +120,61 @@ func TestSplitHandlesMultiByteUTF8Offsets(t *testing.T) {
 		t.Fatalf("last passage should end at %d, got %d", len(text), last.CharEnd)
 	}
 }
+
+// TestSplitHonoursInjectedTokenCounter proves Split actually consults
+// opts.TokenCounter when one is set, rather than silently falling back to
+// the word-based estimate regardless of what was injected — the failure
+// mode a "the units are honest now" claim would be cosmetic without a
+// test that discriminates against it (nomic migration plan, task 3
+// brief).
+//
+// This package cannot exercise a real tokenizer-backed TokenCounter
+// itself (see TokenCounter's own doc comment for why); this test proves
+// the general mechanism with a synthetic one, hermetically. See
+// cmd/sidecar's TestSplitPassageAtCapNeverExceedsNomicsRealTokenLimit for
+// the counterpart that injects the real nomic tokenizer and proves the
+// deliverable the task brief actually asks for: a passage at the cap
+// does not exceed the model's real token limit.
+func TestSplitHonoursInjectedTokenCounter(t *testing.T) {
+	// Every "sentence" is the single word "Word" plus its terminator, so
+	// the word-based default estimator (one word = one "token") would
+	// count each sentence as costing 1 token — and, at MaxTokens=40,
+	// would happily pack all 100 into one passage. heavyCounter instead
+	// reports 10 tokens per sentence, simulating a real subword tokenizer
+	// finding far more tokens in dense or rare text than a word count
+	// would ever suggest. The two disagree sharply on cost per sentence
+	// while agreeing on sentence count, which is exactly what makes this
+	// test able to tell "Split used my counter" apart from "Split used
+	// the word estimate and got lucky".
+	text := strings.TrimSpace(strings.Repeat("Word. ", 100))
+
+	var calls int
+	heavyCounter := func(s string) int {
+		calls++
+		return 10
+	}
+
+	opts := SplitOptions{TargetTokens: 30, MaxTokens: 40, OverlapTokens: 10, TokenCounter: heavyCounter}
+	passages := Split(text, opts)
+
+	if calls == 0 {
+		t.Fatal("TokenCounter was never called — Split is not using the injected counter at all")
+	}
+	if len(passages) < 2 {
+		t.Fatalf("expected several passages (100 sentences at 10 tokens each, capped at 40), got %d", len(passages))
+	}
+
+	// MaxTokens=40 at 10 tokens/sentence permits at most 4 sentences per
+	// passage. Under the word-based default (1 token/sentence for this
+	// text) the same text would pack far more than 4 per passage — a
+	// regression back to the word estimate would show up here as
+	// oversized passages, not as a crash.
+	const maxSentencesPerPassage = 4
+	for i, p := range passages {
+		if n := strings.Count(p.Text, "."); n > maxSentencesPerPassage {
+			t.Fatalf("passage %d has %d sentences (%d tokens under the injected counter), exceeding MaxTokens=%d — "+
+				"Split is not enforcing the cap using the injected TokenCounter:\n%q",
+				i, n, n*10, opts.MaxTokens, p.Text)
+		}
+	}
+}

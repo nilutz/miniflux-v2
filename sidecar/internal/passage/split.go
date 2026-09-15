@@ -18,16 +18,59 @@ type Passage struct {
 	CharEnd   int
 }
 
-// SplitOptions controls passage granularity. Sizes are in approximate tokens,
-// estimated as words — close enough for chunking, and far cheaper than running
-// the real tokenizer over the whole corpus twice.
+// TokenCounter measures how many tokens a single sentence costs against
+// TargetTokens/MaxTokens/OverlapTokens below. Split calls it once per
+// sentence and only ever sums and compares the results — it never
+// interprets what "token" means beyond that arithmetic, so any counter
+// that consistently answers the same question for the same input is safe
+// to inject.
+//
+// DefaultSplitOptions leaves this nil, which makes Split fall back to
+// estimateTokens — a word count, not a real token count; see its own doc
+// comment for the ratio and its error bars. That default is a cheap,
+// day-to-day budget, not a hard ceiling. Inject a counter backed by the
+// actual embedding model's real tokenizer wherever MaxTokens has to be a
+// genuine guarantee against a model's real context window rather than an
+// estimate of one — the nomic migration plan's task 3 brief calls this
+// "the two acceptable approaches" choice out by name, and this is
+// approach 1 (count real tokens), made safe to use here without this
+// package importing a tokenizer at all.
+//
+// internal/passage cannot supply a real TokenCounter itself: the actual
+// tokenizer lives behind internal/embed/onnx, which links ~37MB of
+// native libtokenizers.a / ONNX Runtime, and this package exists
+// specifically so packages that never do inference — this one included —
+// never have to link that (see the package doc comment). A real counter
+// is therefore always built by a caller that already pays that cost and
+// handed in here as a plain function value — see cmd/sidecar's
+// TestSplitPassageAtCapNeverExceedsNomicsRealTokenLimit for the one that
+// actually proves a passage at the cap fits the model's real limit.
+type TokenCounter func(sentence string) int
+
+// SplitOptions controls passage granularity. TargetTokens/MaxTokens/
+// OverlapTokens are counted by TokenCounter — see its own doc comment for
+// what "tokens" means when TokenCounter is left nil, as
+// DefaultSplitOptions leaves it.
 type SplitOptions struct {
 	TargetTokens  int // aim for this many tokens per passage
 	MaxTokens     int // never exceed this
 	OverlapTokens int // repeat this much of the previous passage
+
+	// TokenCounter is how the three fields above are actually measured.
+	// Nil (DefaultSplitOptions' value) means "estimated by word count",
+	// not "exactly counted" — see TokenCounter's own doc comment.
+	TokenCounter TokenCounter
 }
 
 // DefaultSplitOptions returns the sizes used for indexing.
+//
+// These are still WORD counts by default (TokenCounter left nil): the
+// nomic migration plan's task 3 fixes the unit-honesty bug in how these
+// numbers are measured and labelled, but does not change their values —
+// that is a measurement the plan's sweep tool exists to make (see
+// cmd/sidecar's TestChunkingSweep), not a guess to make here. Do not read
+// "the units are now honest" as "these numbers were re-tuned for
+// nomic-embed-text-v1.5's 8192-token context"; they were not, yet.
 func DefaultSplitOptions() SplitOptions {
 	return SplitOptions{TargetTokens: 320, MaxTokens: 512, OverlapTokens: 64}
 }
@@ -53,6 +96,16 @@ func Split(text string, opts SplitOptions) []Passage {
 		return nil
 	}
 
+	// count is the TokenCounter actually used for this call: the one the
+	// caller injected, or estimateTokens (the word-based proxy) when they
+	// left TokenCounter nil. Resolved once, here, so every sentence in
+	// this call is measured the same way rather than risking a nil
+	// dereference deeper in the loop below.
+	count := opts.TokenCounter
+	if count == nil {
+		count = estimateTokens
+	}
+
 	var passages []Passage
 	i := 0
 	for i < len(sentences) {
@@ -60,7 +113,7 @@ func Split(text string, opts SplitOptions) []Passage {
 		j := groupStart
 		tokens := 0
 		for j < len(sentences) {
-			stoks := wordCount(text[sentences[j].start:sentences[j].end])
+			stoks := count(text[sentences[j].start:sentences[j].end])
 			if j > groupStart && tokens+stoks > opts.MaxTokens {
 				break
 			}
@@ -92,7 +145,7 @@ func Split(text string, opts SplitOptions) []Passage {
 			if overlapTokens >= opts.OverlapTokens {
 				break
 			}
-			overlapTokens += wordCount(text[sentences[newStart].start:sentences[newStart].end])
+			overlapTokens += count(text[sentences[newStart].start:sentences[newStart].end])
 			newStart--
 		}
 		i = newStart + 1
@@ -101,7 +154,18 @@ func Split(text string, opts SplitOptions) []Passage {
 	return passages
 }
 
-func wordCount(s string) int {
+// estimateTokens is the default TokenCounter: a plain word count, used as
+// a cheap proxy for what a real subword tokenizer would report. For
+// English prose one word averages roughly 1.3 real BERT/WordPiece tokens
+// (nomic migration plan, task 3 brief; the superseded task 13 brief's own
+// word-versus-token analysis) — so this UNDER-counts real tokens by
+// roughly that factor on ordinary prose, and can under-count far more
+// sharply on text with many rare or non-dictionary "words" (each one
+// costing several WordPiece subword tokens instead of close to one). It
+// is a rough, cheap proxy, never a substitute for actually asking a
+// tokenizer — see TokenCounter's own doc comment for how to inject one
+// that is exact.
+func estimateTokens(s string) int {
 	return len(strings.Fields(s))
 }
 

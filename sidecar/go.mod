@@ -8,13 +8,13 @@ module miniflux.app/v2/sidecar
 go 1.27.0
 
 require (
+	github.com/daulet/tokenizers v1.27.0
 	github.com/knights-analytics/hugot v0.7.8
 	github.com/lib/pq v1.12.3
 	golang.org/x/net v0.58.0
 )
 
 require (
-	github.com/daulet/tokenizers v1.27.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/gofrs/flock v0.13.1 // indirect
 	github.com/gomlx/compute v0.1.6 // indirect
