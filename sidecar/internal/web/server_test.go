@@ -889,3 +889,96 @@ func TestStatusPageShowsMetricsUnavailableOnError(t *testing.T) {
 		t.Errorf("expected the zero value (not a stale reading) when the source errors, got DeadTuples=%d", got.DeadTuples)
 	}
 }
+
+// (Fix round 2 finding 1.) A fresh backfill's search.passages table can
+// report pg_class.reltuples = -1 (Postgres' own "never analyzed" sentinel
+// -- see store.DatabaseMetrics' own doc comment) at the exact moment an
+// operator is most likely watching this page. Before this fix, that state
+// rendered identically to a genuine zero -- "0.00" passages per entry,
+// indistinguishable from "the backfill is producing nothing". This
+// exercises the full HTTP path (not just buildView in isolation) and
+// requires that the unknown state renders distinctly, and that a real
+// zero (a different fakeMetrics value) does NOT trigger the same wording
+// -- a fix that treated every falsy PassagesPerEntry as "unknown" would
+// pass the first half and fail this second one.
+func TestStatusPageDistinguishesUnknownRatioFromARealZero(t *testing.T) {
+	fb := &fakeBackfill{}
+	unknown := &fakeMetrics{metrics: store.DatabaseMetrics{
+		CountsAreEstimated:      true,
+		PassageCountUnknown:     true,
+		EntryCountUnknown:       false,
+		EntryCount:              50,
+		PassagesPerEntryUnknown: true,
+	}}
+	handler := newTestServerWithMetrics(t, fb, unknown)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	var got struct {
+		PassageCountUnknown     bool `json:"passage_count_unknown"`
+		PassagesPerEntryUnknown bool `json:"passages_per_entry_unknown"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v, body = %s", err, rec.Body.String())
+	}
+	if !got.PassageCountUnknown || !got.PassagesPerEntryUnknown {
+		t.Fatalf("expected both unknown flags to flow through to JSON, got %+v", got)
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlRec := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, htmlReq)
+	body := htmlRec.Body.String()
+	ratioRow := passagesPerEntryRow(t, body)
+	if !strings.Contains(ratioRow, "unknown") {
+		t.Errorf("expected the passages-per-entry row to say it is unknown, got row:\n%s", ratioRow)
+	}
+	if strings.Contains(ratioRow, "0.00") {
+		t.Errorf("expected NO '0.00' in the passages-per-entry row for an unknown ratio -- that is indistinguishable from a real zero, got row:\n%s", ratioRow)
+	}
+
+	// The other half: a REAL zero (analyzed, genuinely empty) must not
+	// print the same "unknown" wording in that same row -- these are
+	// different states and must look different on the page. (A fix that
+	// treated every falsy PassagesPerEntry as "unknown" would pass the
+	// check above but fail this one.)
+	realZero := &fakeMetrics{metrics: store.DatabaseMetrics{
+		CountsAreEstimated: true,
+		PassageCount:       0,
+		EntryCount:         0,
+		PassagesPerEntry:   0,
+	}}
+	handler = newTestServerWithMetrics(t, fb, realZero)
+	htmlReq = httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlRec = httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, htmlReq)
+	body = htmlRec.Body.String()
+	ratioRow = passagesPerEntryRow(t, body)
+	if strings.Contains(ratioRow, "unknown") {
+		t.Errorf("expected a genuine zero's row to NOT say 'unknown', got row:\n%s", ratioRow)
+	}
+	if !strings.Contains(ratioRow, "0.00") {
+		t.Errorf("expected a genuine zero ratio to render as 0.00, got row:\n%s", ratioRow)
+	}
+}
+
+// passagesPerEntryRow extracts just the "Passages per entry" table cell
+// from a rendered status page, so assertions about it (in particular,
+// whether "0.00" appears) are not fooled by unrelated "0.00"s elsewhere
+// on the page -- the Throughput row also formats as "%.2f" and renders
+// "0.00" at its own zero value, which is not what this test is about.
+func passagesPerEntryRow(t *testing.T, body string) string {
+	t.Helper()
+	const marker = "Passages per entry</th><td>"
+	start := strings.Index(body, marker)
+	if start == -1 {
+		t.Fatalf("could not find the passages-per-entry row in the page:\n%s", body)
+	}
+	start += len(marker)
+	end := strings.Index(body[start:], "</td>")
+	if end == -1 {
+		t.Fatalf("could not find the end of the passages-per-entry row in the page:\n%s", body)
+	}
+	return body[start : start+end]
+}

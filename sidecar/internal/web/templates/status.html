@@ -74,9 +74,18 @@
   <tr><th>Total database size</th><td>{{bytesize .DatabaseSizeBytes}}</td></tr>
   <tr><th>search schema size</th><td>{{bytesize .SearchSchemaSizeBytes}}</td></tr>
   <tr><th>HNSW index size</th><td>{{bytesize .HNSWIndexSizeBytes}}</td></tr>
-  <tr><th>Passages</th><td>{{comma .PassageCount}}{{if .CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}</td></tr>
-  <tr><th>Entries</th><td>{{comma .EntryCount}}{{if .CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}</td></tr>
-  <tr><th>Passages per entry</th><td>{{printf "%.2f" .PassagesPerEntry}}</td></tr>
+  <tr><th>Passages</th><td>
+    {{if .PassageCountUnknown}}not yet analyzed <span class="hint">(no estimate yet, not zero)</span>
+    {{else}}{{comma .PassageCount}}{{if .CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}{{end}}
+  </td></tr>
+  <tr><th>Entries</th><td>
+    {{if .EntryCountUnknown}}not yet analyzed <span class="hint">(no estimate yet, not zero)</span>
+    {{else}}{{comma .EntryCount}}{{if .CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}{{end}}
+  </td></tr>
+  <tr><th>Passages per entry</th><td>
+    {{if .PassagesPerEntryUnknown}}unknown <span class="hint">(not yet analyzed — not a real zero)</span>
+    {{else}}{{printf "%.2f" .PassagesPerEntry}}{{end}}
+  </td></tr>
   <tr><th>Dead tuples (search.passages)</th><td>
     {{comma .DeadTuples}}
     <div class="reason">A stale VACUUM silently truncates HNSW index scans — a high or climbing number here, not just search results that seem short, is the sign to check.</div>
@@ -87,8 +96,12 @@
   design spec assumed 4&ndash;6 and measured 13, which put its sizing
   estimate off by roughly 5x. Passage and entry counts are estimates
   (Postgres' own planner statistics, refreshed by ANALYZE/autovacuum), not
-  an exact count — cheap to read regardless of corpus size, at the cost of
-  lagging a burst of inserts briefly.
+  an exact count — cheap to read regardless of corpus size. Autovacuum's
+  analyze threshold scales with the table's own size, not with elapsed
+  time, so on a fast-growing table this estimate can lag well behind the
+  real count, not just briefly; right after a table is first created it
+  has no estimate to show at all, marked distinctly above rather than
+  shown as a plain zero.
 </p>
 {{else}}
 <p class="reason">Database metrics unavailable.</p>

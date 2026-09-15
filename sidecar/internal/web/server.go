@@ -270,6 +270,18 @@ type statusView struct {
 	PassagesPerEntry   float64 `json:"passages_per_entry"`
 	CountsAreEstimated bool    `json:"counts_are_estimated"`
 
+	// PassageCountUnknown/EntryCountUnknown/PassagesPerEntryUnknown mirror
+	// store.DatabaseMetrics' own fields of the same name (fix round 2
+	// finding 1): pg_class.reltuples is -1 for a relation Postgres has
+	// never ANALYZEd, which search.passages hits for real right at the
+	// start of a fresh backfill -- exactly when an operator is most
+	// likely watching. Without these, a 0 rendered here is indistinguishable
+	// from "the backfill is producing nothing"; the template must check
+	// these before rendering a number at all.
+	PassageCountUnknown     bool `json:"passage_count_unknown"`
+	EntryCountUnknown       bool `json:"entry_count_unknown"`
+	PassagesPerEntryUnknown bool `json:"passages_per_entry_unknown"`
+
 	// DeadTuples is search.passages' own dead-tuple count
 	// (pg_stat_user_tables.n_dead_tup). Not routine: a stale VACUUM
 	// silently truncates HNSW index scans, and in this project 1,066
@@ -317,15 +329,18 @@ func buildView(st indexer.Stats, liveSt indexer.LiveStats, cfg indexer.RuntimeCo
 		PollInterval:    formatSeconds(cfg.PollIntervalSeconds),
 		IdleResweep:     formatSeconds(cfg.IdleResweepIntervalSecs),
 
-		MetricsAvailable:      dmOK,
-		DatabaseSizeBytes:     dm.DatabaseSizeBytes,
-		SearchSchemaSizeBytes: dm.SearchSchemaSizeBytes,
-		HNSWIndexSizeBytes:    dm.HNSWIndexSizeBytes,
-		PassageCount:          dm.PassageCount,
-		EntryCount:            dm.EntryCount,
-		PassagesPerEntry:      dm.PassagesPerEntry,
-		CountsAreEstimated:    dm.CountsAreEstimated,
-		DeadTuples:            dm.DeadTuples,
+		MetricsAvailable:        dmOK,
+		DatabaseSizeBytes:       dm.DatabaseSizeBytes,
+		SearchSchemaSizeBytes:   dm.SearchSchemaSizeBytes,
+		HNSWIndexSizeBytes:      dm.HNSWIndexSizeBytes,
+		PassageCount:            dm.PassageCount,
+		EntryCount:              dm.EntryCount,
+		PassagesPerEntry:        dm.PassagesPerEntry,
+		CountsAreEstimated:      dm.CountsAreEstimated,
+		PassageCountUnknown:     dm.PassageCountUnknown,
+		EntryCountUnknown:       dm.EntryCountUnknown,
+		PassagesPerEntryUnknown: dm.PassagesPerEntryUnknown,
+		DeadTuples:              dm.DeadTuples,
 	}
 	if v.SkippedByReason == nil {
 		v.SkippedByReason = map[string]int64{}

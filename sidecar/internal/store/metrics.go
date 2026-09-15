@@ -36,11 +36,30 @@ type DatabaseMetrics struct {
 	EntryCount         int64
 	CountsAreEstimated bool
 
+	// PassageCountUnknown/EntryCountUnknown are true when Postgres itself
+	// has no estimate yet: pg_class.reltuples is -1 for a relation that
+	// has never been ANALYZEd (fix round 2 finding 1) -- which
+	// search.passages hits for real right at the START of a fresh
+	// backfill, exactly when an operator is most likely watching this
+	// page. Without this, "-1, coalesced to 0" is indistinguishable from
+	// a genuine zero, and the page would report "the backfill is
+	// producing nothing" during the one window it is working hardest.
+	// When either flag is true, the corresponding Count field is 0, but
+	// that 0 is NOT a reading -- callers (buildView, the template) must
+	// check the Unknown flag before trusting the Count.
+	PassageCountUnknown bool
+	EntryCountUnknown   bool
+
 	// PassagesPerEntry is the ratio spec §13.2 exists to surface: it is
 	// what makes disk growth predictable, and it is exactly the number
 	// the spec's own §5.5 estimate got wrong by roughly 5x. Zero when
-	// EntryCount is zero.
-	PassagesPerEntry float64
+	// EntryCount is a genuine zero. PassagesPerEntryUnknown is true
+	// whenever either count feeding this ratio is itself unknown (see
+	// PassageCountUnknown/EntryCountUnknown) -- a ratio computed from a
+	// 0 that is really "no estimate yet" is not a small number, it is no
+	// number, and the page must say so rather than render 0.00.
+	PassagesPerEntry        float64
+	PassagesPerEntryUnknown bool
 
 	// DeadTuples is search.passages' pg_stat_user_tables.n_dead_tup. Not
 	// routine: a stale VACUUM silently truncates HNSW index scans, and in
@@ -118,18 +137,31 @@ func (s *Store) DatabaseMetrics(ctx context.Context) (DatabaseMetrics, error) {
 	}
 
 	// reltuples is -1 for a relation that has never been vacuumed or
-	// analyzed; treat that as "no estimate yet" rather than a negative
-	// count.
+	// analyzed -- Postgres' own "no estimate yet" sentinel, not a
+	// negative count. That state must survive as PassageCountUnknown /
+	// EntryCountUnknown, not collapse into a Count of 0: a 0 here is a
+	// reading (the table really is empty, and ANALYZE has said so), while
+	// -1 is the absence of a reading, and the two look identical to an
+	// operator unless this method keeps them apart (fix round 2 finding
+	// 1 -- see the struct's own doc comment).
 	if passageTuples < 0 {
+		m.PassageCountUnknown = true
 		passageTuples = 0
 	}
 	if entryTuples < 0 {
+		m.EntryCountUnknown = true
 		entryTuples = 0
 	}
 	m.PassageCount = int64(passageTuples)
 	m.EntryCount = int64(entryTuples)
 	m.CountsAreEstimated = true
-	if m.EntryCount > 0 {
+
+	switch {
+	case m.PassageCountUnknown || m.EntryCountUnknown:
+		// A ratio built from a 0 that is really "unknown" is not a small
+		// ratio, it is no ratio -- do not compute one.
+		m.PassagesPerEntryUnknown = true
+	case m.EntryCount > 0:
 		m.PassagesPerEntry = float64(m.PassageCount) / float64(m.EntryCount)
 	}
 

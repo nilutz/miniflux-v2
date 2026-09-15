@@ -6,7 +6,6 @@ package store // import "miniflux.app/v2/sidecar/internal/store"
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 // TestDatabaseMetricsTracksInsertedPassagesAndEntries pins the trap called
@@ -111,6 +110,21 @@ func TestDatabaseMetricsIndexAndSchemaSizesTrackRealObjects(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// (Fix round 2 finding 2.) DatabaseSizeBytes previously had no
+	// independent re-read-and-compare of its own, unlike the two checks
+	// below -- a hardcoded LARGE constant (e.g. 9999999999) passed every
+	// other assertion in this file, including the containment checks
+	// further down, since nothing capped it from above. Read
+	// pg_database_size directly here and require an exact match, the same
+	// way the HNSW index size and schema size already are.
+	var wantDatabaseSize int64
+	if err := s.db.QueryRow(`SELECT pg_database_size(current_database())`).Scan(&wantDatabaseSize); err != nil {
+		t.Fatalf("unable to read the database size directly: %v", err)
+	}
+	if m.DatabaseSizeBytes != wantDatabaseSize {
+		t.Fatalf("expected DatabaseSizeBytes %d (read directly), got %d", wantDatabaseSize, m.DatabaseSizeBytes)
+	}
+
 	var wantHNSWSize int64
 	if err := s.db.QueryRow(`SELECT pg_relation_size('search.passages_embedding_idx')`).Scan(&wantHNSWSize); err != nil {
 		t.Fatalf("unable to read HNSW index size directly: %v", err)
@@ -184,21 +198,24 @@ func TestDatabaseMetricsDeadTuplesTracksActualChurn(t *testing.T) {
 		t.Fatalf("unexpected error replacing passages (2nd): %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	var after DatabaseMetrics
-	for {
-		after, err = s.DatabaseMetrics(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if after.DeadTuples > before.DeadTuples {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("expected DeadTuples to increase after a delete+insert churn within 5s; before=%d after=%d",
-				before.DeadTuples, after.DeadTuples)
-		}
-		time.Sleep(100 * time.Millisecond)
+	// pg_stat_user_tables is fed from shared-memory statistics that a
+	// backend flushes on its own schedule, not necessarily the instant a
+	// transaction commits -- pg_stat_force_next_flush() (present on this
+	// PG18 instance) forces the NEXT flush from THIS session to happen
+	// immediately, making the read below deterministic with no sleep or
+	// polling (fix round 2 finding 3: a 5-second polling loop was here
+	// before and was unnecessary).
+	if _, err := s.db.Exec(`SELECT pg_stat_force_next_flush()`); err != nil {
+		t.Fatalf("unable to force a stats flush: %v", err)
+	}
+
+	after, err := s.DatabaseMetrics(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if after.DeadTuples <= before.DeadTuples {
+		t.Fatalf("expected DeadTuples to increase after a delete+insert churn; before=%d after=%d",
+			before.DeadTuples, after.DeadTuples)
 	}
 
 	// Not just "it went up" -- it must be search.passages' own
@@ -216,5 +233,95 @@ func TestDatabaseMetricsDeadTuplesTracksActualChurn(t *testing.T) {
 	if after.DeadTuples != wantDeadTuples {
 		t.Fatalf("expected DeadTuples %d (search.passages' own n_dead_tup, read directly), got %d",
 			wantDeadTuples, after.DeadTuples)
+	}
+}
+
+// TestDatabaseMetricsDistinguishesUnanalyzedFromRealZero pins fix round 2
+// finding 1: pg_class.reltuples is -1 -- Postgres' OWN sentinel -- for a
+// relation that has never been ANALYZEd, which search.passages hits for
+// real right at the start of a fresh backfill, exactly when an operator
+// is most likely watching this page. Before this fix, -1 was silently
+// coalesced to 0, making "no estimate yet" indistinguishable from "the
+// backfill is producing nothing".
+//
+// Directly setting pg_class.reltuples (legal for a superuser, and the
+// only deterministic way to reproduce Postgres' own -1 state without
+// waiting on autovacuum or dropping the shared search.passages table
+// every other test in this package assumes is already analyzed) exercises
+// the real SELECT/Scan path this method actually runs, not a mocked
+// stand-in for it.
+func TestDatabaseMetricsDistinguishesUnanalyzedFromRealZero(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+	ctx := context.Background()
+
+	// Restore normal statistics for every test that runs after this one
+	// in the same package binary -- this simulates a transient Postgres
+	// state, not a real change to the table's contents, and must not
+	// leak into sibling tests that assume search.passages has been
+	// analyzed.
+	t.Cleanup(func() {
+		if _, err := s.db.Exec(`ANALYZE search.passages`); err != nil {
+			t.Logf("cleanup: unable to restore search.passages statistics: %v", err)
+		}
+	})
+
+	if _, err := s.db.Exec(`UPDATE pg_class SET reltuples = -1 WHERE oid = 'search.passages'::regclass`); err != nil {
+		t.Fatalf("unable to simulate a never-analyzed table: %v", err)
+	}
+
+	m, err := s.DatabaseMetrics(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !m.PassageCountUnknown {
+		t.Fatal("expected PassageCountUnknown = true when pg_class.reltuples reports -1 (never analyzed)")
+	}
+	if m.PassageCount != 0 {
+		t.Fatalf("expected PassageCount = 0 as the placeholder value while unknown, got %d", m.PassageCount)
+	}
+	if !m.PassagesPerEntryUnknown {
+		t.Fatal("expected PassagesPerEntryUnknown = true when the passage count itself is unknown")
+	}
+	if m.PassagesPerEntry != 0 {
+		t.Fatalf("expected PassagesPerEntry = 0 as the placeholder value while unknown, got %v", m.PassagesPerEntry)
+	}
+}
+
+// TestDatabaseMetricsDoesNotMarkARealZeroAsUnknown is the other half of
+// the distinguishability finding 1 asks for: reltuples = 0 (a genuine,
+// analyzed reading of an empty table) must NOT set the Unknown flags --
+// only Postgres' own -1 sentinel does. A fix that turned "unknown" into
+// "anything <= 0" would pass the test above but fail this one.
+func TestDatabaseMetricsDoesNotMarkARealZeroAsUnknown(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+	ctx := context.Background()
+
+	t.Cleanup(func() {
+		if _, err := s.db.Exec(`ANALYZE search.passages`); err != nil {
+			t.Logf("cleanup: unable to restore search.passages statistics: %v", err)
+		}
+	})
+
+	if _, err := s.db.Exec(`UPDATE pg_class SET reltuples = 0 WHERE oid = 'search.passages'::regclass`); err != nil {
+		t.Fatalf("unable to simulate a genuinely-empty, analyzed table: %v", err)
+	}
+
+	m, err := s.DatabaseMetrics(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if m.PassageCountUnknown {
+		t.Fatal("expected PassageCountUnknown = false for a genuine zero (reltuples=0), not -1 -- these must not collapse into each other")
+	}
+	if m.PassageCount != 0 {
+		t.Fatalf("expected PassageCount = 0, got %d", m.PassageCount)
 	}
 }
