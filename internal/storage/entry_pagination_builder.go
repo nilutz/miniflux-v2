@@ -41,6 +41,20 @@ func (e *entryPaginationBuilder) WithStarred() *entryPaginationBuilder {
 	return e
 }
 
+// WithHidden adds a hidden filter, mirroring EntryQueryBuilder.WithHidden:
+// opt-in, so prev/next navigation through an unread-only view can skip
+// hidden entries without affecting any other pagination context (spec
+// §13.3).
+func (e *entryPaginationBuilder) WithHidden(hidden bool) *entryPaginationBuilder {
+	if hidden {
+		e.conditions = append(e.conditions, "e.hidden is true")
+	} else {
+		e.conditions = append(e.conditions, "e.hidden is false")
+	}
+
+	return e
+}
+
 // WithFeedID adds feed_id to the condition.
 func (e *entryPaginationBuilder) WithFeedID(feedID int64) *entryPaginationBuilder {
 	if feedID != 0 {

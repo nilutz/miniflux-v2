@@ -54,6 +54,10 @@
         "%d dakika okuma süresi"
     ],
     "entry.external_link.label": "Dış bağlantı",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Tamamlandı!",
     "entry.save.label": "Kaydet",
     "entry.save.title": "Bu makeleyi kaydet",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Bölümlerde Gezinme",
     "page.keyboard_shortcuts.title": "Klavye Kısayolları",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Makele eklerini açma/kapama arasında geçiş yap",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Okundu/okunmadı arasında geçiş yap, sonrakine odaklan",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Okundu/okunmadı arasında geçiş yap, öncekine odaklan",
     "page.keyboard_shortcuts.toggle_star_status": "Yıldız ekle/kaldır",

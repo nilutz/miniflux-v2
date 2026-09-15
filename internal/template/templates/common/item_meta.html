@@ -36,6 +36,17 @@
                 data-value="{{ if .entry.Starred }}star{{ else }}unstar{{ end }}"
                 >{{ if .entry.Starred }}{{ icon "unstar" }}{{ else }}{{ icon "star" }}{{ end }}<span class="icon-label">{{ if .entry.Starred }}{{ t "entry.starred.toggle.off" }}{{ else }}{{ t "entry.starred.toggle.on" }}{{ end }}</span></button>
         </li>
+        <li class="item-meta-icons-hide">
+            <button
+                aria-describedby="entry-title-{{ .entry.ID }}"
+                data-toggle-hidden="true"
+                data-hide-url="{{ routePath "/entry/hide/%d" .entry.ID }}"
+                data-label-loading="{{ t "entry.state.saving" }}"
+                data-label-hide="{{ t "entry.hidden.toggle.on" }}"
+                data-label-unhide="{{ t "entry.hidden.toggle.off" }}"
+                data-value="{{ if .entry.Hidden }}hide{{ else }}unhide{{ end }}"
+                >{{ if .entry.Hidden }}{{ icon "unhide" }}{{ else }}{{ icon "hide" }}{{ end }}<span class="icon-label">{{ if .entry.Hidden }}{{ t "entry.hidden.toggle.off" }}{{ else }}{{ t "entry.hidden.toggle.on" }}{{ end }}</span></button>
+        </li>
         {{ if .entry.ShareCode }}
             <li class="item-meta-icons-share">
                 <a href="{{ routePath "/share/%s" .entry.ShareCode }}"

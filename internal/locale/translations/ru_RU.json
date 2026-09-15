@@ -56,6 +56,10 @@
         "%d минут чтения"
     ],
     "entry.external_link.label": "Внешняя ссылка",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Готово!",
     "entry.save.label": "Сохранить",
     "entry.save.title": "Сохранить эту статью",
@@ -539,6 +543,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Навигация по секциям",
     "page.keyboard_shortcuts.title": "Горячие клавиши",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Переключатель показать/скрыть вложения",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Переключатель прочитанного, сосредоточиться на следующем",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Переключатель прочитанного, фокус предыдущий",
     "page.keyboard_shortcuts.toggle_star_status": "Переключатель избранного",

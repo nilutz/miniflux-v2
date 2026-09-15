@@ -54,6 +54,10 @@
         "Leitura de %d minutos"
     ],
     "entry.external_link.label": "Link externo",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Feito!",
     "entry.save.label": "Salvar",
     "entry.save.title": "Salvar esse item",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Navegação de seções",
     "page.keyboard_shortcuts.title": "Atalhos de teclado",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Alternar abrir/fechar anexos do item",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Inverter estado de leitura do item, focar próximo item",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Inverter estado de leitura do item, focar item anterior",
     "page.keyboard_shortcuts.toggle_star_status": "Marcar ou desmarcar como favorito",

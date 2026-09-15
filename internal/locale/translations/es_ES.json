@@ -54,6 +54,10 @@
         "%d minutos de lectura"
     ],
     "entry.external_link.label": "Enlace externo",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "¡Hecho!",
     "entry.save.label": "Guardar",
     "entry.save.title": "Guardar este artículo",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Navegación de secciones",
     "page.keyboard_shortcuts.title": "Atajos de teclado",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Alternar abrir/cerrar adjuntos de la entrada",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Marcar como leído o no leído, enfoque siguiente",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Marcar como leído o no leído, foco anterior",
     "page.keyboard_shortcuts.toggle_star_status": "Agregar o quitar marcador",

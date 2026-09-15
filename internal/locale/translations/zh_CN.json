@@ -52,6 +52,10 @@
         "需要 %d 分钟阅读"
     ],
     "entry.external_link.label": "外部链接",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "完成！",
     "entry.save.label": "保存",
     "entry.save.title": "保存此条目",
@@ -527,6 +531,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "区域导航",
     "page.keyboard_shortcuts.title": "键盘快捷键",
     "page.keyboard_shortcuts.toggle_entry_attachments": "切换展开/折叠条目附件",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "切换已读/未读状态，并切换到下一项",
     "page.keyboard_shortcuts.toggle_read_status_prev": "切换已读/未读状态，并切换到上一项",
     "page.keyboard_shortcuts.toggle_star_status": "切换收藏状态",

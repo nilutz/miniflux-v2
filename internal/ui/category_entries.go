@@ -38,6 +38,7 @@ func (h *handler) showCategoryEntriesPage(w http.ResponseWriter, r *http.Request
 		WithSorting(user.EntryOrder, user.EntryDirection).
 		WithSorting("id", user.EntryDirection).
 		WithStatuses(model.EntryStatusUnread).
+		WithHidden(false).
 		WithoutContent().
 		WithOffset(offset).
 		WithLimit(user.EntriesPerPage).

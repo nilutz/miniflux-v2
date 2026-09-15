@@ -54,6 +54,10 @@
         "%d minutes de lecture"
     ],
     "entry.external_link.label": "Lien externe",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Terminé !",
     "entry.save.label": "Sauvegarder",
     "entry.save.title": "Sauvegarder cet article",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Navigation entre les sections",
     "page.keyboard_shortcuts.title": "Raccourcis clavier",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Ouvrir/Fermer les pièces jointes de l'entrée",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Basculer entre lu/non lu, et changer le focus sur l'élément suivant",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Basculer entre lu/non lu, et changer le focus sur l'élément précédent",
     "page.keyboard_shortcuts.toggle_star_status": "Ajouter/Enlever favoris",

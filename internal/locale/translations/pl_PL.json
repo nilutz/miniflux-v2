@@ -56,6 +56,10 @@
         "%d minut czytania"
     ],
     "entry.external_link.label": "Łącze zewnętrzne",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Gotowe!",
     "entry.save.label": "Zapisz",
     "entry.save.title": "Zapisz ten wpis",
@@ -539,6 +543,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Nawigacja między punktami menu",
     "page.keyboard_shortcuts.title": "Skróty klawiszowe",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Przełącz otwieranie/zamykanie załączników wpisów",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Przełącz przeczytane/nieprzeczytane, przejdź dalej",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Przełącz przeczytane/nieprzeczytane, przejdź wstecz",
     "page.keyboard_shortcuts.toggle_star_status": "Przełącz dodanie do ulubionych",

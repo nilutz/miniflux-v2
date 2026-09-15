@@ -54,6 +54,10 @@
         "%d minutes read"
     ],
     "entry.external_link.label": "External link",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Done!",
     "entry.save.label": "Save",
     "entry.save.title": "Save this entry",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Sections Navigation",
     "page.keyboard_shortcuts.title": "Keyboard Shortcuts",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Toggle open/close entry attachments",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Toggle read/unread, focus next",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Toggle read/unread, focus previous",
     "page.keyboard_shortcuts.toggle_star_status": "Toggle starred",

@@ -54,6 +54,10 @@
         "%d minuti di lettura"
     ],
     "entry.external_link.label": "Link esterno",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Fatto!",
     "entry.save.label": "Salva",
     "entry.save.title": "Salva questo articolo",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Navigazione sezioni",
     "page.keyboard_shortcuts.title": "Scorciatoie da tastiera",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Apri/chiudi gli allegati dell'articolo",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Cambia lo stato di lettura (letto/da leggere), concentrati dopo",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Cambia lo stato di lettura (letto/da leggere), focus precedente",
     "page.keyboard_shortcuts.toggle_star_status": "Aggiungi/rimuovi dai preferiti",

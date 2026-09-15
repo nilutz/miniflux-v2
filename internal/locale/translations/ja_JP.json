@@ -52,6 +52,10 @@
         "%d 分で読めます"
     ],
     "entry.external_link.label": "外部リンク",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "完了!",
     "entry.save.label": "保存",
     "entry.save.title": "この記事を保存",
@@ -527,6 +531,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "セクションを移動する",
     "page.keyboard_shortcuts.title": "キーボードショートカット",
     "page.keyboard_shortcuts.toggle_entry_attachments": "添付ファイルを開く/閉じる",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "既読/未読を切り替えて次のアイテムに移動",
     "page.keyboard_shortcuts.toggle_read_status_prev": "既読/未読を切り替えて前のアイテムに移動",
     "page.keyboard_shortcuts.toggle_star_status": "星を付ける/外す",

@@ -57,6 +57,7 @@ func (h *handler) showUnreadCategoryEntryPage(w http.ResponseWriter, r *http.Req
 	prevEntry, nextEntry, err := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, user.EntryOrder, user.EntryDirection).
 		WithCategoryID(categoryID).
 		WithStatus(model.EntryStatusUnread).
+		WithHidden(false).
 		Entries()
 	if err != nil {
 		response.HTMLServerError(w, r, err)

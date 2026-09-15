@@ -52,6 +52,10 @@
         "需要 %d 分鐘閱讀"
     ],
     "entry.external_link.label": "外部連結",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "完成",
     "entry.save.label": "儲存",
     "entry.save.title": "儲存這篇文章",
@@ -527,6 +531,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "分欄導覽",
     "page.keyboard_shortcuts.title": "快速鍵",
     "page.keyboard_shortcuts.toggle_entry_attachments": "展開/折疊文章附件",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "切換已讀/未讀狀態，並聚焦到下一個",
     "page.keyboard_shortcuts.toggle_read_status_prev": "切換已讀/未讀狀態，並聚焦到上一個",
     "page.keyboard_shortcuts.toggle_star_status": "切換收藏狀態",

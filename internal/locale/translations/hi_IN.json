@@ -54,6 +54,10 @@
         "पढ़ने मे %d मिनट मागेगा"
     ],
     "entry.external_link.label": "बाहरी संपर्क",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "कार्य समाप्त हुआ!",
     "entry.save.label": "सहेजे",
     "entry.save.title": "एस लेख को सहेजे",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "अनुभाग नेविगेशन",
     "page.keyboard_shortcuts.title": "कुंजीपटल अल्प मार्ग",
     "page.keyboard_shortcuts.toggle_entry_attachments": "प्रविष्टि संलग्नक खोलें/बंद करें",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "पढ़ें/अपठित टॉगल करें, अगला फ़ोकस करें",
     "page.keyboard_shortcuts.toggle_read_status_prev": "पढ़ें/अपठित टॉगल करें, पिछला फ़ोकस करें",
     "page.keyboard_shortcuts.toggle_star_status": "बुकमार्क टॉगल करें",

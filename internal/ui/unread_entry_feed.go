@@ -57,6 +57,7 @@ func (h *handler) showUnreadFeedEntryPage(w http.ResponseWriter, r *http.Request
 	prevEntry, nextEntry, err := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, user.EntryOrder, user.EntryDirection).
 		WithFeedID(feedID).
 		WithStatus(model.EntryStatusUnread).
+		WithHidden(false).
 		Entries()
 	if err != nil {
 		response.HTMLServerError(w, r, err)

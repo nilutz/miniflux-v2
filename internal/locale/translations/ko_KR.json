@@ -52,6 +52,10 @@
         "%d분 소요"
     ],
     "entry.external_link.label": "외부 링크",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "완료!",
     "entry.save.label": "저장",
     "entry.save.title": "이 게시물 저장",
@@ -527,6 +531,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "섹션 이동",
     "page.keyboard_shortcuts.title": "키보드 단축키",
     "page.keyboard_shortcuts.toggle_entry_attachments": "첨부 파일 열기/닫기",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "읽음/읽지 않음 전환 후 다음 게시물로 이동",
     "page.keyboard_shortcuts.toggle_read_status_prev": "읽음/읽지 않음 전환 후 이전 게시물로 이동",
     "page.keyboard_shortcuts.toggle_star_status": "즐겨찾기 표시/해제",

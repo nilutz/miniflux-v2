@@ -56,6 +56,10 @@
         "читати %d хвилин"
     ],
     "entry.external_link.label": "Зовнішнє посилання",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Готово!",
     "entry.save.label": "Зберегти",
     "entry.save.title": "Зберегти цю статтю",
@@ -539,6 +543,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Навігація по розділах",
     "page.keyboard_shortcuts.title": "Комбінації клавиш",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Перемкнути відкриття/закриття вкладень запису",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Переключити статус читання, перейти до наступного",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Переключити статус читання, перейти до попереднього",
     "page.keyboard_shortcuts.toggle_star_status": "Переключити статус закладки",

@@ -62,6 +62,10 @@
         "قراءة %d دقيقة"
     ],
     "entry.external_link.label": "رابط خارجي",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "تم!",
     "entry.save.label": "حفظ",
     "entry.save.title": "حفظ هذا المقال",
@@ -557,6 +561,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "التنقل بين الأقسام",
     "page.keyboard_shortcuts.title": "اختصارات لوحة المفاتيح",
     "page.keyboard_shortcuts.toggle_entry_attachments": "تبديل فتح/إغلاق مرفقات المقال",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "تبديل مقروء/غير مقروء، التركيز على التالي",
     "page.keyboard_shortcuts.toggle_read_status_prev": "تبديل مقروء/غير مقروء، التركيز على السابق",
     "page.keyboard_shortcuts.toggle_star_status": "تبديل المفضلة",

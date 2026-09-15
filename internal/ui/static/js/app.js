@@ -248,6 +248,18 @@ function setReadStatusButtonState(buttonElement, newState) {
 }
 
 /**
+ * Set the hide button state.
+ *
+ * @param {Element} buttonElement - The button element to update.
+ * @param {string} newState - The new state to set ("hide" or "unhide").
+ */
+function setHiddenButtonState(buttonElement, newState) {
+    buttonElement.dataset.value = newState;
+    const iconType = newState === "hide" ? "unhide" : "hide";
+    setIconAndLabelElement(buttonElement, iconType, buttonElement.dataset[newState === "hide" ? "labelUnhide" : "labelHide"]);
+}
+
+/**
  * Show a toast notification.
  *
  * @param {string} iconType - The type of icon to display.
@@ -750,6 +762,45 @@ function handleStarAction(element) {
 }
 
 /**
+ * Handle hiding an entry.
+ *
+ * Rates the entry as "not interested" (spec §13.3). Hiding drops an entry
+ * from the unread list and its counts only, so this mirrors handleStarAction
+ * rather than removing the entry from the current list view: like marking an
+ * entry as read, the change is reflected on the next page load, and the
+ * unread counter is adjusted immediately so it never lies about what a
+ * reload will show.
+ *
+ * @param {Element} element - The element that triggered the hide action.
+ */
+function handleHideAction(element) {
+    const currentEntry = findEntry(element);
+    if (!currentEntry) return;
+
+    const buttonElement = currentEntry.querySelector(":is(a, button)[data-toggle-hidden]");
+    if (!buttonElement) return;
+
+    setButtonToLoadingState(buttonElement);
+
+    sendPOSTRequest(buttonElement.dataset.hideUrl).then(() => {
+        const currentState = buttonElement.dataset.value;
+        const isHidden = currentState === "hide";
+        const newHiddenStatus = isHidden ? "unhide" : "hide";
+
+        setHiddenButtonState(buttonElement, newHiddenStatus);
+
+        const statusButtonElement = currentEntry.querySelector(":is(a, button)[data-toggle-status]");
+        if (statusButtonElement && statusButtonElement.dataset.value === "unread") {
+            updateUnreadCounterValue(isHidden ? 1 : -1);
+        }
+
+        if (isEntryView()) {
+            showToastNotification(currentState, buttonElement.dataset[isHidden ? "toastUnhide" : "toastHide"]);
+        }
+    });
+}
+
+/**
  * Handle fetching the original content of an entry.
  *
  * @returns {void}
@@ -1213,6 +1264,7 @@ function initializeKeyboardShortcuts() {
     keyboardHandler.on("s", () => handleSaveEntryAction());
     keyboardHandler.on("d", handleFetchOriginalContentAction);
     keyboardHandler.on("f", () => handleStarAction());
+    keyboardHandler.on("H", () => handleHideAction());
 
     // Feed actions
     keyboardHandler.on("F", goToFeedPage);
@@ -1249,6 +1301,7 @@ function initializeClickHandlers() {
     // Entry actions
     onClick(":is(a, button)[data-save-entry]", (event) => handleSaveEntryAction(event.target));
     onClick(":is(a, button)[data-toggle-starred]", (event) => handleStarAction(event.target));
+    onClick(":is(a, button)[data-toggle-hidden]", (event) => handleHideAction(event.target));
     onClick(":is(a, button)[data-toggle-status]", (event) => handleEntryStatus("next", event.target));
     onClick(":is(a, button)[data-fetch-content-entry]", handleFetchOriginalContentAction);
     onClick(":is(a, button)[data-share-status]", handleEntryShareAction);

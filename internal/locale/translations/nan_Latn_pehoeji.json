@@ -52,6 +52,10 @@
         "Ài %d hun-cheng lâi tha̍k"
     ],
     "entry.external_link.label": "Gōa-pō͘ liân-kiat",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Pó-chûn chò soah",
     "entry.save.label": "Pó-chûn",
     "entry.save.title": "Pó-chûn chit ê siau-sit",
@@ -527,6 +531,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Hun lân tō-lám",
     "page.keyboard_shortcuts.title": "Khoài-sok khí",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Chhet-li̍p thián khui kah siu-ha̍p siau-sit hù-kiāⁿ ê chōng-thài",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Chhet-li̍p tha̍k--kè, ah-bōe tha̍k ê chōng-thài, koh chiau-tiám tī āu-chi̍t--ê",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Chhet-li̍p tha̍k--kè, ah-bōe tha̍k ê chōng-thài, koh chiau-tiám tī téng-chi̍t--ê",
     "page.keyboard_shortcuts.toggle_star_status": "Chhet-li̍p siu-chông chōng-thài",

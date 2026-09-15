@@ -56,6 +56,10 @@
         "%d minut de lectură"
     ],
     "entry.external_link.label": "Legătură externă",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Gata!",
     "entry.save.label": "Salvare",
     "entry.save.title": "Salvez această înregistrare",
@@ -539,6 +543,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Navigare Secțiuni",
     "page.keyboard_shortcuts.title": "Scurtături Tastatură",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Comută deschis/închis pe atașamentele înregistrării",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Comută citit/necitit focus următor",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Comută citit/necitit, focus anterior",
     "page.keyboard_shortcuts.toggle_star_status": "Comută marcate",

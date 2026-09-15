@@ -54,6 +54,10 @@
         "%d Minuten zu lesen"
     ],
     "entry.external_link.label": "Externer Link",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Erledigt!",
     "entry.save.label": "Speichern",
     "entry.save.title": "Diesen Artikel speichern",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Navigation zwischen den Menüpunkten",
     "page.keyboard_shortcuts.title": "Tastenkürzel",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Artikelanhänge öffnen/schließen",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Gewählten Artikel als gelesen/ungelesen markieren, nächsten auswählen",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Gewählten Artikel als gelesen/ungelesen markieren, vorherigen auswählen",
     "page.keyboard_shortcuts.toggle_star_status": "Markierung hinzufügen/entfernen",

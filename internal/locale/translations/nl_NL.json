@@ -54,6 +54,10 @@
         "%d minuten leestijd"
     ],
     "entry.external_link.label": "Externe link",
+    "entry.hidden.toast.off": "Unhidden",
+    "entry.hidden.toast.on": "Hidden",
+    "entry.hidden.toggle.off": "Unhide",
+    "entry.hidden.toggle.on": "Hide",
     "entry.save.completed": "Klaar!",
     "entry.save.label": "Opslaan",
     "entry.save.title": "Artikel opslaan",
@@ -533,6 +537,7 @@
     "page.keyboard_shortcuts.subtitle.sections": "Navigeren door menu's",
     "page.keyboard_shortcuts.title": "Sneltoetsen",
     "page.keyboard_shortcuts.toggle_entry_attachments": "Bijlagen van artikel openen/sluiten",
+    "page.keyboard_shortcuts.toggle_hidden_status": "Toggle hidden",
     "page.keyboard_shortcuts.toggle_read_status_next": "Markeer gelezen/ongelezen, focus volgende",
     "page.keyboard_shortcuts.toggle_read_status_prev": "Markeer gelezen/ongelezen, focus vorige",
     "page.keyboard_shortcuts.toggle_star_status": "Favoriet toevoegen/verwijderen",

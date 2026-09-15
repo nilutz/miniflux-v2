@@ -23,6 +23,7 @@ func (h *handler) showUnreadPage(w http.ResponseWriter, r *http.Request) {
 
 	entries, countUnread, err := h.store.NewEntryQueryBuilder(user.ID).
 		WithStatuses(model.EntryStatusUnread).
+		WithHidden(false).
 		WithSorting(user.EntryOrder, user.EntryDirection).
 		WithSorting("id", user.EntryDirection).
 		WithOffset(offset).
@@ -40,6 +41,7 @@ func (h *handler) showUnreadPage(w http.ResponseWriter, r *http.Request) {
 
 		entries, countUnread, err = h.store.NewEntryQueryBuilder(user.ID).
 			WithStatuses(model.EntryStatusUnread).
+			WithHidden(false).
 			WithSorting(user.EntryOrder, user.EntryDirection).
 			WithSorting("id", user.EntryDirection).
 			WithLimit(user.EntriesPerPage).

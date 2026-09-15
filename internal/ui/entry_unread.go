@@ -45,6 +45,7 @@ func (h *handler) showUnreadEntryPage(w http.ResponseWriter, r *http.Request) {
 
 	prevEntry, nextEntry, err := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, user.EntryOrder, user.EntryDirection).
 		WithStatus(model.EntryStatusUnread).
+		WithHidden(false).
 		WithGloballyVisible().
 		Entries()
 	if err != nil {
