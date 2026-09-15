@@ -5,11 +5,14 @@ package indexer // import "miniflux.app/v2/sidecar/internal/indexer"
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"miniflux.app/v2/sidecar/internal/embed"
 )
 
 // backfillTestConfig is a Controller/Backfill configuration pinned to
@@ -146,6 +149,32 @@ func (d *variableDelayEmbedder) Embed(_ context.Context, texts []string) ([][]fl
 func (d *variableDelayEmbedder) Dimensions() int  { return 384 }
 func (d *variableDelayEmbedder) Identity() string { return testModelIdentity }
 func (d *variableDelayEmbedder) Close() error     { return nil }
+
+// backfillUnavailableEmbedder stands in for a networked embedder (Task 2's
+// internal/embed/remote) that is down: every Embed call fails, wrapping
+// embed.ErrUnavailable exactly as remote.go's own error sites do, for as
+// long as healthy is false -- an entire outage, not one bad entry, unlike
+// live_test.go's marker-scoped fakes. Flipping healthy to true simulates
+// the remote coming back.
+type backfillUnavailableEmbedder struct {
+	healthy atomic.Bool
+	calls   atomic.Int64
+}
+
+func (u *backfillUnavailableEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	u.calls.Add(1)
+	if !u.healthy.Load() {
+		return nil, fmt.Errorf("%w: simulated: remote unreachable", embed.ErrUnavailable)
+	}
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, 384)
+	}
+	return out, nil
+}
+func (u *backfillUnavailableEmbedder) Dimensions() int  { return 384 }
+func (u *backfillUnavailableEmbedder) Identity() string { return testModelIdentity }
+func (u *backfillUnavailableEmbedder) Close() error     { return nil }
 
 // runStartAsync runs a Backfill's start in a goroutine and returns a
 // channel that receives its error when it returns.
@@ -371,6 +400,85 @@ func TestBackfillPauseStopsWorkResumeContinues(t *testing.T) {
 	waitFor(t, 2*time.Second, "both entries indexed after resume", func() bool {
 		return entryStatus(t, db, firstID) == "ok" && entryStatus(t, db, lastID) == "ok"
 	})
+
+	cancel()
+	waitDone(t, done, 2*time.Second, "Backfill.start")
+}
+
+// 3a. (Task 3, spec §13.1.) An embedder-unavailable error pauses the lane
+// automatically -- distinguishable from Pause() via Stats().EmbedderPaused
+// vs. Stats().Paused -- leaves entries pending (never 'failed', never
+// counted in Stats().Failed), and resumes automatically the moment the
+// embedder starts succeeding again, with no operator action.
+//
+// This also proves the Done-declaration guard: with StopWhenDrained set
+// (backfillTestConfig's convention), a lane that wrongly declared itself
+// Done while genuinely paused would return from start() almost
+// immediately once the table's one pass found "nothing outstanding" in
+// retryTracker (which an embedder-level pause never touches) -- so the
+// test asserts start() has NOT returned while still paused, before it
+// ever recovers.
+func TestBackfillPausesForEmbedderUnavailableAndResumesAutomatically(t *testing.T) {
+	s, db := testEnv(t)
+
+	firstID := createTestEntry(t, db, "backfill-embedder-down-a", "<p>First entry during a simulated embedder outage.</p>")
+	lastID := createTestEntry(t, db, "backfill-embedder-down-b", "<p>Second entry during a simulated embedder outage.</p>")
+
+	ue := &backfillUnavailableEmbedder{} // healthy defaults to false: down from the start
+	idx := New(s, ue)
+	ctrlCfg, bfCfg := backfillTestConfig()
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runStartAsync(b, ctx, firstID-1, boundedUpTo(lastID))
+
+	waitFor(t, 2*time.Second, "the lane to auto-pause for the unavailable embedder", func() bool {
+		return b.Stats().EmbedderPaused
+	})
+
+	st := b.Stats()
+	if st.Paused {
+		t.Fatal("expected Stats().Paused (the OPERATOR pause) to stay false -- this is an embedder-triggered pause, a distinct state")
+	}
+	if st.EmbedderPauseReason == "" {
+		t.Fatal("expected a non-empty EmbedderPauseReason so the admin page can say why the lane stopped")
+	}
+	if st.Failed != 0 {
+		t.Fatalf("expected Failed=0 during an embedder outage (entries must not be marked failed), got %d", st.Failed)
+	}
+
+	// Neither entry may be marked 'failed' -- they must stay genuinely
+	// pending for the whole outage, which is the entire point of this
+	// task.
+	if got := entryStatus(t, db, firstID); got == "failed" {
+		t.Fatalf("entry #%d was marked 'failed' during an embedder outage; it must stay pending", firstID)
+	}
+	if got := entryStatus(t, db, lastID); got == "failed" {
+		t.Fatalf("entry #%d was marked 'failed' during an embedder outage; it must stay pending", lastID)
+	}
+
+	// The lane must not have declared itself Done and returned while
+	// still genuinely paused -- see this test's own doc comment for why
+	// that would be the Done-guard regressing.
+	select {
+	case err := <-done:
+		t.Fatalf("Backfill.start returned (err=%v) while the lane was still embedder-paused -- "+
+			"it must keep waiting, not declare the backlog drained just because retryTracker has nothing outstanding", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// The embedder recovers -- resumption must be automatic, no Resume()
+	// call anywhere in this test.
+	ue.healthy.Store(true)
+
+	waitFor(t, 3*time.Second, "both entries indexed after the embedder recovers", func() bool {
+		return entryStatus(t, db, firstID) == "ok" && entryStatus(t, db, lastID) == "ok"
+	})
+	if b.Stats().EmbedderPaused {
+		t.Fatal("expected Stats().EmbedderPaused to clear once indexing succeeds again")
+	}
 
 	cancel()
 	waitDone(t, done, 2*time.Second, "Backfill.start")

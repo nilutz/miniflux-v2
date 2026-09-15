@@ -6,6 +6,7 @@ package remote // import "miniflux.app/v2/sidecar/internal/embed/remote"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -340,5 +341,101 @@ func TestTimeoutIsHonoured(t *testing.T) {
 func TestNewRequiresURL(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("expected an error for an empty Config.URL, got nil")
+	}
+}
+
+// TestEmbedConnectionFailureWrapsErrUnavailable is Task 3's (spec §13.1)
+// classification proof at the source: internal/indexer decides "pause the
+// lane, don't mark this entry failed" purely via errors.Is(err,
+// embed.ErrUnavailable), so a genuine connectivity failure from THIS
+// package's Embed (not just New's one-time startup probe) must actually
+// wrap that sentinel, or the indexer has nothing to classify against.
+func TestEmbedConnectionFailureWrapsErrUnavailable(t *testing.T) {
+	srv, _ := newFakeServer(t, 384, "bge-small-en-v1.5", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+
+	srv.Close() // the remote is unreachable from here on
+
+	_, err = e.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected an error once the remote is unreachable, got nil")
+	}
+	if !errors.Is(err, embed.ErrUnavailable) {
+		t.Fatalf("expected the error to wrap embed.ErrUnavailable, got: %v", err)
+	}
+}
+
+// TestEmbedNonOKStatusWrapsErrUnavailable is the non-200-response half of
+// the same classification proof.
+func TestEmbedNonOKStatusWrapsErrUnavailable(t *testing.T) {
+	healthy := atomic.Bool{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !healthy.Load() {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		var req struct {
+			Texts []string `json:"texts"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		vectors := make([][]float32, len(req.Texts))
+		for i := range req.Texts {
+			vectors[i] = fakeVector(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"vectors": vectors,
+			"model":   map[string]any{"name": "bge-small-en-v1.5", "revision": "abc123", "dimensions": 384},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	healthy.Store(true) // New's own probe must succeed to construct e at all
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+
+	healthy.Store(false) // now the remote starts failing every request
+
+	_, err = e.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected an error for a non-200 response, got nil")
+	}
+	if !errors.Is(err, embed.ErrUnavailable) {
+		t.Fatalf("expected the error to wrap embed.ErrUnavailable, got: %v", err)
+	}
+}
+
+// TestEmbedRejectsIdentityChangeMidRunWrapsErrUnavailable extends
+// TestEmbedRejectsIdentityChangeMidRun: the mid-run identity-change error
+// must ALSO classify as embed.ErrUnavailable, not fall through to the
+// per-entry path -- it is not the entry's fault that the remote started
+// serving a different model, and mixing two models' vectors in one HNSW
+// graph is corruption, not a retryable content problem (spec §13.1). See
+// that sentinel's own doc comment for the argument that this belongs in
+// the same lane-level category as a network outage rather than a bespoke
+// third one.
+func TestEmbedRejectsIdentityChangeMidRunWrapsErrUnavailable(t *testing.T) {
+	srv := newDriftingServer(t, 384, "bge-small-en-v1.5", "some-other-model", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+
+	_, err = e.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected an error when the remote's identity changes mid-run, got nil")
+	}
+	if !errors.Is(err, embed.ErrUnavailable) {
+		t.Fatalf("expected the identity-change error to wrap embed.ErrUnavailable, got: %v", err)
 	}
 }

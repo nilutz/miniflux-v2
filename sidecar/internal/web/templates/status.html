@@ -37,7 +37,11 @@
   <tr><th>Workers</th><td>{{.Workers}}<div class="reason">{{.ControllerReason}}</div></td></tr>
   <tr><th>Skipped</th><td>{{comma .Skipped}}</td></tr>
   <tr><th>Failed</th><td>{{comma .Failed}}</td></tr>
-  <tr><th>Paused</th><td>{{if .Paused}}yes{{else}}no{{end}}</td></tr>
+  <tr><th>Paused</th><td>
+    {{if .Paused}}yes (paused by operator)
+    {{else if .EmbedderPaused}}yes (paused: embedder unreachable)<div class="reason">{{.EmbedderPauseReason}}</div>
+    {{else}}no{{end}}
+  </td></tr>
   <tr><th>Done</th><td>{{if .Done}}yes{{else}}no{{end}}</td></tr>
 </table>
 

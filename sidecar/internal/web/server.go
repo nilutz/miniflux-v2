@@ -160,11 +160,19 @@ type statusView struct {
 	Workers          int              `json:"workers"`
 	ControllerReason string           `json:"controller_reason"`
 	ThroughputPerSec float64          `json:"throughput_per_sec"`
-	Paused           bool             `json:"paused"`
-	Done             bool             `json:"done"`
-	ETA              string           `json:"eta"`              // human-readable, "unknown" or "done"
-	PercentComplete  float64          `json:"percent_complete"` // -1 if Total is unknown
-	GeneratedAt      time.Time        `json:"generated_at"`
+	Paused           bool             `json:"paused"` // an OPERATOR pause; see EmbedderPaused for the lane's own automatic one (spec §13.1)
+
+	// EmbedderPaused/EmbedderPauseReason distinguish "paused: embedder
+	// unreachable" from an operator's own "paused by operator" (spec
+	// §13.1) — an operator whose backfill stopped needs to know whether
+	// to look at the network or the data.
+	EmbedderPaused      bool   `json:"embedder_paused"`
+	EmbedderPauseReason string `json:"embedder_pause_reason"`
+
+	Done            bool      `json:"done"`
+	ETA             string    `json:"eta"`              // human-readable, "unknown" or "done"
+	PercentComplete float64   `json:"percent_complete"` // -1 if Total is unknown
+	GeneratedAt     time.Time `json:"generated_at"`
 
 	Config       indexer.RuntimeConfig `json:"config"`
 	WindowLabel  string                `json:"window_label"` // Config's window as an operator writes it
@@ -176,24 +184,26 @@ type statusView struct {
 // current live-editable configuration.
 func buildView(st indexer.Stats, cfg indexer.RuntimeConfig) statusView {
 	v := statusView{
-		Indexed:          st.Indexed,
-		Skipped:          st.Skipped,
-		Failed:           st.Failed,
-		Remaining:        st.Remaining,
-		SkippedByReason:  st.SkippedByReason,
-		FailedByReason:   st.FailedByReason,
-		Workers:          st.Workers,
-		ControllerReason: st.ControllerReason,
-		ThroughputPerSec: st.ThroughputPerSec,
-		Paused:           st.Paused,
-		Done:             st.Done,
-		GeneratedAt:      time.Now(),
-		Total:            -1,
-		PercentComplete:  -1,
-		Config:           cfg,
-		WindowLabel:      cfg.WindowDescription(),
-		PollInterval:     formatSeconds(cfg.PollIntervalSeconds),
-		IdleResweep:      formatSeconds(cfg.IdleResweepIntervalSecs),
+		Indexed:             st.Indexed,
+		Skipped:             st.Skipped,
+		Failed:              st.Failed,
+		Remaining:           st.Remaining,
+		SkippedByReason:     st.SkippedByReason,
+		FailedByReason:      st.FailedByReason,
+		Workers:             st.Workers,
+		ControllerReason:    st.ControllerReason,
+		ThroughputPerSec:    st.ThroughputPerSec,
+		Paused:              st.Paused,
+		EmbedderPaused:      st.EmbedderPaused,
+		EmbedderPauseReason: st.EmbedderPauseReason,
+		Done:                st.Done,
+		GeneratedAt:         time.Now(),
+		Total:               -1,
+		PercentComplete:     -1,
+		Config:              cfg,
+		WindowLabel:         cfg.WindowDescription(),
+		PollInterval:        formatSeconds(cfg.PollIntervalSeconds),
+		IdleResweep:         formatSeconds(cfg.IdleResweepIntervalSecs),
 	}
 	if v.SkippedByReason == nil {
 		v.SkippedByReason = map[string]int64{}

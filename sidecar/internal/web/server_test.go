@@ -232,6 +232,74 @@ func TestResumeThenStatusShowsRunning(t *testing.T) {
 	}
 }
 
+// (Task 3, spec §13.1.) The status JSON and page must distinguish an
+// embedder-triggered pause from an operator's own Pause(): "paused by
+// operator" and "paused: embedder unreachable" are different states, and
+// an operator whose backfill stopped needs to know which one it is.
+func TestStatusDistinguishesEmbedderPauseFromOperatorPause(t *testing.T) {
+	const reason = "embed/remote: request failed: dial tcp: connection refused"
+	fb := &fakeBackfill{stats: indexer.Stats{
+		EmbedderPaused:      true,
+		EmbedderPauseReason: reason,
+	}}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var got struct {
+		Paused              bool   `json:"paused"`
+		EmbedderPaused      bool   `json:"embedder_paused"`
+		EmbedderPauseReason string `json:"embedder_pause_reason"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v, body = %s", err, rec.Body.String())
+	}
+	if got.Paused {
+		t.Error("Paused (the OPERATOR pause) must be false: this is an embedder-triggered pause, a distinct state")
+	}
+	if !got.EmbedderPaused {
+		t.Error("expected EmbedderPaused = true")
+	}
+	if got.EmbedderPauseReason != reason {
+		t.Errorf("EmbedderPauseReason = %q, want %q", got.EmbedderPauseReason, reason)
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlRec := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, htmlReq)
+	body := htmlRec.Body.String()
+	if !strings.Contains(body, "embedder unreachable") {
+		t.Errorf("expected the status page to say the pause is due to the embedder, got:\n%s", body)
+	}
+	if !strings.Contains(body, reason) {
+		t.Errorf("expected the status page to show the classified reason %q, got:\n%s", reason, body)
+	}
+	if strings.Contains(body, "paused by operator") {
+		t.Errorf("expected the status page NOT to claim this is an operator pause, got:\n%s", body)
+	}
+}
+
+// A plain operator Pause() must still render as "paused by operator", not
+// be confused with an embedder pause -- the other half of the
+// distinguishability requirement above.
+func TestStatusPageRendersOperatorPauseDistinctly(t *testing.T) {
+	fb := &fakeBackfill{stats: indexer.Stats{}, paused: true}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "paused by operator") {
+		t.Errorf("expected the status page to say the pause is by the operator, got:\n%s", body)
+	}
+	if strings.Contains(body, "embedder unreachable") {
+		t.Errorf("expected the status page NOT to claim an embedder pause for a plain operator Pause(), got:\n%s", body)
+	}
+}
+
 func TestStatusPageRendersProgressFigure(t *testing.T) {
 	fb := &fakeBackfill{stats: indexer.Stats{
 		Indexed:          123,

@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"miniflux.app/v2/sidecar/internal/embed"
 	"miniflux.app/v2/sidecar/internal/passage"
 	"miniflux.app/v2/sidecar/internal/store"
 	"miniflux.app/v2/sidecar/internal/testdb"
@@ -64,6 +65,26 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 func (f *fakeEmbedder) Dimensions() int  { return 384 }
 func (f *fakeEmbedder) Identity() string { return testModelIdentity }
 func (f *fakeEmbedder) Close() error     { return nil }
+
+// unavailableEmbedder is a fake standing in for a networked embedder
+// (Task 2's internal/embed/remote) that is currently unreachable: every
+// Embed call fails with an error wrapping embed.ErrUnavailable, exactly
+// how remote.go's own error sites are wrapped. It exists to prove
+// IndexEntry classifies THIS kind of error as lane-level (spec §13.1) --
+// distinct from fakeEmbedder's plain, unwrapped err, which must keep
+// classifying as an ordinary per-entry failure.
+type unavailableEmbedder struct {
+	calls atomic.Int64
+}
+
+func (u *unavailableEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	u.calls.Add(1)
+	return nil, fmt.Errorf("%w: simulated: remote unreachable", embed.ErrUnavailable)
+}
+
+func (u *unavailableEmbedder) Dimensions() int  { return 384 }
+func (u *unavailableEmbedder) Identity() string { return testModelIdentity }
+func (u *unavailableEmbedder) Close() error     { return nil }
 
 // batchRecordingEmbedder records how many texts each Embed call received,
 // so a test can observe the actual runtime batch size IndexEntry used
@@ -805,6 +826,83 @@ func TestIndexEntryEmbeddingFailureMarksFailedAndRetryable(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected failed entry #%d to still be in the pending set (retryable)", entryID)
+	}
+}
+
+// 5a. (Task 3, spec §13.1.) An embedder reporting itself UNAVAILABLE —
+// wrapping embed.ErrUnavailable, exactly as internal/embed/remote's own
+// error sites do — must NOT be treated like the ordinary embedding
+// failure above: IndexEntry must classify it (isEmbedderUnavailable) and
+// must leave entry_index_state completely untouched, not call
+// MarkEntryFailed. This is the load-bearing distinction the whole task
+// exists to draw: a network outage must never mark the entry it happened
+// to be embedding when it hit "failed", because that is what forces
+// thousands of entries into the retry-backoff machinery during a
+// five-minute blip.
+func TestIndexEntryEmbedderUnavailableLeavesIndexStateUntouched(t *testing.T) {
+	s, db := testEnv(t)
+	entryID := createTestEntry(t, db, "index-embedder-unavailable",
+		"<p>Some content that cannot be embedded because the remote embedder is down.</p>")
+
+	ue := &unavailableEmbedder{}
+	idx := New(s, ue)
+
+	err := idx.IndexEntry(context.Background(), entryID)
+	if err == nil {
+		t.Fatal("expected IndexEntry to return an error")
+	}
+	if !isEmbedderUnavailable(err) {
+		t.Fatalf("expected the error to classify as embedder-unavailable, got %v", err)
+	}
+	if !errors.Is(err, embed.ErrUnavailable) {
+		t.Fatalf("expected the error to still wrap embed.ErrUnavailable through IndexEntry's own wrapping, got %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM search.entry_index_state WHERE entry_id=$1`, entryID,
+	).Scan(&count); err != nil {
+		t.Fatalf("unable to count index state rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected NO entry_index_state row at all (untouched, still genuinely pending) after an "+
+			"embedder-unavailable error, got %d row(s) -- this must never be marked 'failed'", count)
+	}
+
+	var passageCount int
+	if err := db.QueryRow(`SELECT count(*) FROM search.passages WHERE entry_id=$1`, entryID).Scan(&passageCount); err != nil {
+		t.Fatalf("unable to count passages: %v", err)
+	}
+	if passageCount != 0 {
+		t.Fatalf("expected no passages written, got %d", passageCount)
+	}
+
+	// Untouched means still pending, exactly like an entry that was never
+	// attempted at all -- not merely "not marked ok".
+	ids, err := s.PendingEntryIDs(entryID-1, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, id := range ids {
+		if id == entryID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected entry #%d to remain in the pending set", entryID)
+	}
+}
+
+// 5b. failureCause must never be asked to classify an embedder-unavailable
+// error via the normal per-entry path in production (both lanes intercept
+// it first with isEmbedderUnavailable), but it must still return a bounded
+// label if it ever is, rather than falling through to genericCause's
+// per-error text -- see failureCause's own defensive case.
+func TestFailureCauseClassifiesEmbedderUnavailableDefensively(t *testing.T) {
+	err := fmt.Errorf("%w #7: %w", errEmbedderUnavailable, errors.New("simulated: remote unreachable"))
+	if got, want := failureCause(err), "embedder unavailable"; got != want {
+		t.Fatalf("failureCause = %q, want %q", got, want)
 	}
 }
 

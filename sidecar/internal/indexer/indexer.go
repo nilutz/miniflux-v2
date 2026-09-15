@@ -61,7 +61,29 @@ var (
 	errEmbed          = errors.New("indexer: unable to embed entry")
 	errInterrupted    = errors.New("indexer: embedding interrupted for entry")
 	errWritePassages  = errors.New("indexer: unable to replace passages for entry")
+
+	// errEmbedderUnavailable is IndexEntry's LANE-level counterpart to
+	// errEmbed. It wraps an Embed error that itself wraps embed.ErrUnavailable
+	// — see that sentinel's doc comment for the classification rule. Unlike
+	// every other error above, this one is deliberately never handed to
+	// store.MarkEntryFailed: the entry is not at fault, so IndexEntry leaves
+	// its index state exactly as it found it (identical to the ctx-cancelled
+	// branch just above it), and the backfill/live lanes classify it via
+	// isEmbedderUnavailable to pause themselves instead of counting a
+	// per-entry failure (spec §13.1).
+	errEmbedderUnavailable = errors.New("indexer: embedder unavailable")
 )
+
+// isEmbedderUnavailable reports whether err (as IndexEntry returns it)
+// means the embedder itself is currently unable to serve requests — a
+// lane-level condition the backfill and live lanes must pause themselves
+// for — rather than an ordinary per-entry failure the existing
+// retry/backoff machinery already handles correctly. Both lanes call this
+// before deciding how to account for an IndexEntry error, so the
+// classification rule lives in exactly one place.
+func isEmbedderUnavailable(err error) bool {
+	return errors.Is(err, errEmbedderUnavailable)
+}
 
 // maxCauseLength truncates an unclassified cause label, so that even a
 // pathological error string cannot make one map key, one JSON field or one
@@ -85,6 +107,14 @@ func failureCause(err error) string {
 		return ""
 	case errors.Is(err, errEmbed):
 		return "embedding failed"
+	case errors.Is(err, errEmbedderUnavailable):
+		// Defensive only: both lanes classify errEmbedderUnavailable
+		// themselves (isEmbedderUnavailable) before ever reaching
+		// failureCause, specifically so it is never counted as a
+		// per-entry failure. This case exists so that IF one ever did
+		// reach here anyway, it still gets a bounded, stable label
+		// rather than falling into genericCause's per-error text.
+		return "embedder unavailable"
 	case errors.Is(err, errInterrupted):
 		return "interrupted"
 	case errors.Is(err, errLoadEntry):
@@ -184,10 +214,16 @@ func (idx *Indexer) BatchSize() int {
 // live-edited it — spec §9.2); an embedding failure records the entry as
 // failed (retryable later) and IndexEntry returns the error — unless the
 // failure was ctx being cancelled mid-embed (a caller shutting down or
-// interrupting a batch, not a real embedder failure), in which case
-// entry_index_state is left untouched entirely, so a graceful shutdown
-// never manufactures a spurious "failed" row. Passages are written, and
-// the entry recorded ok, in a single atomic replace — IndexEntry never
+// interrupting a batch, not a real embedder failure) or the embedder
+// reporting itself unavailable (errors.Is against embed.ErrUnavailable —
+// a network outage, or a remote that changed identity mid-run; spec
+// §13.1), in either of which cases entry_index_state is left untouched
+// entirely: a graceful shutdown must never manufacture a spurious
+// "failed" row, and neither must an outage that has nothing to do with
+// this entry's own content — the backfill and live lanes classify that
+// second case (isEmbedderUnavailable) and pause themselves rather than
+// treating it as a per-entry failure. Passages are written, and the
+// entry recorded ok, in a single atomic replace — IndexEntry never
 // marks an entry ok on a partial result.
 func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	entry, err := idx.store.EntryForIndexing(ctx, entryID)
@@ -265,6 +301,24 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 				// exactly as it was; PendingEntryIDs offers it again next
 				// time, identical to an entry that was never attempted.
 				return fmt.Errorf("%w #%d: %w", errInterrupted, entryID, err)
+			}
+			if errors.Is(err, embed.ErrUnavailable) {
+				// LANE-level, not this entry's fault (spec §13.1): the
+				// embedder itself cannot currently serve requests — a
+				// network outage, or (see internal/embed/remote) a
+				// remote that started serving a different model
+				// mid-run. entry_index_state is left EXACTLY as it was,
+				// deliberately mirroring the ctx-cancelled branch above:
+				// marking this entry "failed" would be wrong (its
+				// content was never the problem), and doing so for
+				// every entry mid-batch during an outage is precisely
+				// the failure mode this task exists to prevent — a
+				// five-minute network blip must not mark thousands of
+				// entries individually failed, needing retry backoff to
+				// unwind it. The backfill and live lanes call
+				// isEmbedderUnavailable on this error to pause
+				// themselves instead of counting a per-entry failure.
+				return fmt.Errorf("%w #%d: %w", errEmbedderUnavailable, entryID, err)
 			}
 			reason := fmt.Sprintf("embedding failed: %v", err)
 			if markErr := idx.store.MarkEntryFailed(entryID, entry.ContentHash, reason); markErr != nil {

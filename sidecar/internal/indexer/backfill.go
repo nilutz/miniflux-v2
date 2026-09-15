@@ -318,7 +318,24 @@ type Stats struct {
 	ControllerReason string  // the controller's reason for that count
 	ThroughputPerSec float64 // exponentially-weighted recent rate (entries actually attempted per second) -- reflects current speed, not a lifetime average
 
-	Paused bool // true between Pause() and the matching Resume()
+	Paused bool // true between Pause() and the matching Resume() -- an OPERATOR pause; see EmbedderPaused for the lane's own automatic one
+
+	// EmbedderPaused is true while the lane has automatically paused
+	// itself because the embedder reported it cannot currently serve
+	// requests (isEmbedderUnavailable; spec §13.1) — a network outage, or
+	// a remote that changed identity mid-run. It is deliberately a
+	// SEPARATE flag from Paused, not folded into it: an operator whose
+	// backfill stopped needs to be able to tell "I paused this" from
+	// "the embedder is unreachable" at a glance, since the two point at
+	// entirely different places to look (their own admin action, versus
+	// the network or the remote host). It clears itself automatically
+	// the next time an attempt succeeds — no operator action required.
+	EmbedderPaused bool
+
+	// EmbedderPauseReason is the classified error's own message (e.g.
+	// "embed/remote: request failed: ...") while EmbedderPaused is true,
+	// and empty otherwise — the admin page's answer to "why".
+	EmbedderPauseReason string
 
 	// Done reports that the backlog is currently drained: the most recent
 	// full sweep found nothing pending and left nothing outstanding. It
@@ -350,14 +367,26 @@ type Backfill struct {
 	idx        *Indexer
 	controller *Controller
 
-	mu               sync.Mutex
-	cfg              BackfillConfig // PageSize/PollInterval are live-editable (spec §9.2); always read through pageSize()/pollInterval()
-	paused           bool
-	resumeCh         chan struct{}
-	done             bool
-	running          bool
-	startedAt        time.Time
-	startAfterCursor int64 // the id this run's pagination began after; scopes Remaining's PendingEntryCount query
+	mu       sync.Mutex
+	cfg      BackfillConfig // PageSize/PollInterval are live-editable (spec §9.2); always read through pageSize()/pollInterval()
+	paused   bool
+	resumeCh chan struct{}
+
+	// embedderPaused and embedderPauseReason are the lane's OWN pause,
+	// entered automatically when the embedder reports itself unavailable
+	// (isEmbedderUnavailable; spec §13.1), and cleared automatically the
+	// next time an attempt succeeds. Deliberately a separate pair of
+	// fields from paused/resumeCh above, not a reuse of them: an operator
+	// pause and an embedder-outage pause must be distinguishable on the
+	// admin page ("paused by operator" vs "paused: embedder
+	// unreachable"), and only the operator's own Resume() may clear
+	// paused, while only a successful attempt may clear embedderPaused.
+	embedderPaused      bool
+	embedderPauseReason string
+	done                bool
+	running             bool
+	startedAt           time.Time
+	startAfterCursor    int64 // the id this run's pagination began after; scopes Remaining's PendingEntryCount query
 
 	indexed         atomic.Int64
 	skipped         atomic.Int64
@@ -491,21 +520,87 @@ func (b *Backfill) Resume() {
 	}
 }
 
-// waitWhilePaused blocks while the lane is paused, waking as soon as
-// Resume is called. It returns false if ctx is cancelled while waiting,
-// true otherwise (including immediately, if not paused at all).
+// pauseForEmbedder marks the lane paused because the embedder reported
+// itself unavailable (isEmbedderUnavailable; spec §13.1) — automatic, not
+// an operator action, and distinguishable from Pause() on the admin page
+// via Stats().EmbedderPaused/EmbedderPauseReason. It is idempotent: every
+// worker that hits the same outage concurrently just refreshes the
+// recorded reason, rather than stacking state.
+func (b *Backfill) pauseForEmbedder(reason string) {
+	b.mu.Lock()
+	already := b.embedderPaused
+	b.embedderPaused = true
+	b.embedderPauseReason = reason
+	b.mu.Unlock()
+	if !already {
+		slog.Warn("backfill lane: pausing -- embedder unavailable", slog.String("reason", reason))
+	}
+}
+
+// clearEmbedderPause resumes a lane that had auto-paused for the embedder,
+// called whenever an attempt succeeds — spec §13.1's "indexing resumes
+// automatically", with no operator action required. A no-op when the lane
+// was not embedder-paused.
+func (b *Backfill) clearEmbedderPause() {
+	b.mu.Lock()
+	was := b.embedderPaused
+	b.embedderPaused = false
+	b.embedderPauseReason = ""
+	b.mu.Unlock()
+	if was {
+		slog.Info("backfill lane: resuming -- embedder available again")
+	}
+}
+
+func (b *Backfill) isEmbedderPaused() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.embedderPaused
+}
+
+// waitWhilePaused blocks while the lane is paused — by the operator
+// (Pause), by an embedder outage (pauseForEmbedder), or both — and returns
+// false if ctx is cancelled while waiting, true otherwise (including
+// immediately, if not paused at all).
+//
+// The two pauses are woken differently, matching spec §13.1's requirement
+// that an outage clears itself. An operator pause only ever ends when
+// Resume is called, so this blocks on resumeCh with no timeout. A pure
+// embedder pause instead waits out one pollInterval and then returns true
+// unconditionally, letting the caller make a real attempt again: if the
+// outage continues, that attempt's failure re-arms pauseForEmbedder (with
+// a fresh reason) and the NEXT call here waits another interval; if the
+// embedder has recovered, the attempt succeeds, clearEmbedderPause runs,
+// and every subsequent call returns immediately. This deliberately reuses
+// the entries already about to be processed as the recovery probe rather
+// than adding a separate health check.
 func (b *Backfill) waitWhilePaused(ctx context.Context) bool {
 	for {
 		b.mu.Lock()
 		paused := b.paused
+		embedderPaused := b.embedderPaused
 		ch := b.resumeCh
 		b.mu.Unlock()
-		if !paused {
+
+		if !paused && !embedderPaused {
 			return true
 		}
+
+		if paused {
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		timer := time.NewTimer(b.pollInterval())
 		select {
-		case <-ch:
+		case <-timer.C:
+			return true
 		case <-ctx.Done():
+			timer.Stop()
 			return false
 		}
 	}
@@ -740,7 +835,15 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 			b.retries.pruneNotIn(seenTrackedIDs)
 
 			wait := b.pollInterval()
-			if !b.retries.hasOutstanding() {
+			// isEmbedderPaused() is checked here too, not only via
+			// hasOutstanding: entries skipped because the lane itself
+			// was embedder-paused were never handed to IndexEntry at
+			// all, so they were never added to retryTracker either —
+			// hasOutstanding alone would see nothing outstanding and
+			// wrongly declare the sweep drained during a genuine outage
+			// (spec §13.1: entries stay pending, which is not the same
+			// as the backlog being empty).
+			if !b.retries.hasOutstanding() && !b.isEmbedderPaused() {
 				// Genuinely drained. Report it, and then — unless the
 				// caller explicitly asked for a one-shot — keep
 				// sweeping, because nothing else ever re-examines
@@ -867,6 +970,18 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 		if ctx.Err() != nil {
 			return
 		}
+		if isEmbedderUnavailable(err) {
+			// LANE-level (spec §13.1), not this entry's fault: pause the
+			// lane rather than counting a per-entry failure. Deliberately
+			// none of failed/failedByReason/retries are touched — the
+			// entry's index state was left untouched by IndexEntry too,
+			// so it stays genuinely pending and is retried in full once
+			// the lane resumes, with no backoff to unwind.
+			b.pauseForEmbedder(err.Error())
+			slog.Warn("backfill lane: entry not attempted -- embedder unavailable",
+				slog.Int64("entry_id", id), slog.Any("error", err))
+			return
+		}
 		// The CLASSIFIED cause, never err.Error(): this string is a map
 		// key in failedByReason, a row in spec §9.4's by-cause table, and
 		// the value recordFailure de-duplicates repeat failures against.
@@ -883,6 +998,7 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 		slog.Error("backfill lane: unable to index entry", slog.Int64("entry_id", id), slog.Any("error", err))
 		return
 	}
+	b.clearEmbedderPause()
 	b.retries.recordSuccess(id)
 
 	state, err := b.idx.store.EntryIndexState(ctx, id)
@@ -970,21 +1086,25 @@ func (b *Backfill) cachedRemaining() int64 {
 func (b *Backfill) Stats() Stats {
 	b.mu.Lock()
 	paused := b.paused
+	embedderPaused := b.embedderPaused
+	embedderPauseReason := b.embedderPauseReason
 	done := b.done
 	b.mu.Unlock()
 
 	return Stats{
-		Indexed:          b.indexed.Load(),
-		Skipped:          b.skipped.Load(),
-		Failed:           b.failed.Load(),
-		Remaining:        b.cachedRemaining(),
-		SkippedByReason:  b.skippedByReason.snapshot(),
-		FailedByReason:   b.failedByReason.snapshot(),
-		Workers:          b.controller.Workers(),
-		ControllerReason: b.controller.Reason(),
-		ThroughputPerSec: b.currentThroughput(),
-		Paused:           paused,
-		Done:             done,
+		Indexed:             b.indexed.Load(),
+		Skipped:             b.skipped.Load(),
+		Failed:              b.failed.Load(),
+		Remaining:           b.cachedRemaining(),
+		SkippedByReason:     b.skippedByReason.snapshot(),
+		FailedByReason:      b.failedByReason.snapshot(),
+		Workers:             b.controller.Workers(),
+		ControllerReason:    b.controller.Reason(),
+		ThroughputPerSec:    b.currentThroughput(),
+		Paused:              paused,
+		EmbedderPaused:      embedderPaused,
+		EmbedderPauseReason: embedderPauseReason,
+		Done:                done,
 	}
 }
 

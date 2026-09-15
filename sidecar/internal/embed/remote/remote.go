@@ -193,10 +193,23 @@ func (e *remoteEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	// silent-corruption case spec §13.1 exists to prevent, so this
 	// refuses the batch rather than returning vectors under a stale
 	// identity.
+	//
+	// This wraps embed.ErrUnavailable, the same sentinel as a genuine
+	// network outage below, not a bespoke "model changed" one: it is not
+	// this batch's entry that is at fault, and mixing vectors from two
+	// models into one HNSW graph is corruption, not a recoverable
+	// per-entry error the existing retry/backoff path is built to
+	// contain. It happens not to be transient the way a network blip is
+	// — nothing on this side will make the remote change back — but the
+	// indexer's classification and the lane's pause/resume machinery
+	// treat both the same way: pause, leave entries pending, and let the
+	// operator's own restart (named in the message below) be what
+	// clears it, exactly like a health check clearing once connectivity
+	// returns.
 	if got := embed.Identity(model.Name, model.Revision, model.Dimensions); got != e.identity {
 		return nil, fmt.Errorf(
-			"embed/remote: remote identity changed mid-run, from %q to %q — refusing to mix vectors from two models; restart the sidecar to pick up the new model (spec §13.1)",
-			e.identity, got,
+			"%w: embed/remote: remote identity changed mid-run, from %q to %q — refusing to mix vectors from two models; restart the sidecar to pick up the new model (spec §13.1)",
+			embed.ErrUnavailable, e.identity, got,
 		)
 	}
 	if len(vectors) != len(texts) {
@@ -243,24 +256,32 @@ func (e *remoteEmbedder) doEmbed(ctx context.Context, texts []string) ([][]float
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	// Everything below this point is "the remote did not give us something
+	// usable" rather than "this input was bad" — a dropped connection, a
+	// non-2xx status, a malformed body, or a body that doesn't even match
+	// its own claimed input count are all properties of the SERVICE, not
+	// of texts. Each wraps embed.ErrUnavailable so the indexer classifies
+	// it as lane-level (spec §13.1): pause and retry, never
+	// store.MarkEntryFailed for whatever entry happened to be embedding
+	// when the service dropped out.
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return nil, modelInfo{}, fmt.Errorf("embed/remote: request failed: %w", err)
+		return nil, modelInfo{}, fmt.Errorf("%w: embed/remote: request failed: %w", embed.ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
 
 	const maxErrorBody = 4 << 10
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
-		return nil, modelInfo{}, fmt.Errorf("embed/remote: %s returned %s: %s", e.endpoint, resp.Status, bytes.TrimSpace(snippet))
+		return nil, modelInfo{}, fmt.Errorf("%w: embed/remote: %s returned %s: %s", embed.ErrUnavailable, e.endpoint, resp.Status, bytes.TrimSpace(snippet))
 	}
 
 	var parsed embedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, modelInfo{}, fmt.Errorf("embed/remote: decode response from %s: %w", e.endpoint, err)
+		return nil, modelInfo{}, fmt.Errorf("%w: embed/remote: decode response from %s: %w", embed.ErrUnavailable, e.endpoint, err)
 	}
 	if len(parsed.Vectors) != len(texts) {
-		return nil, modelInfo{}, fmt.Errorf("embed/remote: response has %d vectors for %d input texts", len(parsed.Vectors), len(texts))
+		return nil, modelInfo{}, fmt.Errorf("%w: embed/remote: response has %d vectors for %d input texts", embed.ErrUnavailable, len(parsed.Vectors), len(texts))
 	}
 
 	return parsed.Vectors, parsed.Model, nil

@@ -7,10 +7,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"miniflux.app/v2/sidecar/internal/embed"
 )
 
 // pollInterval is short enough that the live-lane tests complete quickly
@@ -102,6 +105,33 @@ func (f *flippableEmbedder) Embed(_ context.Context, texts []string) ([][]float3
 func (f *flippableEmbedder) Dimensions() int  { return 384 }
 func (f *flippableEmbedder) Identity() string { return testModelIdentity }
 func (f *flippableEmbedder) Close() error     { return nil }
+
+// liveUnavailableEmbedder stands in for a networked embedder (Task 2's
+// internal/embed/remote) that is entirely down: every Embed call fails,
+// wrapping embed.ErrUnavailable exactly as remote.go's own error sites do,
+// for as long as healthy is false. Unlike flippableEmbedder/failMarker-
+// Embedder above, this is not scoped to one marked entry -- it fails EVERY
+// call, simulating a real outage rather than one bad entry, which is the
+// scenario spec §13.1's live-lane parity requirement is about.
+type liveUnavailableEmbedder struct {
+	healthy atomic.Bool
+	calls   atomic.Int64
+}
+
+func (u *liveUnavailableEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	u.calls.Add(1)
+	if !u.healthy.Load() {
+		return nil, fmt.Errorf("%w: simulated: remote unreachable", embed.ErrUnavailable)
+	}
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, 384)
+	}
+	return out, nil
+}
+func (u *liveUnavailableEmbedder) Dimensions() int  { return 384 }
+func (u *liveUnavailableEmbedder) Identity() string { return testModelIdentity }
+func (u *liveUnavailableEmbedder) Close() error     { return nil }
 
 // blockingEmbedder deliberately ignores ctx — it just sleeps for delay,
 // unconditionally, before returning success. This is what a slow but
@@ -392,6 +422,80 @@ func TestRunLiveRetriesFailedEntryWithBackoff(t *testing.T) {
 		t.Fatal("expected at least one more embed call for this entry after becoming healthy, " +
 			"proving the recovery came from a genuine retry rather than some other path")
 	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runLive returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLive did not return after cancellation")
+	}
+}
+
+// 5a. (Task 3, spec §13.1.) The live lane must behave exactly like the
+// backfill lane when the embedder reports itself unavailable: the entry
+// stays pending (never 'failed'), and indexing resumes automatically the
+// moment the embedder recovers, with no operator action in between.
+//
+// The call-count assertion below is the discriminating one. Both the
+// correct lane-pause path AND live.go's ordinary per-entry-failure path
+// leave entry_index_state untouched here -- IndexEntry itself (unmutated)
+// never calls MarkEntryFailed for an embed.ErrUnavailable-wrapped error,
+// regardless of what live.go's own classification does with the error it
+// gets back -- so status alone cannot tell the two apart; a regression
+// that deleted live.go's own isEmbedderUnavailable check would still pass
+// a status-only assertion. What DOES differ: the correct path retries the
+// SAME still-pending entry on every single tick, with no backoff at all
+// (spec §13.1: "resumes automatically", via the very next attempt acting
+// as the recovery probe); the ordinary per-entry path instead advances
+// lastSeen past the entry after its first failure and only retries it via
+// the escalating retries map (initial backoff = interval*4), which is far
+// sparser over a fixed observation window. Counting calls over a fixed
+// window catches the difference where reading the database cannot.
+func TestRunLiveSurvivesEmbedderOutageWithoutMarkingEntriesFailed(t *testing.T) {
+	s, db := testEnv(t)
+
+	entryID := createTestEntry(t, db, "live-embedder-down",
+		"<p>Entry that cannot be embedded while the remote embedder is down.</p>")
+
+	ue := &liveUnavailableEmbedder{} // healthy defaults to false: down from the start
+	idx := New(s, ue)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID)) }()
+
+	// Observe a fixed window of ticks while the embedder stays down.
+	const observedTicks = 10
+	time.Sleep(pollInterval * observedTicks)
+
+	if got := entryStatus(t, db, entryID); got == "failed" {
+		t.Fatalf("entry #%d was marked 'failed' during an embedder outage; it must stay pending, got status %q", entryID, got)
+	}
+
+	calls := ue.calls.Load()
+	// A lane genuinely retrying every tick with no backoff should be
+	// within a call or two of observedTicks; one that instead backed off
+	// (the ordinary per-entry path) manages only a small handful over the
+	// same window -- see this test's own doc comment for the exact
+	// backoff arithmetic. minExpectedCalls is deliberately generous about
+	// scheduler jitter while still being far above what backoff allows.
+	const minExpectedCalls = observedTicks - 3
+	if calls < minExpectedCalls {
+		t.Fatalf("expected roughly %d embed attempts (one per tick, no backoff) over %d ticks while the embedder "+
+			"stays down, got only %d -- this looks like the entry fell through to the ordinary per-entry "+
+			"failure/backoff path instead of pausing the lane", minExpectedCalls, observedTicks, calls)
+	}
+
+	ue.healthy.Store(true)
+
+	waitFor(t, 2*time.Second, "entry indexed once the embedder recovers", func() bool {
+		return entryStatus(t, db, entryID) == "ok"
+	})
 
 	cancel()
 	select {

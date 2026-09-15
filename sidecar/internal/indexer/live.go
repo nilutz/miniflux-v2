@@ -59,6 +59,19 @@ type retryState struct {
 // justify LISTEN/NOTIFY (spec §9.1); a short poll interval is simpler and
 // cheap enough.
 //
+// If the embedder itself reports it is unavailable (isEmbedderUnavailable
+// — a network outage, or a remote that changed identity mid-run; spec
+// §13.1), this pauses rather than treating it as an ordinary per-entry
+// failure: the tick stops attempting further ids, lastSeen is left
+// exactly where it is (so every id it did not get to, including the one
+// that just failed, is offered again next tick), and nothing is marked
+// failed or added to the retry/backoff map — the entry stays genuinely
+// pending. There is no separate health check; the next tick's normal
+// attempt IS the recovery probe, so indexing resumes automatically the
+// moment the embedder starts succeeding again, with no operator action.
+// This mirrors the backfill lane's own pause/resume behaviour for the
+// same condition (see backfill.go's pauseForEmbedder).
+//
 // Its starting cursor is the highest entry id that already exists at
 // startup (store.MaxEntryID), not 0. This is deliberate coordination with
 // the Backfill lane (Task 6 fix round 1, finding 3): both lanes' default
@@ -184,36 +197,66 @@ func runLive(ctx context.Context, ix *Indexer, interval time.Duration, startAfte
 
 		// attempt indexes one entry, checking ctx.Done() first so
 		// cancellation is honoured between every single entry, not merely
-		// between ticks. It reports whether the pass was cancelled.
-		attempt := func(id int64) (cancelled bool) {
+		// between ticks. It reports whether the pass was cancelled, and
+		// separately whether the failure means the EMBEDDER itself is
+		// currently unavailable (isEmbedderUnavailable; spec §13.1) —
+		// lane-level, not this entry's fault. In that case entry_index_state
+		// was already left untouched by IndexEntry, and attempt does the
+		// same: no failed++, no retries[id] entry, so nothing here ever
+		// looks like a per-entry failure that needs backoff to unwind.
+		attempt := func(id int64) (cancelled, embedderDown bool) {
 			select {
 			case <-ctx.Done():
-				return true
+				return true, false
 			default:
 			}
 
-			if err := ix.IndexEntry(ctx, id); err != nil {
-				failed++
-				backoff := initialBackoff
-				if st, retrying := retries[id]; retrying {
-					backoff = min(st.backoff*2, maxBackoff)
-				}
-				retries[id] = retryState{nextAttempt: now.Add(backoff), backoff: backoff}
-				slog.Error("live lane: unable to index entry",
-					slog.Int64("entry_id", id),
-					slog.Any("error", err),
-					slog.Duration("retry_backoff", backoff),
-				)
-			} else {
+			err := ix.IndexEntry(ctx, id)
+			if err == nil {
 				indexed++
 				delete(retries, id)
+				return false, false
 			}
-			return false
+
+			if isEmbedderUnavailable(err) {
+				slog.Warn("live lane: entry not attempted -- embedder unavailable, pausing",
+					slog.Int64("entry_id", id), slog.Any("error", err))
+				return false, true
+			}
+
+			failed++
+			backoff := initialBackoff
+			if st, retrying := retries[id]; retrying {
+				backoff = min(st.backoff*2, maxBackoff)
+			}
+			retries[id] = retryState{nextAttempt: now.Add(backoff), backoff: backoff}
+			slog.Error("live lane: unable to index entry",
+				slog.Int64("entry_id", id),
+				slog.Any("error", err),
+				slog.Duration("retry_backoff", backoff),
+			)
+			return false, false
 		}
 
+		embedderDown := false
 		for _, id := range ids {
-			if attempt(id) {
+			if embedderDown {
+				// The lane is paused for the rest of this tick: leave
+				// lastSeen exactly where it is, so every remaining id in
+				// ids -- including the one that just failed -- is offered
+				// again on the very next tick (spec §13.1: entries stay
+				// pending during an outage, and indexing resumes
+				// automatically once the embedder recovers, with no
+				// operator action and no separate health check needed).
+				break
+			}
+			cancelled, down := attempt(id)
+			if cancelled {
 				return nil
+			}
+			if down {
+				embedderDown = true
+				continue
 			}
 			// Advance the cursor regardless of outcome. A failed entry
 			// stays retryable — via the retries map above, not via this
@@ -224,9 +267,16 @@ func runLive(ctx context.Context, ix *Indexer, interval time.Duration, startAfte
 			}
 		}
 
-		for _, id := range retryIDs {
-			if attempt(id) {
-				return nil
+		if !embedderDown {
+			for _, id := range retryIDs {
+				cancelled, down := attempt(id)
+				if cancelled {
+					return nil
+				}
+				if down {
+					embedderDown = true
+					break
+				}
 			}
 		}
 
@@ -236,6 +286,7 @@ func runLive(ctx context.Context, ix *Indexer, interval time.Duration, startAfte
 				slog.Int("retried", len(retryIDs)),
 				slog.Int("indexed", indexed),
 				slog.Int("failed", failed),
+				slog.Bool("embedder_paused", embedderDown),
 			)
 		}
 	}
