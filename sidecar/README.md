@@ -97,6 +97,96 @@ reasonable planner choice at this scale, not a misconfiguration — the 22 MB
 index earns its keep as the corpus grows, and the vacuum discipline above is
 what keeps it correct when it does.
 
+### Autovacuum is tuned on the table itself, and travels with the migration
+
+`search.passages` carries its own storage parameters (migration 4 in
+`internal/store/migrations.go`), tighter than the cluster defaults:
+
+```sql
+ALTER TABLE search.passages SET (
+  autovacuum_vacuum_scale_factor = 0.05,
+  autovacuum_vacuum_threshold = 500
+);
+```
+
+Vacuum now fires at `500 + 0.05 × rows` instead of the cluster default's
+`50 + 0.2 × rows`. At the 5,681-passage corpus in the incident above, that
+is 784 dead tuples instead of 1,186 — comfortably below the 1,066 that
+actually caused it, where the default's 1,186 trigger was not. 500 rather
+than 1000 is deliberate: 1000's crossover against the cluster default is
+~6,300 rows, above the corpus size that already broke, so it would have
+been *looser* than the status quo, not tighter.
+
+### Rebuilding `passages_embedding_idx`: `maintenance_work_mem` and two different procedures
+
+pgvector builds an HNSW index in memory when it fits under
+`maintenance_work_mem`, and otherwise falls back to a much slower two-pass
+disk build. **Rule of thumb: give it comfortably more than the index's own
+on-disk size** — a 292 MB index needs something above roughly 350 MB to
+stay in the fast path. This is host-dependent; measure the live value
+rather than assume it:
+
+```sql
+SHOW maintenance_work_mem;
+```
+
+On this project's Docker dev stack it reports **841 MB** (ParadeDB sizes
+it from container memory, not PostgreSQL's 64 MB built-in default), so the
+initial build and any rebuild are fine there without changing anything. A
+smaller container or a managed instance that caps this setting lower is a
+real risk — if the cap sits below ~400 MB, that is the constraint to raise
+*before* building the index, not something to compensate for afterwards
+with a slower build.
+
+There are two different procedures here, with two different transaction
+shapes, and they must not be confused:
+
+- **The migration that (re)builds the index** (`internal/store/migrations.go`,
+  the migration after the autovacuum one above) runs inside the sidecar's
+  own transaction and raises the setting with `SET LOCAL`, never `SET`:
+
+  ```sql
+  SET LOCAL maintenance_work_mem = '1GB';
+  SET LOCAL max_parallel_maintenance_workers = 4;
+  ```
+
+  `SET LOCAL` confines the change to that transaction; it cannot leak onto
+  the pooled connection afterwards. This distinction is not theoretical —
+  this codebase already shipped one bug from a GUC applied at the wrong
+  scope: an `hnsw.ef_search` fix wrapped in a `MATERIALIZED` CTE looked
+  correct and did nothing, because the CTE became the inner side of a
+  nested loop and never executed when the outer scan returned no rows. It
+  was replaced with `SET LOCAL` inside an explicit transaction, which is
+  the same pattern used here.
+
+- **A later, operator-driven rebuild** uses
+  `REINDEX INDEX CONCURRENTLY`, so it doesn't hold the exclusive lock a
+  plain `REINDEX` (or the migration's own `DROP INDEX` + `CREATE INDEX`)
+  would:
+
+  ```sql
+  SET maintenance_work_mem = '1GB';
+  SET max_parallel_maintenance_workers = 4;
+
+  REINDEX INDEX CONCURRENTLY search.passages_embedding_idx;
+  ```
+
+  This is deliberately a **plain `SET`, in its own dedicated `psql` (or
+  equivalent) session** — `REINDEX ... CONCURRENTLY` cannot run inside a
+  transaction block at all, so `SET LOCAL` is not an option here the way
+  it is inside the migration above. A plain `SET` is safe in this shape
+  precisely because the session is disposable: close it after the reindex
+  and the setting goes away with the connection, rather than sitting on a
+  connection a pool hands back out to unrelated queries. Follow this with
+  a `VACUUM (VERBOSE) search.passages` per the dead-tuple section above —
+  a reindex churns the table hard enough to matter.
+
+The migration's own `SET LOCAL` and this operator procedure's plain `SET`
+are not interchangeable recipes for the same job: one runs inside a
+transaction where `SET LOCAL` is required and correct, the other runs
+outside any transaction where `REINDEX ... CONCURRENTLY` requires there be
+none.
+
 ## The embedder (`internal/embed`, `internal/embed/onnx`)
 
 `internal/embed` holds the small, pure-Go `Embedder` interface
