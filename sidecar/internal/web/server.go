@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"miniflux.app/v2/sidecar/internal/indexer"
+	"miniflux.app/v2/sidecar/internal/store"
 )
 
 // DefaultAddr is the address the admin server binds by default. This page
@@ -74,6 +75,18 @@ type LiveLane interface {
 	Stats() indexer.LiveStats
 }
 
+// DatabaseMetricsSource is the subset of *store.Store the admin page needs
+// for spec §13.2's database-size section: total database size, the
+// search schema's own size, the HNSW index specifically, passage/entry
+// counts and the dead-tuple count for search.passages, all in one round
+// trip. Defined as an interface, not *store.Store directly, for the same
+// reason BackfillController and LiveLane are: this package's own test
+// suite must stay hermetic, with no real database, by injecting a fake
+// (see server_test.go's fakeMetrics).
+type DatabaseMetricsSource interface {
+	DatabaseMetrics(ctx context.Context) (store.DatabaseMetrics, error)
+}
+
 // Server is the sidecar's status and admin HTTP server (spec §9.4), and,
 // since task 7, its read-only search HTTP API (spec §6.3-6.4, §7).
 type Server struct {
@@ -81,30 +94,35 @@ type Server struct {
 	live     LiveLane
 	searcher SearchService
 	entries  EntryLookup
+	metrics  DatabaseMetricsSource
 	tmpl     *template.Template
 	mux      *http.ServeMux
 }
 
 // New builds a Server over backfill (control endpoints), live (the live
 // lane's own pause status — spec §13.1), searcher (GET /api/search and
-// /api/similar) and entries (loaded per result to build a highlighted
-// search.BuildSnippet — see search_handlers.go). It parses the embedded
+// /api/similar), entries (loaded per result to build a highlighted
+// search.BuildSnippet — see search_handlers.go) and metrics (the
+// database-size and health section — spec §13.2). It parses the embedded
 // status page template eagerly so a malformed template fails at startup,
 // not on the first request.
 //
-// live, searcher and entries may all be nil in tests that don't care
-// about what they cover (see server_test.go); cmd/sidecar always supplies
-// all three. A nil live renders as "not paused" — the zero value of
-// indexer.LiveStats — rather than panicking.
-func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup) (*Server, error) {
+// live, searcher, entries and metrics may all be nil in tests that don't
+// care about what they cover (see server_test.go); cmd/sidecar always
+// supplies all four. A nil live renders as "not paused" — the zero value
+// of indexer.LiveStats — rather than panicking; a nil (or erroring)
+// metrics source renders the database-size section as unavailable rather
+// than panicking or showing zeroes as if they were real (see view()).
+func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, metrics DatabaseMetricsSource) (*Server, error) {
 	tmpl, err := template.New("status.html").Funcs(template.FuncMap{
-		"comma": commaInt,
+		"comma":    commaInt,
+		"bytesize": formatBytes,
 	}).ParseFS(templateFS, "templates/status.html")
 	if err != nil {
 		return nil, fmt.Errorf("web: unable to parse status template: %w", err)
 	}
 
-	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, tmpl: tmpl}
+	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, metrics: metrics, tmpl: tmpl}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -220,13 +238,57 @@ type statusView struct {
 	WindowLabel  string                `json:"window_label"` // Config's window as an operator writes it
 	PollInterval string                `json:"poll_interval"`
 	IdleResweep  string                `json:"idle_resweep"`
+
+	// MetricsAvailable is false when the Server was built with a nil
+	// DatabaseMetricsSource, or the last read of it failed (a transient
+	// database hiccup, say) — the page must say "unavailable" rather than
+	// render zeroes as if they were a real, current database-size reading
+	// (see view()). The fields below are the zero DatabaseMetrics when
+	// this is false.
+	MetricsAvailable bool `json:"metrics_available"`
+
+	// DatabaseSizeBytes, SearchSchemaSizeBytes and HNSWIndexSizeBytes are
+	// spec §13.2's size numbers: the whole database, the search schema's
+	// own share, and the HNSW vector index specifically — called out on
+	// its own because it grows fastest and the spec's own §5.5 estimate
+	// folded it into a table total.
+	DatabaseSizeBytes     int64 `json:"database_size_bytes"`
+	SearchSchemaSizeBytes int64 `json:"search_schema_size_bytes"`
+	HNSWIndexSizeBytes    int64 `json:"hnsw_index_size_bytes"`
+
+	// PassageCount, EntryCount and PassagesPerEntry are the numbers spec
+	// §13.2 exists to surface: the measured corpus is 13 passages per
+	// entry, not the 4-6 §5.5 assumed, which is what made §5.5's disk
+	// estimate wrong by roughly 5x. CountsAreEstimated is true whenever
+	// PassageCount/EntryCount come from pg_class.reltuples rather than an
+	// exact count (see store.DatabaseMetrics' own doc comment for why) —
+	// always true today — and the page must render the word "estimated"
+	// next to them when it is, rather than presenting an approximation as
+	// an exact count.
+	PassageCount       int64   `json:"passage_count"`
+	EntryCount         int64   `json:"entry_count"`
+	PassagesPerEntry   float64 `json:"passages_per_entry"`
+	CountsAreEstimated bool    `json:"counts_are_estimated"`
+
+	// DeadTuples is search.passages' own dead-tuple count
+	// (pg_stat_user_tables.n_dead_tup). Not routine: a stale VACUUM
+	// silently truncates HNSW index scans, and in this project 1,066
+	// dead tuples once produced a constant 31-row deficit in search
+	// results with no error anywhere. Read live on every render (see
+	// view()'s own doc comment for why no caching is needed here), so an
+	// operator watching this number while they run VACUUM sees it change.
+	DeadTuples int64 `json:"dead_tuples_passages"`
 }
 
 // buildView derives a statusView from the backfill lane's Stats snapshot,
-// the live lane's own LiveStats snapshot, and the backfill lane's current
+// the live lane's own LiveStats snapshot, the backfill lane's current
 // live-editable configuration (the live lane has no configuration of its
-// own to show).
-func buildView(st indexer.Stats, liveSt indexer.LiveStats, cfg indexer.RuntimeConfig) statusView {
+// own to show), and the database-size/health numbers (spec §13.2)
+// dmOK reports whether dm is a genuine, freshly-read reading (false when
+// there was no DatabaseMetricsSource or the last read of it failed) — the
+// zero DatabaseMetrics is indistinguishable from "everything is really
+// zero", so this cannot be inferred from dm alone.
+func buildView(st indexer.Stats, liveSt indexer.LiveStats, cfg indexer.RuntimeConfig, dm store.DatabaseMetrics, dmOK bool) statusView {
 	v := statusView{
 		Indexed:                      st.Indexed,
 		Skipped:                      st.Skipped,
@@ -254,6 +316,16 @@ func buildView(st indexer.Stats, liveSt indexer.LiveStats, cfg indexer.RuntimeCo
 		WindowLabel:     cfg.WindowDescription(),
 		PollInterval:    formatSeconds(cfg.PollIntervalSeconds),
 		IdleResweep:     formatSeconds(cfg.IdleResweepIntervalSecs),
+
+		MetricsAvailable:      dmOK,
+		DatabaseSizeBytes:     dm.DatabaseSizeBytes,
+		SearchSchemaSizeBytes: dm.SearchSchemaSizeBytes,
+		HNSWIndexSizeBytes:    dm.HNSWIndexSizeBytes,
+		PassageCount:          dm.PassageCount,
+		EntryCount:            dm.EntryCount,
+		PassagesPerEntry:      dm.PassagesPerEntry,
+		CountsAreEstimated:    dm.CountsAreEstimated,
+		DeadTuples:            dm.DeadTuples,
 	}
 	if v.SkippedByReason == nil {
 		v.SkippedByReason = map[string]int64{}
@@ -327,17 +399,66 @@ func commaInt(n int64) string {
 	return string(out)
 }
 
+// formatBytes renders n bytes as a short human-readable size (e.g.
+// "112.4 MB", "1.8 GB") for the status page's database-size section (spec
+// §13.2) — the numbers involved range from kilobytes to the hundreds-of-
+// gigabytes spec §13.2 itself extrapolates to, and a raw byte count is not
+// something an operator scans at a glance at that range.
+func formatBytes(n int64) string {
+	const unit = 1024.0
+	if n < 0 {
+		return fmt.Sprintf("-%s", formatBytes(-n))
+	}
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := float64(unit), 0
+	for f := float64(n) / unit; f >= unit; f /= unit {
+		div *= unit
+		exp++
+	}
+	units := []string{"KB", "MB", "GB", "TB", "PB"}
+	return fmt.Sprintf("%.1f %s", float64(n)/div, units[exp])
+}
+
 // view builds the current status view. Stats(), the live lane's Stats()
 // and RuntimeConfig() are read one after the other rather than under a
 // shared lock; they are independent snapshots of lanes that are changing
 // anyway, and nothing rendered from them is a consistency claim about a
 // single instant.
-func (s *Server) view() statusView {
+//
+// The database-size/health numbers (spec §13.2) are read fresh here, on
+// every call, with no caching or TTL: unlike store.PendingEntryCount —
+// which this project already had to fix exactly this mistake for once,
+// by caching it behind a TTL (see indexer.Backfill.cachedRemaining) —
+// every primitive store.DatabaseMetrics reads is a catalog or statistics
+// lookup (pg_database_size, pg_total_relation_size, pg_relation_size,
+// pg_class.reltuples, pg_stat_user_tables.n_dead_tup) whose cost does not
+// grow with the size of entries or search.passages. Measured with EXPLAIN
+// (ANALYZE, BUFFERS) against a live corpus (see task-4-report.md), the
+// combined query runs in single-digit milliseconds — safely inside the
+// 10-second refresh this page uses (spec §9.4) with nothing memoised. A
+// failed read (a transient database hiccup) is logged and rendered as
+// "unavailable" rather than as a false zero.
+func (s *Server) view(ctx context.Context) statusView {
 	var liveSt indexer.LiveStats
 	if s.live != nil {
 		liveSt = s.live.Stats()
 	}
-	return buildView(s.backfill.Stats(), liveSt, s.backfill.RuntimeConfig())
+
+	var dm store.DatabaseMetrics
+	dmOK := false
+	if s.metrics != nil {
+		m, err := s.metrics.DatabaseMetrics(ctx)
+		if err != nil {
+			slog.Error("web: unable to read database metrics for the status page", slog.Any("error", err))
+		} else {
+			dm = m
+			dmOK = true
+		}
+	}
+
+	return buildView(s.backfill.Stats(), liveSt, s.backfill.RuntimeConfig(), dm, dmOK)
 }
 
 // formatSeconds renders a duration expressed in seconds the short way an
@@ -458,7 +579,7 @@ func writeJSON(w http.ResponseWriter, payload any) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	view := s.view()
+	view := s.view(r.Context())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.Execute(w, view); err != nil {
 		slog.Error("web: unable to render status page", slog.Any("error", err))
@@ -466,7 +587,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
-	view := s.view()
+	view := s.view(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(view); err != nil {
 		slog.Error("web: unable to encode status response", slog.Any("error", err))
@@ -481,7 +602,7 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	s.backfill.Pause()
 	slog.Info("web: backfill paused via admin page")
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.view())
+	json.NewEncoder(w).Encode(s.view(r.Context()))
 }
 
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
@@ -492,7 +613,7 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	s.backfill.Resume()
 	slog.Info("web: backfill resumed via admin page")
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.view())
+	json.NewEncoder(w).Encode(s.view(r.Context()))
 }
 
 // sameOriginOrNoOrigin reports whether r may be trusted as a same-origin

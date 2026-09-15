@@ -68,6 +68,32 @@
 </table>
 {{end}}
 
+<h2>Database</h2>
+{{if .MetricsAvailable}}
+<table>
+  <tr><th>Total database size</th><td>{{bytesize .DatabaseSizeBytes}}</td></tr>
+  <tr><th>search schema size</th><td>{{bytesize .SearchSchemaSizeBytes}}</td></tr>
+  <tr><th>HNSW index size</th><td>{{bytesize .HNSWIndexSizeBytes}}</td></tr>
+  <tr><th>Passages</th><td>{{comma .PassageCount}}{{if .CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}</td></tr>
+  <tr><th>Entries</th><td>{{comma .EntryCount}}{{if .CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}</td></tr>
+  <tr><th>Passages per entry</th><td>{{printf "%.2f" .PassagesPerEntry}}</td></tr>
+  <tr><th>Dead tuples (search.passages)</th><td>
+    {{comma .DeadTuples}}
+    <div class="reason">A stale VACUUM silently truncates HNSW index scans — a high or climbing number here, not just search results that seem short, is the sign to check.</div>
+  </td></tr>
+</table>
+<p class="hint">
+  Passages per entry is the ratio that makes disk growth predictable: the
+  design spec assumed 4&ndash;6 and measured 13, which put its sizing
+  estimate off by roughly 5x. Passage and entry counts are estimates
+  (Postgres' own planner statistics, refreshed by ANALYZE/autovacuum), not
+  an exact count — cheap to read regardless of corpus size, at the cost of
+  lagging a burst of inserts briefly.
+</p>
+{{else}}
+<p class="reason">Database metrics unavailable.</p>
+{{end}}
+
 <h2>Controls</h2>
 <button id="pause-btn" onclick="post('/api/backfill/pause')">Pause</button>
 <button id="resume-btn" onclick="post('/api/backfill/resume')">Resume</button>

@@ -81,7 +81,7 @@ func (f *fakeEntries) EntryIndexState(_ context.Context, entryID int64) (*store.
 
 func newTestSearchServer(t *testing.T, searcher SearchService, entries EntryLookup) http.Handler {
 	t.Helper()
-	srv, err := New(&fakeBackfill{}, nil, searcher, entries)
+	srv, err := New(&fakeBackfill{}, nil, searcher, entries, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

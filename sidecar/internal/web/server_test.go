@@ -4,7 +4,9 @@
 package web // import "miniflux.app/v2/sidecar/internal/web"
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"testing"
 
 	"miniflux.app/v2/sidecar/internal/indexer"
+	"miniflux.app/v2/sidecar/internal/store"
 )
 
 // fakeBackfill is a hermetic stand-in for *indexer.Backfill: it satisfies
@@ -108,14 +111,28 @@ type fakeLive struct {
 
 func (f *fakeLive) Stats() indexer.LiveStats { return f.stats }
 
+// fakeMetrics is a hermetic stand-in for *store.Store's DatabaseMetrics
+// method: it satisfies DatabaseMetricsSource by returning a fixed
+// store.DatabaseMetrics (or a fixed error), so tests can render spec
+// §13.2's database-size section without a real database anywhere nearby.
+type fakeMetrics struct {
+	metrics store.DatabaseMetrics
+	err     error
+}
+
+func (f *fakeMetrics) DatabaseMetrics(context.Context) (store.DatabaseMetrics, error) {
+	return f.metrics, f.err
+}
+
 func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	t.Helper()
 	// nil for live: these tests exercise only the backfill control
 	// endpoints and don't care what the live lane's own pause state
 	// renders as (see TestStatusDistinguishesLiveLanePauseFromBackfill
-	// for that, via newTestServerWithLive). nil, nil: no search
-	// service/entries either -- see search_handlers_test.go for those.
-	srv, err := New(fb, nil, nil, nil)
+	// for that, via newTestServerWithLive). nil, nil, nil: no search
+	// service/entries/metrics source either -- see search_handlers_test.go
+	// for the first two and TestStatusPage*Metrics* below for the third.
+	srv, err := New(fb, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -127,7 +144,19 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 // renders distinctly from the backfill lane's.
 func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.Handler {
 	t.Helper()
-	srv, err := New(fb, live, nil, nil)
+	srv, err := New(fb, live, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return srv.Handler()
+}
+
+// newTestServerWithMetrics is newTestServer plus a real, non-nil
+// DatabaseMetricsSource, for the tests that check spec §13.2's
+// database-size section renders from it.
+func newTestServerWithMetrics(t *testing.T, fb *fakeBackfill, metrics DatabaseMetricsSource) http.Handler {
+	t.Helper()
+	srv, err := New(fb, nil, nil, nil, metrics)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -541,7 +570,7 @@ func TestBuildViewETAEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := buildView(tt.stats, indexer.LiveStats{}, indexer.RuntimeConfig{})
+			v := buildView(tt.stats, indexer.LiveStats{}, indexer.RuntimeConfig{}, store.DatabaseMetrics{}, false)
 			if v.ETA != tt.wantETA {
 				t.Errorf("ETA = %q, want %q", v.ETA, tt.wantETA)
 			}
@@ -720,5 +749,143 @@ func TestStatusShowsTheConfigurationInForce(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected the status page to contain %q", want)
 		}
+	}
+}
+
+// (Task 4, spec §13.2.) The status page's database-size section must
+// actually be wired to Server.metrics through view() and buildView, not
+// merely renderable if handed the right statusView by hand — the same
+// concern TestStatusDistinguishesLiveLanePauseFromBackfillLane raises for
+// the live lane's own fields. This exercises a REAL, non-nil fakeMetrics
+// through the full HTTP path (both /api/status and /) and asserts on
+// specific values a hardcoded placeholder or a wrong-field mix-up would
+// not reproduce.
+func TestStatusPageRendersDatabaseMetrics(t *testing.T) {
+	fb := &fakeBackfill{}
+	metrics := &fakeMetrics{metrics: store.DatabaseMetrics{
+		DatabaseSizeBytes:     117440512, // 112.0 MiB
+		SearchSchemaSizeBytes: 16777216,  // 16.0 MiB
+		HNSWIndexSizeBytes:    8388608,   // 8.0 MiB
+		PassageCount:          5681,
+		EntryCount:            436,
+		PassagesPerEntry:      13.03,
+		CountsAreEstimated:    true,
+		DeadTuples:            1066,
+	}}
+	handler := newTestServerWithMetrics(t, fb, metrics)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var got struct {
+		MetricsAvailable      bool    `json:"metrics_available"`
+		DatabaseSizeBytes     int64   `json:"database_size_bytes"`
+		SearchSchemaSizeBytes int64   `json:"search_schema_size_bytes"`
+		HNSWIndexSizeBytes    int64   `json:"hnsw_index_size_bytes"`
+		PassageCount          int64   `json:"passage_count"`
+		EntryCount            int64   `json:"entry_count"`
+		PassagesPerEntry      float64 `json:"passages_per_entry"`
+		CountsAreEstimated    bool    `json:"counts_are_estimated"`
+		DeadTuples            int64   `json:"dead_tuples_passages"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v, body = %s", err, rec.Body.String())
+	}
+	if !got.MetricsAvailable {
+		t.Fatal("expected metrics_available = true with a real DatabaseMetricsSource")
+	}
+	if got.DatabaseSizeBytes != 117440512 || got.SearchSchemaSizeBytes != 16777216 || got.HNSWIndexSizeBytes != 8388608 {
+		t.Errorf("size fields = %+v", got)
+	}
+	if got.PassageCount != 5681 || got.EntryCount != 436 {
+		t.Errorf("count fields = %+v", got)
+	}
+	if got.PassagesPerEntry != 13.03 {
+		t.Errorf("PassagesPerEntry = %v, want 13.03", got.PassagesPerEntry)
+	}
+	if !got.CountsAreEstimated {
+		t.Error("expected counts_are_estimated = true")
+	}
+	if got.DeadTuples != 1066 {
+		t.Errorf("DeadTuples = %d, want 1066", got.DeadTuples)
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlRec := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, htmlReq)
+	body := htmlRec.Body.String()
+	for _, want := range []string{
+		"112.0 MB",  // total database size
+		"16.0 MB",   // search schema size
+		"8.0 MB",    // HNSW index size specifically
+		"5,681",     // passage count
+		"436",       // entry count
+		"13.03",     // passages per entry -- the ratio the task exists to surface
+		"estimated", // counts are estimates, not exact
+		"1,066",     // dead tuple count
+		"VACUUM",    // the stale-VACUUM/HNSW-truncation warning
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected the status page to contain %q, got:\n%s", want, body)
+		}
+	}
+}
+
+// A nil DatabaseMetricsSource (no store wired in at all, e.g. a test
+// harness) must render gracefully -- no panic, and no false zeroes
+// presented as a real reading.
+func TestStatusPageShowsMetricsUnavailableWithoutSource(t *testing.T) {
+	fb := &fakeBackfill{}
+	handler := newTestServer(t, fb) // metrics is nil here
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var got struct {
+		MetricsAvailable bool `json:"metrics_available"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v, body = %s", err, rec.Body.String())
+	}
+	if got.MetricsAvailable {
+		t.Fatal("expected metrics_available = false with no DatabaseMetricsSource")
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlRec := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, htmlReq)
+	if body := htmlRec.Body.String(); !strings.Contains(body, "unavailable") {
+		t.Errorf("expected the status page to say the database metrics are unavailable, got:\n%s", body)
+	}
+}
+
+// A DatabaseMetricsSource that errors (a transient database hiccup) must
+// degrade the same way a nil one does -- MetricsAvailable false, not a
+// false zero reading presented as real. This is the case that would slip
+// through if view() ever stopped checking the error from
+// s.metrics.DatabaseMetrics and just always reported dmOK=true.
+func TestStatusPageShowsMetricsUnavailableOnError(t *testing.T) {
+	fb := &fakeBackfill{}
+	metrics := &fakeMetrics{err: errors.New("connection refused")}
+	handler := newTestServerWithMetrics(t, fb, metrics)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var got struct {
+		MetricsAvailable bool  `json:"metrics_available"`
+		DeadTuples       int64 `json:"dead_tuples_passages"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v, body = %s", err, rec.Body.String())
+	}
+	if got.MetricsAvailable {
+		t.Fatal("expected metrics_available = false when the metrics source errors")
+	}
+	if got.DeadTuples != 0 {
+		t.Errorf("expected the zero value (not a stale reading) when the source errors, got DeadTuples=%d", got.DeadTuples)
 	}
 }

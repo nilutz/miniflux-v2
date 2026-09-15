@@ -317,11 +317,12 @@ func run() error {
 	// query embedding (spec §6.5) that the lanes use for passage
 	// embedding — one ONNX Runtime session shared by every query and
 	// index path, not a second one stood up for search. s itself also
-	// satisfies web.EntryLookup (EntryForIndexing, EntryIndexState) with
-	// no adaptation, so it is passed to web.New a second time for that.
+	// satisfies web.EntryLookup (EntryForIndexing, EntryIndexState) and
+	// web.DatabaseMetricsSource (DatabaseMetrics — spec §13.2) with no
+	// adaptation, so it is passed to web.New twice more for those.
 	searcher := search.NewSearcher(s, search.WithEmbedder(embedder))
 
-	adminServer, err := web.New(backfill, liveMonitor, searcher, s)
+	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s)
 	if err != nil {
 		return fmt.Errorf("sidecar: unable to build admin server: %w", err)
 	}
