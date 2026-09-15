@@ -13,16 +13,7 @@
 # you on the sidecar's port, with the operator-only pages gated behind
 # is_admin).
 #
-# *** IMAGE TAGS ARE PLACEHOLDERS. REPLACE BEFORE USE. ***
-# As of 2026-09-15 this fork's release pipeline
-# (.github/workflows/fork_release.yml, added in the same commit series as
-# this file) has never run: no `v*` tag has been pushed, so
-# ghcr.io/nilutz/miniflux:v0.0.0-UNRELEASED and
-# ghcr.io/nilutz/miniflux-sidecar:v0.0.0-UNRELEASED do not exist in the
-# registry. `v0.0.0-UNRELEASED` is not a real tag and never will be one --
-# it is chosen specifically so it cannot collide with a future release. Edit
-# the two `image:` lines below to the first real released tag before
-# running this anywhere. `latest` is deliberately never used: a compose
+# Image tags are pinned to a released version, never `latest`: a compose
 # file that silently changes what it runs on the next `pull` is not a
 # production artifact.
 #
@@ -71,7 +62,7 @@ services:
     # "$POSTGRES_USER"` for ad-hoc access instead of publishing 5432.
 
   miniflux:
-    image: ghcr.io/nilutz/miniflux:v0.0.0-UNRELEASED # <- replace with the first real release tag
+    image: ghcr.io/nilutz/miniflux:v0.1.0
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -107,7 +98,7 @@ services:
       start_period: 30s
 
   sidecar:
-    image: ghcr.io/nilutz/miniflux-sidecar:v0.0.0-UNRELEASED # <- replace with the first real release tag
+    image: ghcr.io/nilutz/miniflux-sidecar:v0.1.0
     restart: unless-stopped
     # Published, on a configurable host port (task 18) -- this used to be
     # deliberately unpublished, on the reasoning that network isolation
