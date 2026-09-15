@@ -202,6 +202,79 @@ go test -tags ORT ./internal/indexer/ ./internal/store/ ./internal/web/ ./intern
 
 Only `./internal/embed/onnx` and `./cmd/sidecar` need the native libraries.
 
+## Remote embedding (`internal/embed/remote`)
+
+Embedding can run on a different machine — a GPU host, typically — instead
+of in-process ONNX. `internal/embed/remote` implements `embed.Embedder` by
+speaking HTTP to a service you run there. It has no CGO and does not import
+`internal/embed/onnx`, so it links and tests (`go test ./internal/embed/remote/`)
+with no build tag and no native libraries, the same as `internal/embed` itself.
+
+Set `SIDECAR_EMBEDDER=remote` (default is `local`) plus:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SIDECAR_REMOTE_EMBEDDER_URL` | — (required) | base URL of the remote service, e.g. `http://gpu-host:9000` |
+| `SIDECAR_REMOTE_EMBEDDER_TIMEOUT` | `30s` | per-request timeout, a Go duration |
+
+**The remote's identity, not local config, becomes part of `contentHash`.**
+At startup the sidecar sends the remote an empty batch to learn what model
+it is actually running before indexing anything — this is what spec §13.1's
+model-identity hash means to protect: a locally-configured guess at the
+remote's model name would let an operator repoint the URL at a differently
+configured box without changing a single hash, silently mixing two models'
+vectors in one HNSW graph. A dimension mismatch against the fixed
+`vector(384)` schema column is a startup error here, not a runtime insert
+failure, and the sidecar refuses to start rather than guess.
+
+### Wire protocol
+
+One endpoint, `POST {SIDECAR_REMOTE_EMBEDDER_URL}/embed`, no authentication
+(run it on a private network, the same trust boundary Postgres itself is
+given). This is a small JSON protocol defined by `internal/embed/remote`
+itself, not tied to any particular serving framework — implement it however
+is convenient (a FastAPI/Flask wrapper around `sentence-transformers`, for
+instance).
+
+Request:
+
+```json
+{"texts": ["first passage", "second passage"]}
+```
+
+`texts` may be empty — the sidecar sends an empty batch once, at startup,
+purely to learn `model` below without embedding anything real. A
+conforming server must still populate `model` in that case.
+
+Response, `200` only:
+
+```json
+{
+  "vectors": [[0.01, -0.02, "... 384 floats ..."], [0.03, 0.04, "..."]],
+  "model": {"name": "bge-small-en-v1.5", "revision": "abc123", "dimensions": 384}
+}
+```
+
+- `vectors` has exactly one entry per input text, in the same order, each
+  of `model.dimensions` length.
+- `model` is returned on **every** response, not only the first, and must
+  describe whatever model actually produced that batch's vectors. The
+  client compares it against what it learned at startup on every call, so
+  a remote that starts serving a different model mid-run (a redeploy
+  behind the same URL) is caught on the next batch — refused with an
+  error — rather than silently mixing two models' vectors into one index.
+- `model.name` and `model.revision` must not contain `@` or `#`. Those are
+  `embed.Identity`'s own separators (`"%s@%s#%d"`), and a name/revision
+  pair containing one could format identically to a different, genuinely
+  distinct pair. The client rejects such a name at startup rather than
+  silently stripping or escaping it — fix the name at the source.
+
+Anything other than a `200` status is treated as an error; on non-200 or a
+body that fails to decode as the JSON above, the client fails loudly rather
+than falling back to local CPU embedding (spec §13.1's explicit decision —
+a silent fallback would produce a corpus embedded by two different paths
+with no record of which is which).
+
 ## Environment variables used by tests
 
 Tests that need a real database or a real model are skipped, not failed,

@@ -29,7 +29,9 @@ import (
 	"syscall"
 	"time"
 
+	"miniflux.app/v2/sidecar/internal/embed"
 	"miniflux.app/v2/sidecar/internal/embed/onnx"
+	"miniflux.app/v2/sidecar/internal/embed/remote"
 	"miniflux.app/v2/sidecar/internal/indexer"
 	"miniflux.app/v2/sidecar/internal/search"
 	"miniflux.app/v2/sidecar/internal/store"
@@ -47,8 +49,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "sidecar runs the Miniflux search sidecar: live indexing, throttled backfill, and the status/admin page.\n\n")
 		fmt.Fprintf(os.Stderr, "Configuration is via environment variables:\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_DATABASE_URL   Postgres DSN (required)\n")
-		fmt.Fprintf(os.Stderr, "  SIDECAR_MODEL_PATH     path to the quantized ONNX model file (required)\n")
-		fmt.Fprintf(os.Stderr, "  SIDECAR_ONNX_LIB_DIR   directory containing the native ONNX Runtime library (optional)\n")
+		fmt.Fprintf(os.Stderr, "  SIDECAR_EMBEDDER       \"local\" (default) or \"remote\" — where embedding runs (spec §13.1)\n")
+		fmt.Fprintf(os.Stderr, "  SIDECAR_MODEL_PATH     path to the quantized ONNX model file (required when SIDECAR_EMBEDDER=local)\n")
+		fmt.Fprintf(os.Stderr, "  SIDECAR_ONNX_LIB_DIR   directory containing the native ONNX Runtime library (optional, local only)\n")
+		fmt.Fprintf(os.Stderr, "  SIDECAR_REMOTE_EMBEDDER_URL      base URL of the remote embedding service (required when SIDECAR_EMBEDDER=remote)\n")
+		fmt.Fprintf(os.Stderr, "  SIDECAR_REMOTE_EMBEDDER_TIMEOUT  per-request timeout, a Go duration (optional, default %s)\n", remote.DefaultTimeout)
 		fmt.Fprintf(os.Stderr, "  SIDECAR_ADMIN_ADDR     address for the status/admin HTTP server (optional, default %s)\n", web.DefaultAddr)
 		fmt.Fprintf(os.Stderr, "\nBackfill throttle (spec §9.2; all optional, and all live-editable afterwards\n")
 		fmt.Fprintf(os.Stderr, "via POST /api/backfill/config on the admin server):\n")
@@ -72,9 +77,20 @@ func main() {
 // config is the sidecar's environment-variable-driven configuration.
 type config struct {
 	databaseURL string
-	modelPath   string
-	onnxLibDir  string
-	adminAddr   string
+
+	// embedderKind is "local" (default, in-process ONNX) or "remote" (an
+	// HTTP service, possibly on a GPU host — spec §13.1). It decides
+	// which of the fields below are required and which embed.Embedder
+	// implementation run constructs.
+	embedderKind string
+
+	modelPath  string // local only
+	onnxLibDir string // local only
+
+	remoteURL     string        // remote only
+	remoteTimeout time.Duration // remote only; zero means remote.DefaultTimeout
+
+	adminAddr string
 
 	// backfill is the startup half of spec §9.2's "three knobs, all
 	// live-editable without a restart". Startup configuration and the
@@ -95,10 +111,15 @@ type config struct {
 // default.
 func loadConfig() (config, error) {
 	cfg := config{
-		databaseURL: os.Getenv("SIDECAR_DATABASE_URL"),
-		modelPath:   os.Getenv("SIDECAR_MODEL_PATH"),
-		onnxLibDir:  os.Getenv("SIDECAR_ONNX_LIB_DIR"),
-		adminAddr:   os.Getenv("SIDECAR_ADMIN_ADDR"),
+		databaseURL:  os.Getenv("SIDECAR_DATABASE_URL"),
+		embedderKind: strings.ToLower(strings.TrimSpace(os.Getenv("SIDECAR_EMBEDDER"))),
+		modelPath:    os.Getenv("SIDECAR_MODEL_PATH"),
+		onnxLibDir:   os.Getenv("SIDECAR_ONNX_LIB_DIR"),
+		remoteURL:    os.Getenv("SIDECAR_REMOTE_EMBEDDER_URL"),
+		adminAddr:    os.Getenv("SIDECAR_ADMIN_ADDR"),
+	}
+	if cfg.embedderKind == "" {
+		cfg.embedderKind = "local"
 	}
 	if cfg.adminAddr == "" {
 		cfg.adminAddr = web.DefaultAddr
@@ -108,11 +129,29 @@ func loadConfig() (config, error) {
 	if cfg.databaseURL == "" {
 		missing = append(missing, "SIDECAR_DATABASE_URL")
 	}
-	if cfg.modelPath == "" {
-		missing = append(missing, "SIDECAR_MODEL_PATH")
+
+	switch cfg.embedderKind {
+	case "local":
+		if cfg.modelPath == "" {
+			missing = append(missing, "SIDECAR_MODEL_PATH")
+		}
+	case "remote":
+		if cfg.remoteURL == "" {
+			missing = append(missing, "SIDECAR_REMOTE_EMBEDDER_URL")
+		}
+	default:
+		return config{}, fmt.Errorf("sidecar: SIDECAR_EMBEDDER must be \"local\" or \"remote\", got %q", cfg.embedderKind)
 	}
 	if len(missing) > 0 {
 		return config{}, fmt.Errorf("sidecar: missing required environment variable(s): %v", missing)
+	}
+
+	if raw, ok := os.LookupEnv("SIDECAR_REMOTE_EMBEDDER_TIMEOUT"); ok {
+		d, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil {
+			return config{}, fmt.Errorf("sidecar: SIDECAR_REMOTE_EMBEDDER_TIMEOUT must be a Go duration such as \"30s\", got %q", raw)
+		}
+		cfg.remoteTimeout = d
 	}
 
 	patch, err := loadBackfillPatch()
@@ -214,20 +253,33 @@ func run() error {
 		return fmt.Errorf("sidecar: unable to run migrations: %w", err)
 	}
 
-	embedder, err := onnx.NewONNX(onnx.ONNXConfig{
-		ModelPath:      cfg.modelPath,
-		ONNXLibraryDir: cfg.onnxLibDir,
-	})
-	if err != nil {
-		return fmt.Errorf("sidecar: unable to create embedder: %w", err)
+	var embedder embed.Embedder
+	switch cfg.embedderKind {
+	case "remote":
+		embedder, err = remote.New(remote.Config{
+			URL:     cfg.remoteURL,
+			Timeout: cfg.remoteTimeout,
+		})
+		if err != nil {
+			return fmt.Errorf("sidecar: unable to create remote embedder: %w", err)
+		}
+	default:
+		embedder, err = onnx.NewONNX(onnx.ONNXConfig{
+			ModelPath:      cfg.modelPath,
+			ONNXLibraryDir: cfg.onnxLibDir,
+		})
+		if err != nil {
+			return fmt.Errorf("sidecar: unable to create embedder: %w", err)
+		}
+
+		// Logged unconditionally on every startup of the local embedder.
+		// In production, a line reading "GoMLX" here instead of "ORT" is
+		// the only visible symptom that this binary was built without
+		// -tags ORT and is running roughly 10x slower than expected — see
+		// internal/embed/onnx/backend_noort.go.
+		slog.Info("sidecar: embedder ready", slog.String("backend", onnx.BackendName()))
 	}
 	defer embedder.Close()
-
-	// Logged unconditionally on every startup. In production, a line
-	// reading "GoMLX" here instead of "ORT" is the only visible symptom
-	// that this binary was built without -tags ORT and is running roughly
-	// 10x slower than expected — see internal/embed/onnx/backend_noort.go.
-	slog.Info("sidecar: embedder ready", slog.String("backend", onnx.BackendName()))
 
 	ix := indexer.New(s, embedder)
 
