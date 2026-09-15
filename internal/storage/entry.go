@@ -483,19 +483,32 @@ func (s *Storage) ToggleStarred(userID int64, entryID int64) error {
 	return nil
 }
 
-// SetEntriesHiddenState updates the hidden state for the given list of entries.
-func (s *Storage) SetEntriesHiddenState(userID int64, entryIDs []int64, hidden bool) error {
-	query := `UPDATE entries SET hidden=$1, changed_at=now() WHERE user_id=$2 AND id=ANY($3)`
-	if _, err := s.db.Exec(query, hidden, userID, pq.Array(entryIDs)); err != nil {
+// SetEntriesHiddenState updates the hidden state for the given list of
+// entries. reason is recorded as hidden_reason whenever hidden is true; pass
+// "" for a hand-driven action (stored as NULL) or model.EntryHiddenReasonBulk
+// for a mass action. Unhiding (hidden=false) always clears hidden_reason back
+// to NULL regardless of reason, per spec §13.3: a stale reason on a visible
+// entry must not survive.
+func (s *Storage) SetEntriesHiddenState(userID int64, entryIDs []int64, hidden bool, reason string) error {
+	var hiddenReason *string
+	if hidden && reason != "" {
+		hiddenReason = &reason
+	}
+
+	query := `UPDATE entries SET hidden=$1, hidden_reason=$2, changed_at=now() WHERE user_id=$3 AND id=ANY($4)`
+	if _, err := s.db.Exec(query, hidden, hiddenReason, userID, pq.Array(entryIDs)); err != nil {
 		return fmt.Errorf(`store: unable to update the hidden state %v: %v`, entryIDs, err)
 	}
 
 	return nil
 }
 
-// ToggleHidden toggles entry hidden value.
+// ToggleHidden toggles entry hidden value. hidden_reason is always cleared to
+// NULL: this is the single-entry control, so re-hiding through it is by
+// definition a hand action (spec §13.3), never a mass one, and unhiding must
+// clear any reason left over from an earlier bulk hide.
 func (s *Storage) ToggleHidden(userID int64, entryID int64) error {
-	query := `UPDATE entries SET hidden = NOT hidden, changed_at=now() WHERE user_id=$1 AND id=$2`
+	query := `UPDATE entries SET hidden = NOT hidden, hidden_reason = NULL, changed_at=now() WHERE user_id=$1 AND id=$2`
 	result, err := s.db.Exec(query, userID, entryID)
 	if err != nil {
 		return fmt.Errorf(`store: unable to toggle hidden flag for entry #%d: %v`, entryID, err)

@@ -244,7 +244,11 @@ func (h *handler) setEntryStatusAndStarredHandler(w http.ResponseWriter, r *http
 	}
 
 	if entriesStatusUpdateRequest.Hidden != nil {
-		if err := h.store.SetEntriesHiddenState(request.UserID(r), entriesStatusUpdateRequest.EntryIDs, *entriesStatusUpdateRequest.Hidden); err != nil {
+		// "" (hand): the caller supplied a specific, deliberate list of entry
+		// IDs, not "everything in some scope" — spec §13.3 reserves the
+		// 'bulk' reason for mass actions such as the subscribe-time backlog
+		// hide and the mark-all-as-hidden routes.
+		if err := h.store.SetEntriesHiddenState(request.UserID(r), entriesStatusUpdateRequest.EntryIDs, *entriesStatusUpdateRequest.Hidden, ""); err != nil {
 			response.JSONServerError(w, r, err)
 			return
 		}

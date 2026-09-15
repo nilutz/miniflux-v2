@@ -23,6 +23,15 @@
             <li>
                 <button
                     class="page-button"
+                    data-action="markPageAsHidden"
+                    data-label-question="{{ t "confirm.question" }}"
+                    data-label-yes="{{ t "confirm.yes" }}"
+                    data-label-no="{{ t "confirm.no" }}"
+                    data-label-loading="{{ t "confirm.loading" }}">{{ icon "hide" }}{{ t "menu.mark_page_as_hidden" }}</button>
+            </li>
+            <li>
+                <button
+                    class="page-button"
                     data-confirm="true"
                     data-url="{{ routePath "/mark-all-as-read" }}"
                     data-redirect-url="{{ routePath "/unread" }}"
@@ -30,6 +39,17 @@
                     data-label-yes="{{ t "confirm.yes" }}"
                     data-label-no="{{ t "confirm.no" }}"
                     data-label-loading="{{ t "confirm.loading" }}">{{ icon "mark-all-as-read" }}{{ t "menu.mark_all_as_read" }}</button>
+            </li>
+            <li>
+                <button
+                    class="page-button"
+                    data-confirm="true"
+                    data-url="{{ routePath "/mark-all-as-hidden" }}"
+                    data-redirect-url="{{ routePath "/unread" }}"
+                    data-label-question="{{ t "confirm.question" }}"
+                    data-label-yes="{{ t "confirm.yes" }}"
+                    data-label-no="{{ t "confirm.no" }}"
+                    data-label-loading="{{ t "confirm.loading" }}">{{ icon "hide" }}{{ t "menu.mark_all_as_hidden" }}</button>
             </li>
         </ul>
     </nav>
@@ -84,6 +104,18 @@
                     data-label-loading="{{ t "confirm.loading" }}"
                 >
                     {{ icon "mark-page-as-read" }}{{ t "menu.mark_page_as_read" }}
+                </button>
+            </li>
+            <li>
+                <button
+                    class="page-button"
+                    data-action="markPageAsHidden"
+                    data-label-question="{{ t "confirm.question" }}"
+                    data-label-yes="{{ t "confirm.yes" }}"
+                    data-label-no="{{ t "confirm.no" }}"
+                    data-label-loading="{{ t "confirm.loading" }}"
+                >
+                    {{ icon "hide" }}{{ t "menu.mark_page_as_hidden" }}
                 </button>
             </li>
         </ul>

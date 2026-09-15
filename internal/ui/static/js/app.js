@@ -608,6 +608,43 @@ function markPageAsReadAction() {
 }
 
 /**
+ * Hide multiple entries at once (spec §13.3's "hide" rating, applied in
+ * bulk). Always recorded as a mass action (hidden_reason "bulk" server-side),
+ * never as a hand judgement on any one entry.
+ *
+ * @param {Array<number>} entryIDs - The IDs of the entries to hide.
+ * @param {function} [callback] - Called after the request completes.
+ */
+function hideEntries(entryIDs, callback) {
+    const url = document.body.dataset.entriesHideUrl;
+    sendPOSTRequest(url, { entry_ids: entryIDs }).then(() => {
+        if (callback) {
+            callback();
+        }
+        updateUnreadCounterValue(-entryIDs.length);
+    });
+}
+
+/**
+ * Mark all visible entries on the current page as hidden.
+ *
+ * Unlike markPageAsReadAction, this does not strip items from the DOM
+ * immediately: per spec §13.3 and the per-entry hide control
+ * (handleHideAction), hiding takes effect on the next page load rather than
+ * instantly, so this simply reloads once the request completes.
+ */
+function markPageAsHiddenAction() {
+    const items = getVisibleEntries();
+    if (items.length === 0) return;
+
+    const entryIDs = items.map((element) => parseInt(element.dataset.id, 10));
+
+    hideEntries(entryIDs, () => {
+        window.location.reload();
+    });
+}
+
+/**
  * Handle entry status changes from the list view and entry view.
  * Focus the next or the previous entry if it exists.
  *
@@ -1261,6 +1298,19 @@ function initializeKeyboardShortcuts() {
     keyboardHandler.on("m", () => handleEntryStatus("next"));
     keyboardHandler.on("M", () => handleEntryStatus("previous"));
     keyboardHandler.on("A", markPageAsReadAction);
+    // "H" (per-entry hide) and "h" (previous page) are both taken, so this
+    // page-wide hide action uses "X" instead, mirroring how "A" pairs with
+    // the "m"/"M" per-entry status toggle without sharing its letter. Unlike
+    // "A", which fires immediately, this goes through the same confirmation
+    // dialog as clicking the button: hiding a whole page is more
+    // consequential than marking it read, so it must not be easier to
+    // trigger by accident.
+    keyboardHandler.on("X", () => {
+        const element = document.querySelector(":is(a, button)[data-action=markPageAsHidden]");
+        if (element) {
+            handleConfirmationMessage(element, markPageAsHiddenAction);
+        }
+    });
     keyboardHandler.on("s", () => handleSaveEntryAction());
     keyboardHandler.on("d", handleFetchOriginalContentAction);
     keyboardHandler.on("f", () => handleStarAction());
@@ -1308,6 +1358,7 @@ function initializeClickHandlers() {
 
     // Page actions with confirmation
     onClick(":is(a, button)[data-action=markPageAsRead]", (event) => handleConfirmationMessage(event.target, markPageAsReadAction));
+    onClick(":is(a, button)[data-action=markPageAsHidden]", (event) => handleConfirmationMessage(event.target, markPageAsHiddenAction));
 
     // Generic confirmation handler
     onClick(":is(a, button)[data-confirm]", (event) => {

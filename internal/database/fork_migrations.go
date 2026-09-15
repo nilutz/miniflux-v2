@@ -47,6 +47,26 @@ var forkMigrations = [...]func(tx *sql.Tx) error{
 		_, err = tx.Exec(`ALTER TABLE entries ADD COLUMN hidden boolean not null default false`)
 		return err
 	},
+	func(tx *sql.Tx) (err error) {
+		// Distinguishes *why* an entry is hidden, which is the whole point of
+		// `hidden` being a preference signal (spec §13.3): NULL means a human
+		// looked at this one entry and hid it by hand — a real negative for
+		// goal 3's daily best-of. 'bulk' means a mass action (the "hide
+		// existing articles" backlog checkbox on subscribe, or a
+		// mark-all-as-hidden route) that hid entries nobody read, so it must
+		// never be read back as a negative preference.
+		//
+		// Unhiding always clears this back to NULL: a stale reason on a
+		// visible entry would misrepresent it as still carrying hidden
+		// preference data. That means goal 3 can trust `WHERE hidden AND
+		// hidden_reason IS NULL` without also having to check `hidden` twice.
+		//
+		// No CHECK constraint: the only writers are this fork's own Go code,
+		// and a constraint would just be one more thing to migrate the day a
+		// second reason is needed.
+		_, err = tx.Exec(`ALTER TABLE entries ADD COLUMN hidden_reason text`)
+		return err
+	},
 }
 
 var forkSchemaVersion = len(forkMigrations)

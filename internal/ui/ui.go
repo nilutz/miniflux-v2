@@ -43,6 +43,7 @@ func Serve(store *storage.Storage, pool *worker.Pool) http.Handler {
 
 	// Unread page.
 	mux.HandleFunc("POST /mark-all-as-read", handler.markAllAsRead)
+	mux.HandleFunc("POST /mark-all-as-hidden", handler.markAllAsHidden)
 	mux.HandleFunc("GET /unread", handler.showUnreadPage)
 	mux.HandleFunc("GET /unread/entry/{entryID}", handler.showUnreadEntryPage)
 
@@ -72,6 +73,7 @@ func Serve(store *storage.Storage, pool *worker.Pool) http.Handler {
 	mux.HandleFunc("GET /feed/{feedID}/entry/{entryID}", handler.showFeedEntryPage)
 	mux.HandleFunc("GET /unread/feed/{feedID}/entry/{entryID}", handler.showUnreadFeedEntryPage)
 	mux.HandleFunc("POST /feed/{feedID}/mark-all-as-read", handler.markFeedAsRead)
+	mux.HandleFunc("POST /feed/{feedID}/mark-all-as-hidden", handler.markFeedAsHidden)
 	mux.HandleFunc("GET /feed-icon/{externalIconID}", handler.showFeedIcon)
 
 	// Category pages.
@@ -84,6 +86,7 @@ func Serve(store *storage.Storage, pool *worker.Pool) http.Handler {
 	mux.HandleFunc("GET /category/{categoryID}/feeds", handler.showCategoryFeedsPage)
 	mux.HandleFunc("POST /category/{categoryID}/feed/{feedID}/remove", handler.removeCategoryFeed)
 	mux.HandleFunc("POST /category/{categoryID}/feed/{feedID}/mark-all-as-read", handler.markCategoryFeedAsRead)
+	mux.HandleFunc("POST /category/{categoryID}/feed/{feedID}/mark-all-as-hidden", handler.markCategoryFeedAsHidden)
 	mux.HandleFunc("POST /category/{categoryID}/feeds/refresh", handler.refreshCategoryFeedsPage)
 	mux.HandleFunc("GET /category/{categoryID}/entries", handler.showCategoryEntriesPage)
 	mux.HandleFunc("POST /category/{categoryID}/entries/refresh", handler.refreshCategoryEntriesPage)
@@ -93,6 +96,7 @@ func Serve(store *storage.Storage, pool *worker.Pool) http.Handler {
 	mux.HandleFunc("POST /category/{categoryID}/update", handler.updateCategory)
 	mux.HandleFunc("POST /category/{categoryID}/remove", handler.removeCategory)
 	mux.HandleFunc("POST /category/{categoryID}/mark-all-as-read", handler.markCategoryAsRead)
+	mux.HandleFunc("POST /category/{categoryID}/mark-all-as-hidden", handler.markCategoryAsHidden)
 
 	// Tag pages.
 	mux.HandleFunc("GET /tags/{tagName}/entries/all", handler.showTagEntriesAllPage)
@@ -100,6 +104,7 @@ func Serve(store *storage.Storage, pool *worker.Pool) http.Handler {
 
 	// Entry pages.
 	mux.HandleFunc("POST /entry/status", handler.updateEntriesStatus)
+	mux.HandleFunc("POST /entries/hide", handler.hideEntries)
 	mux.HandleFunc("POST /entry/save/{entryID}", handler.saveEntry)
 	mux.HandleFunc("POST /entry/enclosure/{enclosureID}/save-progression", handler.saveEnclosureProgression)
 	mux.HandleFunc("POST /entry/download/{entryID}", handler.fetchContent)

@@ -165,15 +165,22 @@ type FeedCreationRequest struct {
 	AllowSelfSignedCertificates bool   `json:"allow_self_signed_certificates"`
 	FetchViaProxy               bool   `json:"fetch_via_proxy"`
 	HideGlobally                bool   `json:"hide_globally"`
-	DisableHTTP2                bool   `json:"disable_http2"`
-	ScraperRules                string `json:"scraper_rules"`
-	RewriteRules                string `json:"rewrite_rules"`
-	BlocklistRules              string `json:"blocklist_rules"`
-	KeeplistRules               string `json:"keeplist_rules"`
-	BlockFilterEntryRules       string `json:"block_filter_entry_rules"`
-	KeepFilterEntryRules        string `json:"keep_filter_entry_rules"`
-	UrlRewriteRules             string `json:"urlrewrite_rules"`
-	ProxyURL                    string `json:"proxy_url"`
+	// HideExistingEntries hides every entry created by this feed's first
+	// fetch (hidden_reason = 'bulk', spec §13.3) so that subscribing does not
+	// dump a whole backlog into the unread list. It is a one-time action on
+	// that first batch of entries, not a persistent feed setting — unlike
+	// HideGlobally above, which is a different, permanent thing. A later
+	// refresh of the same feed is unaffected.
+	HideExistingEntries   bool   `json:"hide_existing_entries"`
+	DisableHTTP2          bool   `json:"disable_http2"`
+	ScraperRules          string `json:"scraper_rules"`
+	RewriteRules          string `json:"rewrite_rules"`
+	BlocklistRules        string `json:"blocklist_rules"`
+	KeeplistRules         string `json:"keeplist_rules"`
+	BlockFilterEntryRules string `json:"block_filter_entry_rules"`
+	KeepFilterEntryRules  string `json:"keep_filter_entry_rules"`
+	UrlRewriteRules       string `json:"urlrewrite_rules"`
+	ProxyURL              string `json:"proxy_url"`
 }
 
 type FeedCreationRequestFromSubscriptionDiscovery struct {

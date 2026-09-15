@@ -111,7 +111,7 @@ func TestReadingListUnreadStreamByteIdenticalRegardlessOfHidden(t *testing.T) {
 		t.Fatalf("expected entry #%d in the unread stream before hiding, got %s", entryID, before)
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 

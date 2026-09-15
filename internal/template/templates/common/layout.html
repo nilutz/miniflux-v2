@@ -37,6 +37,7 @@
     {{ if .csrf }}data-csrf-token="{{ .csrf }}"{{ end }}
     data-add-subscription-url="{{ routePath "/subscribe" }}"
     data-entries-status-url="{{ routePath "/entry/status" }}"
+    data-entries-hide-url="{{ routePath "/entries/hide" }}"
     data-refresh-all-feeds-url="{{ routePath "/feeds/refresh" }}"
     {{ if .webAuthnEnabled }}
     data-webauthn-register-begin-url="{{ routePath "/webauthn/register/begin" }}"
@@ -167,6 +168,7 @@
                 <li>{{ t "page.keyboard_shortcuts.toggle_read_status_next" }} = <strong>m</strong></li>
                 <li>{{ t "page.keyboard_shortcuts.toggle_read_status_prev" }} = <strong>M</strong></li>
                 <li>{{ t "page.keyboard_shortcuts.mark_page_as_read" }} = <strong>A</strong></li>
+                <li>{{ t "page.keyboard_shortcuts.mark_page_as_hidden" }} = <strong>X</strong></li>
                 <li>{{ t "page.keyboard_shortcuts.download_content" }} = <strong>d</strong></li>
                 <li>{{ t "page.keyboard_shortcuts.toggle_star_status" }} = <strong>f</strong></li>
                 <li>{{ t "page.keyboard_shortcuts.toggle_hidden_status" }} = <strong>H</strong></li>

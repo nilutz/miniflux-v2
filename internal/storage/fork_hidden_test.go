@@ -38,7 +38,7 @@ func TestHiddenEntryExcludedOnlyWhenExplicitlyFilteredOutOfTheUnreadList(t *test
 		t.Fatalf("unable to get entry owner: %v", err)
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 
@@ -87,7 +87,7 @@ func TestHiddenEntryStillAppearsInFeedAndCategoryViews(t *testing.T) {
 		t.Fatalf("unable to load feed: %v", err)
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 
@@ -136,7 +136,7 @@ func TestHiddenEntryStillReturnedBySearch(t *testing.T) {
 		t.Fatalf("unable to set searchable content: %v", err)
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestUnhidingRestoresEntryToTheUnreadList(t *testing.T) {
 		t.Fatalf("unable to get entry owner: %v", err)
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestUnhidingRestoresEntryToTheUnreadList(t *testing.T) {
 		t.Fatalf("expected the hidden entry to be excluded, got %d entries", got)
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, false); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, false, ""); err != nil {
 		t.Fatalf("unable to unhide entry: %v", err)
 	}
 
@@ -246,7 +246,7 @@ func TestHiddenEntryDoesNotCountTowardNavUnreadBadge(t *testing.T) {
 		t.Fatalf("expected 1 unread entry before hiding, got %d", navBefore.CountUnread)
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 
@@ -295,7 +295,7 @@ func TestHiddenEntryDoesNotCountTowardCategoryUnreadBadge(t *testing.T) {
 		t.Fatalf("expected 1 unread entry before hiding, got %d", got)
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 
@@ -323,7 +323,7 @@ func TestHiddenEntryDoesNotCountTowardFeedUnreadBadge(t *testing.T) {
 		t.Fatalf("expected 1 unread entry before hiding, got %d", countersBefore.UnreadCounters[feedID])
 	}
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 

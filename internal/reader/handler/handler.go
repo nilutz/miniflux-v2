@@ -94,6 +94,7 @@ func CreateFeedFromSubscriptionDiscovery(store *storage.Storage, userID int64, f
 	}
 
 	markFullTextFetched(store, subscription.ID, fullTextEntryHashes)
+	hideBacklogIfRequested(store, userID, subscription.ID, feedCreationRequest.HideExistingEntries)
 
 	slog.Debug("Created feed",
 		slog.Int64("user_id", userID),
@@ -192,6 +193,7 @@ func CreateFeed(store *storage.Storage, userID int64, feedCreationRequest *model
 	}
 
 	markFullTextFetched(store, subscription.ID, fullTextEntryHashes)
+	hideBacklogIfRequested(store, userID, subscription.ID, feedCreationRequest.HideExistingEntries)
 
 	slog.Debug("Created feed",
 		slog.Int64("user_id", userID),

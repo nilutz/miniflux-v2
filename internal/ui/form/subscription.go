@@ -33,6 +33,9 @@ type SubscriptionForm struct {
 	IgnoreEntryUpdates          bool
 	FetchViaProxy               bool
 	AllowSelfSignedCertificates bool
+	// HideExistingEntries hides the backlog imported by this feed's first
+	// fetch (spec §13.3): a one-time action, not a persistent feed setting.
+	HideExistingEntries bool
 }
 
 // Validate makes sure the form values locale.are valid.
@@ -90,6 +93,7 @@ func NewSubscriptionForm(r *http.Request) *SubscriptionForm {
 		IgnoreEntryUpdates:          r.FormValue("ignore_entry_updates") == "1",
 		AllowSelfSignedCertificates: r.FormValue("allow_self_signed_certificates") == "1",
 		FetchViaProxy:               r.FormValue("fetch_via_proxy") == "1",
+		HideExistingEntries:         r.FormValue("hide_existing_entries") == "1",
 		UserAgent:                   r.FormValue("user_agent"),
 		Cookie:                      r.FormValue("cookie"),
 		Username:                    r.FormValue("feed_username"),

@@ -113,7 +113,7 @@ func TestFindEntriesExcludesHiddenOnlyForTheUnreadStatusFilter(t *testing.T) {
 	store := storage.NewStorage(db)
 	userID, entryID := createHiddenTestEntry(t, db, "hidden-findentries")
 
-	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true); err != nil {
+	if err := store.SetEntriesHiddenState(userID, []int64{entryID}, true, ""); err != nil {
 		t.Fatalf("unable to hide entry: %v", err)
 	}
 

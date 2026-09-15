@@ -28,6 +28,8 @@
             {{ end }}
         </select>
 
+        <label><input type="checkbox" name="hide_existing_entries" value="1" {{ if .form.HideExistingEntries }}checked{{ end }}> {{ t "form.feed.label.hide_existing_entries" }}</label>
+
         <details>
             <summary>{{ t "page.add_feed.legend.advanced_options" }}</summary>
             <div class="details-content">
