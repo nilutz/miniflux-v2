@@ -161,9 +161,8 @@ The database is **ParadeDB**, not stock PostgreSQL: it ships `pg_search`
 (BM25) and `vector` (pgvector), and stock Postgres has neither.
 
 For development, `docker-compose.dev.yaml` builds both images from source.
-See `SEARCH.md` for a from-zero walkthrough and `sidecar/README.md` for the
-sidecar's own documentation, including the native dependencies its build
-needs.
+See `sidecar/README.md` for the sidecar's own documentation, including the
+native dependencies its build needs.
 
 Under the hood
 --------------

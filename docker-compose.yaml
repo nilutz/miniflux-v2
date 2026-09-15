@@ -166,7 +166,6 @@ services:
       # not that migrations or indexing succeeded. Watch `docker compose
       # logs sidecar` for the startup line reporting `backend=ORT`, the
       # embedding dimension and the model identity to confirm the rest --
-      # see SEARCH.md.
       test: ["CMD-SHELL", "bash -c '(exec 3<>/dev/tcp/127.0.0.1/8081) 2>/dev/null' || exit 1"]
       interval: 10s
       timeout: 5s
