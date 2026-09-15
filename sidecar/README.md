@@ -97,10 +97,10 @@ reasonable planner choice at this scale, not a misconfiguration — the 22 MB
 index earns its keep as the corpus grows, and the vacuum discipline above is
 what keeps it correct when it does.
 
-### Autovacuum is tuned on the table itself, and travels with the migration
+### Autovacuum is tuned on the table itself, and travels with a migration
 
-`search.passages` carries its own storage parameters (migration 4 in
-`internal/store/migrations.go`), tighter than the cluster defaults:
+`search.passages` carries its own storage parameters (`internal/store/migrations.go`),
+tighter than the cluster defaults:
 
 ```sql
 ALTER TABLE search.passages SET (
@@ -117,75 +117,97 @@ than 1000 is deliberate: 1000's crossover against the cluster default is
 ~6,300 rows, above the corpus size that already broke, so it would have
 been *looser* than the status quo, not tighter.
 
-### Rebuilding `passages_embedding_idx`: `maintenance_work_mem` and two different procedures
+### Rebuilding `passages_embedding_idx`: what `maintenance_work_mem` actually buys, and its own footgun
 
-pgvector builds an HNSW index in memory when it fits under
-`maintenance_work_mem`, and otherwise falls back to a much slower two-pass
-disk build. **Rule of thumb: give it comfortably more than the index's own
-on-disk size** — a 292 MB index needs something above roughly 350 MB to
-stay in the fast path. This is host-dependent; measure the live value
-rather than assume it:
+There is **no migration** that rebuilds `passages_embedding_idx` under a
+raised `maintenance_work_mem`, and that is deliberate, not an oversight —
+one was tried and reverted. Two things were measured directly, not
+assumed:
+
+1. **`maintenance_work_mem` controls HNSW build *speed* only, not the
+   resulting graph.** pgvector's on-disk build path (used when the graph
+   doesn't fit under `maintenance_work_mem`) inserts each vector with the
+   *same* neighbour-selection logic as the in-memory path — it just skips
+   WAL-logging. Measured directly: 60,000 clustered 384-dimension vectors,
+   built once under `maintenance_work_mem = '1MB'` (forcing the two-pass
+   disk build) and once under `'1GB'` (in-memory). The two indexes were
+   **byte-identical** (122,888,192 bytes) and recall@10 against a
+   brute-force baseline was statistically indistinguishable (41.45% vs.
+   41.65%). Build time differed 5.3× (213s vs. 40s). So an index that
+   built slowly under a low `maintenance_work_mem` is not a worse index —
+   it only took longer to build. There is nothing to "fix" about an
+   already-built index on that basis alone.
+2. **A migration that rebuilt this index anyway** — `DROP INDEX` +
+   `CREATE INDEX` inside the migration's own transaction — held an
+   `AccessExclusiveLock` on `search.passages` for the *entire* rebuild,
+   confirmed via `pg_locks` and a concurrent `SELECT` that blocked
+   completely (not merely degraded) until it finished. At the spec's own
+   148k-passage reference point that is minutes of full outage on every
+   deploy that crosses the migration, for zero index-quality benefit per
+   point 1. It also crash-looped the sidecar outright on this host — see
+   the `/dev/shm` warning below — which is a second, independent reason it
+   doesn't belong in a migration.
+
+So: `maintenance_work_mem` only matters for the **initial** build (still
+handled correctly today — the table is empty or near-empty the first time
+migration 2 runs, so the default build is fast regardless) and for an
+**operator-driven** rebuild, where build time (not lock duration — see
+above) is the only thing at stake. Measure the live value rather than
+assume it:
 
 ```sql
 SHOW maintenance_work_mem;
 ```
 
-On this project's Docker dev stack it reports **841 MB** (ParadeDB sizes
-it from container memory, not PostgreSQL's 64 MB built-in default), so the
-initial build and any rebuild are fine there without changing anything. A
-smaller container or a managed instance that caps this setting lower is a
-real risk — if the cap sits below ~400 MB, that is the constraint to raise
-*before* building the index, not something to compensate for afterwards
-with a slower build.
+**Rule of thumb: give it comfortably more than the index's own on-disk
+size** to stay on the faster in-memory path — a 292 MB index wants
+something above roughly 350 MB. On this project's Docker dev stack it
+reports **841 MB** (ParadeDB sizes it from container memory, not
+PostgreSQL's 64 MB built-in default). A smaller container or a managed
+instance that caps this setting lower is a real risk — if the cap sits
+below ~400 MB, that is the constraint to raise *before* a rebuild, not
+something to compensate for afterwards with a slower build.
 
-There are two different procedures here, with two different transaction
-shapes, and they must not be confused:
+A later, operator-driven rebuild should use `REINDEX INDEX CONCURRENTLY`,
+so it doesn't hold the exclusive lock a plain `REINDEX` (or a `DROP INDEX`
++ `CREATE INDEX`) would — reads and writes against `search.passages`
+continue throughout:
 
-- **The migration that (re)builds the index** (`internal/store/migrations.go`,
-  the migration after the autovacuum one above) runs inside the sidecar's
-  own transaction and raises the setting with `SET LOCAL`, never `SET`:
+```sql
+SET maintenance_work_mem = '1GB';
 
-  ```sql
-  SET LOCAL maintenance_work_mem = '1GB';
-  SET LOCAL max_parallel_maintenance_workers = 4;
-  ```
+REINDEX INDEX CONCURRENTLY search.passages_embedding_idx;
+```
 
-  `SET LOCAL` confines the change to that transaction; it cannot leak onto
-  the pooled connection afterwards. This distinction is not theoretical —
-  this codebase already shipped one bug from a GUC applied at the wrong
-  scope: an `hnsw.ef_search` fix wrapped in a `MATERIALIZED` CTE looked
-  correct and did nothing, because the CTE became the inner side of a
-  nested loop and never executed when the outer scan returned no rows. It
-  was replaced with `SET LOCAL` inside an explicit transaction, which is
-  the same pattern used here.
+This is deliberately a **plain `SET`, in its own dedicated `psql` (or
+equivalent) session** — `REINDEX ... CONCURRENTLY` cannot run inside a
+transaction block at all, so `SET LOCAL` is not an option here. A plain
+`SET` is safe in this shape precisely because the session is disposable:
+close it after the reindex and the setting goes away with the connection,
+rather than sitting on a connection a pool hands back out to unrelated
+queries. Follow this with a `VACUUM (VERBOSE) search.passages` per the
+dead-tuple section above — a reindex churns the table hard enough to
+matter.
 
-- **A later, operator-driven rebuild** uses
-  `REINDEX INDEX CONCURRENTLY`, so it doesn't hold the exclusive lock a
-  plain `REINDEX` (or the migration's own `DROP INDEX` + `CREATE INDEX`)
-  would:
-
-  ```sql
-  SET maintenance_work_mem = '1GB';
-  SET max_parallel_maintenance_workers = 4;
-
-  REINDEX INDEX CONCURRENTLY search.passages_embedding_idx;
-  ```
-
-  This is deliberately a **plain `SET`, in its own dedicated `psql` (or
-  equivalent) session** — `REINDEX ... CONCURRENTLY` cannot run inside a
-  transaction block at all, so `SET LOCAL` is not an option here the way
-  it is inside the migration above. A plain `SET` is safe in this shape
-  precisely because the session is disposable: close it after the reindex
-  and the setting goes away with the connection, rather than sitting on a
-  connection a pool hands back out to unrelated queries. Follow this with
-  a `VACUUM (VERBOSE) search.passages` per the dead-tuple section above —
-  a reindex churns the table hard enough to matter.
-
-The migration's own `SET LOCAL` and this operator procedure's plain `SET`
-are not interchangeable recipes for the same job: one runs inside a
-transaction where `SET LOCAL` is required and correct, the other runs
-outside any transaction where `REINDEX ... CONCURRENTLY` requires there be
-none.
+**Do not also raise `max_parallel_maintenance_workers` without checking
+`/dev/shm` first.** A parallel HNSW build requests a POSIX shared-memory
+segment sized against `maintenance_work_mem`, backed by the container's
+`/dev/shm`. This is exactly what crash-looped the reverted migration on
+this host: Docker's default `/dev/shm` is 64 MiB, the build requested
+~1.02 GB (matching `maintenance_work_mem = '1GB'`), and PostgreSQL failed
+with `could not resize shared memory segment ... No space left on device`
+— not a transient condition, a fixed property of the container that
+recurs identically on every retry. Check the container's real `/dev/shm`
+size (`df -h /dev/shm` inside it) before setting
+`max_parallel_maintenance_workers` above its default; if it's small,
+either raise the container's `shm_size` first or leave
+`max_parallel_maintenance_workers` alone (serial builds don't touch
+`/dev/shm` at all) rather than discovering the ceiling the way this task
+did. The planned 768-dimension migration
+(`docs/superpowers/plans/2026-09-15-nomic-migration.md`) rebuilds this
+same index at roughly twice its current size and will hit this identical
+ceiling if it attempts a parallel build without addressing `shm_size`
+first.
 
 ## The embedder (`internal/embed`, `internal/embed/onnx`)
 

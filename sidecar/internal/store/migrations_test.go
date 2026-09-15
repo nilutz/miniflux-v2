@@ -225,10 +225,9 @@ func TestMigrateAutovacuumOptionsStableOnRerun(t *testing.T) {
 // TestMigrateAppliesTuningToExistingDatabase simulates the path the task
 // 12 brief calls out as the one that actually breaks: a database that
 // already ran migrations 1-3 (the shape every already-deployed sidecar is
-// on today) before task 12's two migrations existed. ALTER TABLE ... SET
-// and dropping/rebuilding the index both require search.passages and
-// passages_embedding_idx to already exist -- unlike a from-scratch
-// Migrate() call, which creates and tunes them in the same run and could
+// on today) before task 12's migration existed. ALTER TABLE ... SET
+// requires search.passages to already exist -- unlike a from-scratch
+// Migrate() call, which creates and tunes it in the same run and could
 // silently hide an ordering bug.
 func TestMigrateAppliesTuningToExistingDatabase(t *testing.T) {
 	s := testStore(t)
@@ -281,49 +280,68 @@ func TestMigrateAppliesTuningToExistingDatabase(t *testing.T) {
 	assertPassagesAutovacuumOptions(t, s)
 }
 
-// TestMigrateDoesNotLeakMaintenanceWorkMem is the SET LOCAL guarantee: the
-// migration that rebuilds passages_embedding_idx raises
-// maintenance_work_mem for its own transaction only. A plain SET here
-// would leak the setting onto the pooled connection for whatever query
-// runs next -- this codebase already shipped one bug from a GUC applied
-// at the wrong scope (an hnsw.ef_search fix wrapped in a MATERIALIZED CTE
-// that silently never ran), so this is asserted directly rather than
-// trusted.
-func TestMigrateDoesNotLeakMaintenanceWorkMem(t *testing.T) {
+// TestMigrateFromCrashLoopedVersionFourIsANoOp is the recovery path for
+// anyone who ran the now-reverted migration 5. That migration's autovacuum
+// predecessor (migration 4) commits and advances schema_version to 4 in
+// its own transaction before migration 5 ever runs, so a sidecar that hit
+// migration 5's shared-memory failure is left with schema_version = 4, not
+// damaged or partially migrated. With migration 5 removed, schemaVersion
+// is 4 too -- so this database is already fully migrated and Migrate()
+// must succeed with no further work and no error, not fail or try to
+// replay anything.
+func TestMigrateFromCrashLoopedVersionFourIsANoOp(t *testing.T) {
 	s := testStore(t)
 
-	// Force the pool down to one physical connection so the query below
-	// is guaranteed to reuse the exact connection the migration
-	// transaction ran on -- the leak this guards against is a pooled
-	// connection carrying a session-level SET past the transaction that
-	// set it.
-	s.db.SetMaxOpenConns(1)
-
-	var baseline string
-	if err := s.db.QueryRow(`SHOW maintenance_work_mem`).Scan(&baseline); err != nil {
-		t.Fatalf("unable to read baseline maintenance_work_mem: %v", err)
+	// Start from a genuinely empty database, then bring it to exactly the
+	// state a crash-looped sidecar left behind: schema_version = 4,
+	// autovacuum tuning applied, nothing beyond that.
+	if _, err := s.db.Exec(`DROP SCHEMA IF EXISTS search CASCADE`); err != nil {
+		t.Fatalf("drop schema: %v", err)
 	}
-
 	if err := s.Migrate(); err != nil {
-		t.Fatalf("migrate failed: %v", err)
+		t.Fatalf("initial migrate to seed version 4 failed: %v", err)
 	}
 
-	var after string
-	if err := s.db.QueryRow(`SHOW maintenance_work_mem`).Scan(&after); err != nil {
-		t.Fatalf("unable to read maintenance_work_mem after migrate: %v", err)
+	var seededVersion int
+	if err := s.db.QueryRow(`SELECT version FROM search.schema_version`).Scan(&seededVersion); err != nil {
+		t.Fatalf("unable to read seeded schema version: %v", err)
 	}
-	if after != baseline {
-		t.Fatalf("maintenance_work_mem leaked past the migration transaction: got %q, want baseline %q back (SET LOCAL should confine it to the migration's own transaction)", after, baseline)
-	}
-	if after == "1GB" {
-		t.Fatalf("maintenance_work_mem is '1GB' on the connection after migrate -- the migration's SET LOCAL leaked")
+	if seededVersion != 4 {
+		t.Fatalf("seeded schema_version = %d, want 4 (this test's premise no longer holds)", seededVersion)
 	}
 
-	var workers string
-	if err := s.db.QueryRow(`SHOW max_parallel_maintenance_workers`).Scan(&workers); err != nil {
-		t.Fatalf("unable to read max_parallel_maintenance_workers: %v", err)
+	// The realistic recovery case: Migrate() runs again, as it does on
+	// every sidecar start, against a database already at the latest
+	// version.
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate against an already-at-version-4 database failed: %v", err)
 	}
-	if workers == "4" {
-		t.Fatalf("max_parallel_maintenance_workers is '4' on the connection after migrate -- the migration's SET LOCAL leaked")
+
+	var version int
+	if err := s.db.QueryRow(`SELECT version FROM search.schema_version`).Scan(&version); err != nil {
+		t.Fatalf("unable to read schema version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema_version = %d, want %d", version, schemaVersion)
+	}
+
+	assertPassagesAutovacuumOptions(t, s)
+}
+
+// TestSchemaVersionIsPinned asserts the literal migration count rather than
+// just len(migrations): a migration closure silently deleted from the
+// array (as happened during task 12's review, when the since-reverted
+// index-rebuild migration was removed to test the suite) drops
+// schemaVersion without any other test here failing -- every other test
+// asserts against schemaVersion itself, which moves right along with the
+// bug. This is the one check that has to hardcode the number so a
+// disappearing migration is caught rather than silently accepted.
+//
+// Update this literal deliberately, in the same commit, whenever a
+// migration is appended or (never) removed.
+func TestSchemaVersionIsPinned(t *testing.T) {
+	const want = 4
+	if schemaVersion != want {
+		t.Fatalf("schemaVersion = %d, want %d -- a migration was added or removed without updating this pinned assertion", schemaVersion, want)
 	}
 }

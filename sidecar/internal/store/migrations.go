@@ -114,50 +114,24 @@ var migrations = [...]func(tx *sql.Tx) error{
 		`)
 		return err
 	},
-	func(tx *sql.Tx) error {
-		// Task 12, second half: pgvector builds an HNSW index in memory
-		// when it fits under maintenance_work_mem and otherwise falls back
-		// to a much slower two-pass disk build. passages_embedding_idx was
-		// created in migration 2 under whatever maintenance_work_mem the
-		// connection had at the time -- the PostgreSQL default is 64MB,
-		// well under the roughly 350MB a 292MB index needs to build in
-		// memory. Append-only migrations can't reach back and edit
-		// migration 2 to fix that at the source, so this rebuilds the
-		// index here instead, under a raised maintenance_work_mem, which
-		// covers both a from-scratch database (this runs moments after
-		// migration 2 in the same Migrate() call) and an existing one
-		// whose index may already have spilled to disk under the default.
-		//
-		// SET LOCAL, not SET: it must not survive past this transaction
-		// onto the pooled connection. This codebase already shipped one
-		// bug from a GUC applied at the wrong scope -- an hnsw.ef_search
-		// fix wrapped in a MATERIALIZED CTE that looked correct and did
-		// nothing, because the CTE became the inner side of a nested loop
-		// and never executed when the outer scan returned no rows. SET
-		// LOCAL inside this migration's explicit transaction is the fix
-		// that pattern needed, and it also means the setting cannot leak
-		// onto whatever the connection pool hands out next.
-		//
-		// max_parallel_maintenance_workers=4 is the brief's suggestion;
-		// the dev stack itself reports 2 (measured directly, not the
-		// PostgreSQL default of 2 either, but worth confirming per host).
-		//
-		// REINDEX INDEX CONCURRENTLY cannot run inside a transaction
-		// block, so it cannot be used here -- see
-		// sidecar/README.md for the plain-SET, dedicated-session
-		// procedure operators use for a later rebuild outside a
-		// migration.
-		_, err := tx.Exec(`
-			SET LOCAL maintenance_work_mem = '1GB';
-			SET LOCAL max_parallel_maintenance_workers = 4;
-
-			DROP INDEX search.passages_embedding_idx;
-
-			CREATE INDEX passages_embedding_idx
-				ON search.passages USING hnsw (embedding public.vector_cosine_ops);
-		`)
-		return err
-	},
+	// There is deliberately no migration here to rebuild
+	// passages_embedding_idx under a raised maintenance_work_mem. That was
+	// tried and reverted: maintenance_work_mem only controls HNSW build
+	// *speed* (in-memory vs. a slower two-pass disk build), not the
+	// resulting graph -- pgvector's on-disk build path inserts each vector
+	// with the same neighbour-selection logic as the in-memory path, just
+	// without WAL-logging it, and a direct measurement (60,000 clustered
+	// 384-d vectors, '1MB' vs. '1GB') produced a byte-identical index and
+	// statistically indistinguishable recall. A DROP INDEX + CREATE INDEX
+	// migration bought nothing but held an AccessExclusiveLock on
+	// search.passages for the whole rebuild -- confirmed via pg_locks and
+	// a concurrent SELECT to block completely, not merely degrade -- for
+	// minutes at the brief's own 148k-passage reference point, on every
+	// deploy that crossed this migration. See README.md's "Rebuilding
+	// passages_embedding_idx" section for the actual place this advice
+	// belongs: an operator-driven REINDEX INDEX CONCURRENTLY, which does
+	// not hold that lock and does not need to run inside a migration's
+	// transaction at all.
 }
 
 var schemaVersion = len(migrations)
