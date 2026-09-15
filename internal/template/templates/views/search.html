@@ -24,19 +24,23 @@
             </select>
         </label>
         {{ end }}
+        {{ $sortApplies := eq $.searchMode "fulltext" }}
         <label class="search-filter" for="search-order">{{ t "search.sort.label" }}
-            <select name="order" id="search-order">
+            <select name="order" id="search-order" {{ if not $sortApplies }}disabled{{ end }}>
                 {{ range $.searchSortOrders }}
-                <option value="{{ . }}" {{ if eq . $.searchOrder }}selected{{ end }}>{{ t (printf "search.sort.%s" .) }}</option>
+                <option value="{{ . }}" {{ if eq . $.order }}selected{{ end }}>{{ t (printf "search.sort.%s" .) }}</option>
                 {{ end }}
             </select>
         </label>
         <label class="search-filter" for="search-direction">{{ t "search.sort.direction.label" }}
-            <select name="direction" id="search-direction">
-                <option value="asc" {{ if eq "asc" $.searchDirection }}selected{{ end }}>{{ t "search.sort.direction.asc" }}</option>
-                <option value="desc" {{ if eq "desc" $.searchDirection }}selected{{ end }}>{{ t "search.sort.direction.desc" }}</option>
+            <select name="direction" id="search-direction" {{ if not $sortApplies }}disabled{{ end }}>
+                <option value="asc" {{ if eq "asc" $.direction }}selected{{ end }}>{{ t "search.sort.direction.asc" }}</option>
+                <option value="desc" {{ if eq "desc" $.direction }}selected{{ end }}>{{ t "search.sort.direction.desc" }}</option>
             </select>
         </label>
+        {{ if not $sortApplies }}
+        <p class="search-filter-hint">{{ t "search.sort.mode_hint" }}</p>
+        {{ end }}
     </form>
 </search>
 
@@ -60,7 +64,7 @@
             >
                 <header class="item-header" dir="auto">
                     <h2 id="entry-title-{{ $entry.ID }}" class="item-title" {{ with or $entry.Language $entry.Feed.Language }}lang="{{ . }}"{{ end }}>
-                        <a href="{{ routePath "/search/entry/%d" $entry.ID }}{{ queryString (dict "q" $.searchQuery "unread" $.searchUnreadOnly "mode" $.searchMode "excludeHidden" $.searchExcludeHidden "order" $.searchOrder "direction" $.searchDirection) }}" {{ if and $.user.AlwaysOpenExternalLinks $.user.OpenExternalLinksInNewTab }}target="_blank"{{ end }}>
+                        <a href="{{ routePath "/search/entry/%d" $entry.ID }}{{ queryString (dict "q" $.searchQuery "unread" $.searchUnreadOnly "mode" $.searchMode "excludeHidden" $.searchExcludeHidden "order" $.order "direction" $.direction) }}" {{ if and $.user.AlwaysOpenExternalLinks $.user.OpenExternalLinksInNewTab }}target="_blank"{{ end }}>
                             {{ if ne $entry.Feed.Icon.IconID 0 }}
                             <img src="{{ routePath "/feed-icon/%s" $entry.Feed.Icon.ExternalIconID }}" width="16" height="16" loading="lazy" alt="{{ $entry.Feed.Title }}">
                             {{ else }}

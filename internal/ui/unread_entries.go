@@ -21,11 +21,20 @@ func (h *handler) showUnreadPage(w http.ResponseWriter, r *http.Request) {
 
 	offset := request.QueryIntParam(r, "offset", 0)
 
-	entries, countUnread, err := h.store.NewEntryQueryBuilder(user.ID).
+	// The per-view sort picker (spec §6.3 amendment, task 10 part B):
+	// defaults to the reader's saved preference, overridable via the
+	// "order"/"direction" query parameters. See parseEntryOrder's doc
+	// comment for why an invalid value falls back rather than reaching
+	// WithSorting unvalidated.
+	listOrder := parseEntryOrder(r, user.EntryOrder)
+	listDirection := parseEntryDirection(r, user.EntryDirection)
+
+	builder := h.store.NewEntryQueryBuilder(user.ID).
 		WithStatuses(model.EntryStatusUnread).
-		WithHidden(false).
-		WithSorting(user.EntryOrder, user.EntryDirection).
-		WithSorting("id", user.EntryDirection).
+		WithHidden(false)
+	builder = withStableEntrySorting(builder, listOrder, listDirection)
+
+	entries, countUnread, err := builder.
 		WithOffset(offset).
 		WithLimit(user.EntriesPerPage).
 		WithGloballyVisible().
@@ -39,11 +48,12 @@ func (h *handler) showUnreadPage(w http.ResponseWriter, r *http.Request) {
 	if offset >= countUnread && countUnread > 0 {
 		offset = 0
 
-		entries, countUnread, err = h.store.NewEntryQueryBuilder(user.ID).
+		retryBuilder := h.store.NewEntryQueryBuilder(user.ID).
 			WithStatuses(model.EntryStatusUnread).
-			WithHidden(false).
-			WithSorting(user.EntryOrder, user.EntryDirection).
-			WithSorting("id", user.EntryDirection).
+			WithHidden(false)
+		retryBuilder = withStableEntrySorting(retryBuilder, listOrder, listDirection)
+
+		entries, countUnread, err = retryBuilder.
 			WithLimit(user.EntriesPerPage).
 			WithGloballyVisible().
 			WithoutContent().
@@ -55,8 +65,14 @@ func (h *handler) showUnreadPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := view.New(h.tpl, r)
+	pagination := getPagination(h.routePath("/unread"), countUnread, offset, user.EntriesPerPage)
+	pagination.Order = listOrder
+	pagination.Direction = listDirection
 	view.Set("entries", entries)
-	view.Set("pagination", getPagination(h.routePath("/unread"), countUnread, offset, user.EntriesPerPage))
+	view.Set("pagination", pagination)
+	view.Set("order", listOrder)
+	view.Set("direction", listDirection)
+	view.Set("sortOrders", searchSortOrders)
 	view.Set("menu", "unread")
 	view.Set("user", user)
 	navMetadata, _ := h.store.GetNavMetadata(user.ID)

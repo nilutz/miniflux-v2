@@ -114,6 +114,16 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 	// "order"/"direction" query parameters; parseEntryOrder/
 	// parseEntryDirection validate them and never let an unrecognised
 	// value reach EntryQueryBuilder.WithSorting.
+	//
+	// explicitOrder is whether the reader actually asked for a column
+	// (the raw "order" param is non-empty, valid or not - an invalid
+	// value still falls back to the saved preference below, rather than
+	// silently reverting to relevance). It gates the fallback closure's
+	// choice between relevance-first (the pre-existing, and better,
+	// default for a search box) and the picker's column: search is the
+	// one view where "the saved preference" is not automatically the
+	// right default, unlike the plain entry lists.
+	explicitOrder := request.QueryStringParam(r, "order", "") != ""
 	searchOrder := parseEntryOrder(r, user.EntryOrder)
 	searchDirection := parseEntryDirection(r, user.EntryDirection)
 
@@ -158,18 +168,26 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 				builder = builder.WithHidden(false)
 			}
 
-			// The picker's chosen order (plus its stable secondary sort)
+			// Only apply the picker's column when the reader explicitly
+			// asked for one. Left alone, search keeps its pre-existing
+			// relevance-first default: WithSearchQuery appends its own
+			// ts_rank … DESC sort expression, and a search box that
+			// silently switched its default from "best match" to "most
+			// recent" the moment this task's picker shipped would be a
+			// regression, not an improvement. When explicitOrder is true,
+			// the picker's chosen order (plus its stable secondary sort)
 			// is added before WithSearchQuery so it takes priority over
-			// the relevance ranking WithSearchQuery appends: WithSorting
-			// builds its ORDER BY in the order its calls were made, and a
-			// deliberately chosen column should win over the implicit
-			// "best match first" default, matching every other list page
-			// where the picker defaults to the saved preference. This
+			// that relevance ranking: WithSorting builds its ORDER BY in
+			// the order its calls were made, so a deliberately chosen
+			// column wins, exactly as every other list page's picker
+			// defaults to (and can override) the saved preference. This
 			// only affects this fallback path - sidecar-backed modes
 			// return their own relevance order below and are never
 			// re-sorted by the picker (re-sorting ranked results by a
 			// column would discard the ranking).
-			builder = withStableEntrySorting(builder, searchOrder, searchDirection)
+			if explicitOrder {
+				builder = withStableEntrySorting(builder, searchOrder, searchDirection)
+			}
 			builder = builder.WithSearchQuery(searchQuery)
 
 			return builder.GetEntriesWithCount()
@@ -223,8 +241,12 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 	view.Set("searchModesAvailable", true)
 	view.Set("searchUnreadOnly", unreadOnly)
 	view.Set("searchExcludeHidden", excludeHidden)
-	view.Set("searchOrder", searchOrder)
-	view.Set("searchDirection", searchDirection)
+	// "order"/"direction" (not "search"-prefixed) are the generic keys
+	// entry.html's pagination dict reads for every single-entry view, not
+	// just search's - see entry_unread.go and friends, which set the same
+	// two keys.
+	view.Set("order", searchOrder)
+	view.Set("direction", searchDirection)
 	view.Set("searchSortOrders", searchSortOrders)
 	view.Set("searchRows", rows)
 	view.Set("total", entriesCount)

@@ -264,6 +264,78 @@ func TestSearchPageInvalidOrderFallsBackToPreference(t *testing.T) {
 	}
 }
 
+// TestSearchPageFullTextDefaultsToRelevanceNotSavedPreference covers the
+// reviewer's Minor: with no explicit "order" query parameter, a plain
+// full-text search must stay relevance-ordered (WithSearchQuery's own
+// ts_rank), not silently switch to the reader's saved
+// entry_sorting_order the moment the sort picker exists. highRelevance's
+// content repeats the query term five times (raising its ts_rank);
+// lowRelevance's content contains it once. Their published_at values are
+// deliberately the opposite of what relevance would produce: under the
+// default preference (published_at, ascending - oldest first),
+// lowRelevance (older) would sort first; only true relevance-first
+// ordering puts highRelevance first despite being newer. A first version
+// of this fixture had the ages backwards (matching, not contradicting,
+// the date-order outcome) and stayed green under a mutation that always
+// applied the saved-preference order - see the mutation log in the task
+// report.
+func TestSearchPageFullTextDefaultsToRelevanceNotSavedPreference(t *testing.T) {
+	db := uiHiddenTestDB(t)
+	store := storage.NewStorage(db)
+	configureUISearchTestOptions(t, "")
+	h := newUIHiddenTestHandler(t, store)
+
+	username := "search-relevance-default"
+	userID, _, feedID := createUIHiddenTestUserAndFeed(t, db, username)
+
+	marker := "SearchMarkerKilo"
+	titleHigh := marker + " high relevance for " + username
+	titleLow := marker + " low relevance for " + username
+
+	now := time.Now()
+	// Newer, but the query term appears 5 times in the content: under
+	// published_at ascending this would sort SECOND, so it only sorts
+	// first if relevance actually won.
+	highID := insertUIHiddenTestEntry(t, db, userID, feedID, titleHigh, "hash-high-"+username, now)
+	if err := store.UpdateEntryTitleAndContent(&model.Entry{
+		ID:      highID,
+		UserID:  userID,
+		Title:   titleHigh,
+		Content: "<p>" + marker + " " + marker + " " + marker + " " + marker + " " + marker + "</p>",
+	}); err != nil {
+		t.Fatalf("unable to make high-relevance entry searchable: %v", err)
+	}
+	// Older, but the query term appears only once: under published_at
+	// ascending this would sort FIRST.
+	lowID := insertUIHiddenTestEntry(t, db, userID, feedID, titleLow, "hash-low-"+username, now.Add(-time.Hour))
+	if err := store.UpdateEntryTitleAndContent(&model.Entry{
+		ID:      lowID,
+		UserID:  userID,
+		Title:   titleLow,
+		Content: "<p>" + marker + "</p>",
+	}); err != nil {
+		t.Fatalf("unable to make low-relevance entry searchable: %v", err)
+	}
+
+	// No "order" query parameter at all.
+	r := searchTestRequest(userID, "/search", url.Values{"q": {marker}, "mode": {"fulltext"}})
+	w := httptest.NewRecorder()
+	h.showSearchPage(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: %d, body: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	posHigh := strings.Index(body, titleHigh)
+	posLow := strings.Index(body, titleLow)
+	if posHigh < 0 || posLow < 0 {
+		t.Fatalf("expected both entries present; body:\n%s", body)
+	}
+	if posHigh >= posLow {
+		t.Fatalf("expected the higher-relevance entry first by default (no explicit order), got positions high=%d low=%d", posHigh, posLow)
+	}
+}
+
 // TestWithStableEntrySortingGroupsStarredAndOrdersNewestFirstWithinGroup
 // covers the stable secondary sort at the builder level, deliberately
 // bypassing WithSearchQuery: WithSearchQuery appends its own ts_rank
@@ -498,6 +570,84 @@ func TestSearchPageFullTextModeWorksWithoutSidecar(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, title) {
 		t.Fatalf("expected the fulltext mode to return the matching entry; body:\n%s", body)
+	}
+}
+
+// selectTagHasAttr returns whether the <select ... id="id" ...> opening
+// tag in body contains attr (e.g. "disabled").
+func selectTagHasAttr(t *testing.T, body, id, attr string) bool {
+	t.Helper()
+
+	marker := `id="` + id + `"`
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		t.Fatalf("no element with id=%q found in body", id)
+	}
+	tagStart := strings.LastIndex(body[:idx], "<select ")
+	if tagStart < 0 {
+		t.Fatalf("no enclosing <select> tag found for id=%q", id)
+	}
+	tagEnd := strings.Index(body[tagStart:], ">")
+	if tagEnd < 0 {
+		t.Fatalf("unterminated <select> tag for id=%q", id)
+	}
+	tag := body[tagStart : tagStart+tagEnd]
+	return strings.Contains(tag, attr)
+}
+
+// TestSearchPageSortControlsDisabledOutsideFullTextMode covers Major 2:
+// the order/direction selects have no effect on the four sidecar-ranked
+// modes (see resolveSearchResults' doc comment on relevance vs. the
+// picker), so they must render disabled - communicating "not applicable
+// here" - rather than sitting there inert with no explanation. A visible
+// hint explains why. The same sidecar is used for both renders, so this
+// isolates the effect to searchMode, not sidecar availability (which
+// TestSearchPageFullTextModeWorksWithoutSidecar already covers).
+func TestSearchPageSortControlsDisabledOutsideFullTextMode(t *testing.T) {
+	db := uiHiddenTestDB(t)
+	store := storage.NewStorage(db)
+	h := newUIHiddenTestHandler(t, store)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"mode":"hybrid","query":"coffee","entries":[]}`))
+	}))
+	defer server.Close()
+	configureUISearchTestOptions(t, server.URL)
+
+	username := "search-sort-disabled"
+	userID, _, _ := createUIHiddenTestUserAndFeed(t, db, username)
+
+	render := func(mode string) string {
+		r := searchTestRequest(userID, "/search", url.Values{"q": {"coffee"}, "mode": {mode}})
+		w := httptest.NewRecorder()
+		h.showSearchPage(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: %d, body: %s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	hybridBody := render("hybrid")
+	if !selectTagHasAttr(t, hybridBody, "search-order", "disabled") {
+		t.Fatalf("expected the order select to be disabled in hybrid mode; body:\n%s", hybridBody)
+	}
+	if !selectTagHasAttr(t, hybridBody, "search-direction", "disabled") {
+		t.Fatalf("expected the direction select to be disabled in hybrid mode; body:\n%s", hybridBody)
+	}
+	if !strings.Contains(hybridBody, "search-filter-hint") {
+		t.Fatalf("expected a hint explaining why the sort controls are disabled; body:\n%s", hybridBody)
+	}
+
+	fullTextBody := render("fulltext")
+	if selectTagHasAttr(t, fullTextBody, "search-order", "disabled") {
+		t.Fatalf("expected the order select to be enabled in fulltext mode; body:\n%s", fullTextBody)
+	}
+	if selectTagHasAttr(t, fullTextBody, "search-direction", "disabled") {
+		t.Fatalf("expected the direction select to be enabled in fulltext mode; body:\n%s", fullTextBody)
+	}
+	if strings.Contains(fullTextBody, "search-filter-hint") {
+		t.Fatalf("expected no disabled-hint in fulltext mode, where the controls are active; body:\n%s", fullTextBody)
 	}
 }
 

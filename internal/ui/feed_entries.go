@@ -33,12 +33,18 @@ func (h *handler) showFeedEntriesPage(w http.ResponseWriter, r *http.Request) {
 
 	offset := request.QueryIntParam(r, "offset", 0)
 
-	entries, count, err := h.store.NewEntryQueryBuilder(user.ID).
+	// The per-view sort picker (spec §6.3 amendment, task 10 part B):
+	// defaults to the reader's saved preference, overridable via the
+	// "order"/"direction" query parameters.
+	listOrder := parseEntryOrder(r, user.EntryOrder)
+	listDirection := parseEntryDirection(r, user.EntryDirection)
+
+	builder := withStableEntrySorting(h.store.NewEntryQueryBuilder(user.ID).
 		WithFeedID(feed.ID).
 		WithStatuses(model.EntryStatusUnread).
-		WithHidden(false).
-		WithSorting(user.EntryOrder, user.EntryDirection).
-		WithSorting("id", user.EntryDirection).
+		WithHidden(false),
+		listOrder, listDirection)
+	entries, count, err := builder.
 		WithOffset(offset).
 		WithLimit(user.EntriesPerPage).
 		WithoutContent().
@@ -49,10 +55,16 @@ func (h *handler) showFeedEntriesPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := view.New(h.tpl, r)
+	pagination := getPagination(h.routePath("/feed/%d/entries", feed.ID), count, offset, user.EntriesPerPage)
+	pagination.Order = listOrder
+	pagination.Direction = listDirection
 	view.Set("feed", feed)
 	view.Set("entries", entries)
 	view.Set("total", count)
-	view.Set("pagination", getPagination(h.routePath("/feed/%d/entries", feed.ID), count, offset, user.EntriesPerPage))
+	view.Set("pagination", pagination)
+	view.Set("order", listOrder)
+	view.Set("direction", listDirection)
+	view.Set("sortOrders", searchSortOrders)
 	view.Set("menu", "feeds")
 	view.Set("user", user)
 	navMetadata, _ := h.store.GetNavMetadata(user.ID)

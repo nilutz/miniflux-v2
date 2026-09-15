@@ -95,6 +95,25 @@
 </div>
 {{ end }}
 
+{{ if $.sortOrders }}
+<form class="search-form" method="get" aria-label="{{ t "search.sort.label" }}">
+    <label class="search-filter" for="feed-order">{{ t "search.sort.label" }}
+        <select name="order" id="feed-order">
+            {{ range $.sortOrders }}
+            <option value="{{ . }}" {{ if eq . $.order }}selected{{ end }}>{{ t (printf "search.sort.%s" .) }}</option>
+            {{ end }}
+        </select>
+    </label>
+    <label class="search-filter" for="feed-direction">{{ t "search.sort.direction.label" }}
+        <select name="direction" id="feed-direction">
+            <option value="asc" {{ if eq "asc" $.direction }}selected{{ end }}>{{ t "search.sort.direction.asc" }}</option>
+            <option value="desc" {{ if eq "desc" $.direction }}selected{{ end }}>{{ t "search.sort.direction.desc" }}</option>
+        </select>
+    </label>
+    <button type="submit" class="button">{{ t "search.sort.apply" }}</button>
+</form>
+{{ end }}
+
 {{ if not .entries }}
     {{ if .showOnlyUnreadEntries }}
         <p role="alert" class="alert">{{ t "alert.no_unread_entry" }}</p>
@@ -117,9 +136,9 @@
                 <h2 id="entry-title-{{ .ID }}" class="item-title" {{ with or .Language .Feed.Language }}lang="{{ . }}"{{ end }}>
                     <a
                         {{ if $.showOnlyUnreadEntries }}
-                        href="{{ routePath "/unread/feed/%d/entry/%d" .Feed.ID .ID }}"
+                        href="{{ routePath "/unread/feed/%d/entry/%d" .Feed.ID .ID }}{{ queryString (dict "order" $.order "direction" $.direction) }}"
                         {{ else }}
-                        href="{{ routePath "/feed/%d/entry/%d" .Feed.ID .ID }}"
+                        href="{{ routePath "/feed/%d/entry/%d" .Feed.ID .ID }}{{ queryString (dict "order" $.order "direction" $.direction) }}"
                         {{ end }}
                         {{ if and $.user.AlwaysOpenExternalLinks $.user.OpenExternalLinksInNewTab }}target="_blank"{{ end }}
                     >

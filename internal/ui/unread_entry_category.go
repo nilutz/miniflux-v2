@@ -54,7 +54,13 @@ func (h *handler) showUnreadCategoryEntryPage(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	prevEntry, nextEntry, err := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, user.EntryOrder, user.EntryDirection).
+	// Must match showCategoryEntriesPage's effective order exactly, or
+	// prev/next walks a different list than the one the reader was just
+	// looking at.
+	listOrder := parseEntryOrder(r, user.EntryOrder)
+	listDirection := parseEntryDirection(r, user.EntryDirection)
+
+	prevEntry, nextEntry, err := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, listOrder, listDirection).
 		WithCategoryID(categoryID).
 		WithStatus(model.EntryStatusUnread).
 		WithHidden(false).
@@ -94,6 +100,8 @@ func (h *handler) showUnreadCategoryEntryPage(w http.ResponseWriter, r *http.Req
 	view.Set("nextEntry", nextEntry)
 	view.Set("nextEntryRoute", nextEntryRoute)
 	view.Set("prevEntryRoute", prevEntryRoute)
+	view.Set("order", listOrder)
+	view.Set("direction", listDirection)
 	// similarEntries is nil (block simply absent) whenever the search
 	// sidecar is unavailable or unconfigured - see entry_similar.go.
 	view.Set("similarEntries", h.similarEntries(r.Context(), user.ID, entry.ID))

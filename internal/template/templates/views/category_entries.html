@@ -90,6 +90,24 @@
 {{ end }}
 
 {{ define "content"}}
+{{ if $.sortOrders }}
+<form class="search-form" method="get" aria-label="{{ t "search.sort.label" }}">
+    <label class="search-filter" for="category-order">{{ t "search.sort.label" }}
+        <select name="order" id="category-order">
+            {{ range $.sortOrders }}
+            <option value="{{ . }}" {{ if eq . $.order }}selected{{ end }}>{{ t (printf "search.sort.%s" .) }}</option>
+            {{ end }}
+        </select>
+    </label>
+    <label class="search-filter" for="category-direction">{{ t "search.sort.direction.label" }}
+        <select name="direction" id="category-direction">
+            <option value="asc" {{ if eq "asc" $.direction }}selected{{ end }}>{{ t "search.sort.direction.asc" }}</option>
+            <option value="desc" {{ if eq "desc" $.direction }}selected{{ end }}>{{ t "search.sort.direction.desc" }}</option>
+        </select>
+    </label>
+    <button type="submit" class="button">{{ t "search.sort.apply" }}</button>
+</form>
+{{ end }}
 {{ if not .entries }}
     <p role="alert" class="alert">{{ t "alert.no_category_entry" }}</p>
 {{ else }}
@@ -108,11 +126,11 @@
                 <h2 id="entry-title-{{ .ID }}" class="item-title" {{ with or .Language .Feed.Language }}lang="{{ . }}"{{ end }}>
                     <a
                         {{ if $.showOnlyUnreadEntries }}
-                        href="{{ routePath "/unread/category/%d/entry/%d" .Feed.Category.ID .ID }}"
+                        href="{{ routePath "/unread/category/%d/entry/%d" .Feed.Category.ID .ID }}{{ queryString (dict "order" $.order "direction" $.direction) }}"
                         {{ else if $.showOnlyStarredEntries }}
-                        href="{{ routePath "/starred/category/%d/entry/%d" .Feed.Category.ID .ID }}"
+                        href="{{ routePath "/starred/category/%d/entry/%d" .Feed.Category.ID .ID }}{{ queryString (dict "order" $.order "direction" $.direction) }}"
                         {{ else }}
-                        href="{{ routePath "/category/%d/entry/%d" .Feed.Category.ID .ID }}"
+                        href="{{ routePath "/category/%d/entry/%d" .Feed.Category.ID .ID }}{{ queryString (dict "order" $.order "direction" $.direction) }}"
                         {{ end }}
                         {{ if and $.user.AlwaysOpenExternalLinks $.user.OpenExternalLinksInNewTab }}target="_blank"{{ end }}
                     >

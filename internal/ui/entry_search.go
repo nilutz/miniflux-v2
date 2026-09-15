@@ -90,8 +90,10 @@ func (h *handler) showSearchEntryPage(w http.ResponseWriter, r *http.Request) {
 	view.Set("searchUnreadOnly", unreadOnly)
 	view.Set("searchExcludeHidden", excludeHidden)
 	view.Set("searchMode", searchMode)
-	view.Set("searchOrder", searchOrder)
-	view.Set("searchDirection", searchDirection)
+	// Generic "order"/"direction" keys, not "search"-prefixed: entry.html's
+	// pagination dict reads these for every single-entry view.
+	view.Set("order", searchOrder)
+	view.Set("direction", searchDirection)
 	view.Set("entry", entry)
 	view.Set("prevEntry", prevEntry)
 	view.Set("nextEntry", nextEntry)

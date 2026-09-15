@@ -49,7 +49,12 @@ func (h *handler) showStarredEntryPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prevEntry, nextEntry, err := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, user.EntryOrder, user.EntryDirection).
+	// Must match showStarredPage's effective order exactly, or prev/next
+	// walks a different list than the one the reader was just looking at.
+	listOrder := parseEntryOrder(r, user.EntryOrder)
+	listDirection := parseEntryDirection(r, user.EntryDirection)
+
+	prevEntry, nextEntry, err := h.store.NewEntryPaginationBuilder(user.ID, entry.ID, listOrder, listDirection).
 		WithStarred().
 		Entries()
 	if err != nil {
@@ -73,6 +78,8 @@ func (h *handler) showStarredEntryPage(w http.ResponseWriter, r *http.Request) {
 	view.Set("nextEntry", nextEntry)
 	view.Set("nextEntryRoute", nextEntryRoute)
 	view.Set("prevEntryRoute", prevEntryRoute)
+	view.Set("order", listOrder)
+	view.Set("direction", listDirection)
 	// similarEntries is nil (block simply absent) whenever the search
 	// sidecar is unavailable or unconfigured - see entry_similar.go.
 	view.Set("similarEntries", h.similarEntries(r.Context(), user.ID, entry.ID))

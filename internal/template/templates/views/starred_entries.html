@@ -11,6 +11,24 @@
 {{ end }}
 
 {{ define "content"}}
+{{ if $.sortOrders }}
+<form class="search-form" method="get" aria-label="{{ t "search.sort.label" }}">
+    <label class="search-filter" for="starred-order">{{ t "search.sort.label" }}
+        <select name="order" id="starred-order">
+            {{ range $.sortOrders }}
+            <option value="{{ . }}" {{ if eq . $.order }}selected{{ end }}>{{ t (printf "search.sort.%s" .) }}</option>
+            {{ end }}
+        </select>
+    </label>
+    <label class="search-filter" for="starred-direction">{{ t "search.sort.direction.label" }}
+        <select name="direction" id="starred-direction">
+            <option value="asc" {{ if eq "asc" $.direction }}selected{{ end }}>{{ t "search.sort.direction.asc" }}</option>
+            <option value="desc" {{ if eq "desc" $.direction }}selected{{ end }}>{{ t "search.sort.direction.desc" }}</option>
+        </select>
+    </label>
+    <button type="submit" class="button">{{ t "search.sort.apply" }}</button>
+</form>
+{{ end }}
 {{ if not .entries }}
     <p role="alert" class="alert alert-info">{{ t "alert.no_starred" }}</p>
 {{ else }}
@@ -27,7 +45,7 @@
         >
             <header class="item-header" dir="auto">
                 <h2 id="entry-title-{{ .ID }}" class="item-title" {{ with or .Language .Feed.Language }}lang="{{ . }}"{{ end }}>
-                    <a href="{{ routePath "/starred/entry/%d" .ID }}" {{ if and $.user.AlwaysOpenExternalLinks $.user.OpenExternalLinksInNewTab }}target="_blank"{{ end }}>
+                    <a href="{{ routePath "/starred/entry/%d" .ID }}{{ queryString (dict "order" $.order "direction" $.direction) }}" {{ if and $.user.AlwaysOpenExternalLinks $.user.OpenExternalLinksInNewTab }}target="_blank"{{ end }}>
                         {{ if ne .Feed.Icon.IconID 0 }}
                         <img src="{{ routePath "/feed-icon/%s" .Feed.Icon.ExternalIconID }}" width="16" height="16" loading="lazy" alt="">
                         {{ end }}
