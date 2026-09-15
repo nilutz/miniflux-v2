@@ -5,8 +5,8 @@ package search // import "miniflux.app/v2/sidecar/internal/search"
 
 import "testing"
 
-// This file is hermetic on purpose (task brief): no database, no embedder,
-// no network. Fuse and aggregate are pure functions over []PassageHit, so
+// This file is hermetic on purpose: no database, no embedder, no
+// network. Fuse and aggregate are pure functions over []PassageHit, so
 // every property claimed for them (spec §6.3, §6.4) must be checkable
 // without either retrieval half actually running.
 

@@ -38,15 +38,14 @@ type DatabaseMetrics struct {
 
 	// PassageCountUnknown/EntryCountUnknown are true when Postgres itself
 	// has no estimate yet: pg_class.reltuples is -1 for a relation that
-	// has never been ANALYZEd (fix round 2 finding 1) -- which
-	// search.passages hits for real right at the START of a fresh
-	// backfill, exactly when an operator is most likely watching this
-	// page. Without this, "-1, coalesced to 0" is indistinguishable from
-	// a genuine zero, and the page would report "the backfill is
-	// producing nothing" during the one window it is working hardest.
-	// When either flag is true, the corresponding Count field is 0, but
-	// that 0 is NOT a reading -- callers (buildView, the template) must
-	// check the Unknown flag before trusting the Count.
+	// has never been ANALYZEd -- which search.passages hits for real
+	// right at the START of a fresh backfill, exactly when an operator is
+	// most likely watching this page. Without this, "-1, coalesced to 0"
+	// is indistinguishable from a genuine zero, and the page would report
+	// "the backfill is producing nothing" during the one window it is
+	// working hardest. When either flag is true, the corresponding Count
+	// field is 0, but that 0 is NOT a reading -- callers (buildView, the
+	// template) must check the Unknown flag before trusting the Count.
 	PassageCountUnknown bool
 	EntryCountUnknown   bool
 
@@ -81,9 +80,9 @@ type DatabaseMetrics struct {
 // pg_class.reltuples and pg_stat_user_tables.n_dead_tup -- never from a
 // scan of search.passages or entries themselves, and in particular never
 // entries.content. Measured with EXPLAIN (ANALYZE, BUFFERS) against a
-// live corpus (see task-4-report.md): every one of those primitives is a
-// metadata or statistics lookup whose cost does not grow with the size of
-// entries or search.passages, and the combined query executes in single-
+// live corpus: every one of those primitives is a metadata or statistics
+// lookup whose cost does not grow with the size of entries or
+// search.passages, and the combined query executes in single-
 // digit milliseconds. That is what makes it safe to call on every render
 // of a page that refreshes every 10 seconds (spec §9.4) with no caching
 // at all -- unlike store.PendingEntryCount, which this project already
@@ -142,8 +141,8 @@ func (s *Store) DatabaseMetrics(ctx context.Context) (DatabaseMetrics, error) {
 	// EntryCountUnknown, not collapse into a Count of 0: a 0 here is a
 	// reading (the table really is empty, and ANALYZE has said so), while
 	// -1 is the absence of a reading, and the two look identical to an
-	// operator unless this method keeps them apart (fix round 2 finding
-	// 1 -- see the struct's own doc comment).
+	// operator unless this method keeps them apart (see the struct's own
+	// doc comment).
 	if passageTuples < 0 {
 		m.PassageCountUnknown = true
 		passageTuples = 0

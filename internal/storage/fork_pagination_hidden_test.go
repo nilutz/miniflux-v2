@@ -28,17 +28,16 @@ func insertPaginationTestEntry(t *testing.T, s *Storage, userID, feedID int64, h
 }
 
 // TestEntryPaginationWithNotHiddenOrEntryIDKeepsCurrentEntryReachable
-// covers task 10's extension of the WithStatusOrEntryID pattern to the
-// hidden filter: an entry hidden after (or during) the very view that is
-// showing it must stay reachable as its own pagination anchor, while a
-// hidden *neighbour* is still excluded as a prev/next candidate.
+// covers extending the WithStatusOrEntryID pattern to the hidden filter: an
+// entry hidden after (or during) the very view that is showing it must stay
+// reachable as its own pagination anchor, while a hidden *neighbour* is
+// still excluded as a prev/next candidate.
 //
-// The middle entry is itself hidden. Using plain WithHidden(false)
-// instead of WithNotHiddenOrEntryID would drop it out of the pagination
-// CTE entirely, making both prevEntry and nextEntry come back nil - that
-// is the mutation this test is built to catch, not just "a hidden
-// neighbour is skipped" (already covered for other views by
-// TestUnreadEntryPaginationSkipsHiddenNeighbor).
+// The middle entry is itself hidden. Using plain WithHidden(false) instead
+// of WithNotHiddenOrEntryID would drop it out of the pagination CTE
+// entirely, making both prevEntry and nextEntry come back nil — that is the
+// mutation this test catches, not just "a hidden neighbour is skipped"
+// (already covered for other views by TestUnreadEntryPaginationSkipsHiddenNeighbor).
 func TestEntryPaginationWithNotHiddenOrEntryIDKeepsCurrentEntryReachable(t *testing.T) {
 	store := testStorage(t)
 	entryID, feedID := createTestEntry(t, store, "pagination-not-hidden-or-entry-id")

@@ -9,7 +9,7 @@ import "context"
 // reads for a signed-in browser session -- internal/ui/auth.go's
 // sessionCookieName constant, matched here EXACTLY, by name, so a browser
 // already signed into Miniflux carries a cookie this package recognises
-// with no separate sidecar login (task 18's "no login" requirement).
+// with no separate sidecar login.
 //
 // This is the one place in the web package that names the cookie; the
 // value itself is validated by store.Store.ValidateWebSessionCookie
@@ -43,9 +43,9 @@ type SessionValidator interface {
 }
 
 // AdminChecker reports whether userID is a Miniflux administrator,
-// read-only, against public.users.is_admin -- task 18's authorisation
-// check for the control endpoints and status page (requireAdmin, auth.go).
-// Defined as an interface for the same hermetic-tests reason every other
+// read-only, against public.users.is_admin -- the authorisation check for
+// the control endpoints and status page (requireAdmin, auth.go). Defined
+// as an interface for the same hermetic-tests reason every other
 // narrow store dependency in this package is. *store.Store's IsAdmin
 // satisfies this with no adaptation.
 type AdminChecker interface {

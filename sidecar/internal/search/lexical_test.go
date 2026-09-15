@@ -150,10 +150,9 @@ func hasEntryID(hits []PassageHit, entryID int64) bool {
 	return false
 }
 
-// TestLexicalFindsEntryByTitleOnly is the regression guard task 1.5 was
-// meant to close: a query matching only an entry's title (never
-// mentioned anywhere in its body) must still find that entry, because
-// title text is now indexed as its own passage.
+// TestLexicalFindsEntryByTitleOnly guards a query matching only an
+// entry's title (never mentioned anywhere in its body) still finding
+// that entry, because title text is indexed as its own passage.
 func TestLexicalFindsEntryByTitleOnly(t *testing.T) {
 	s := testStore(t)
 	db := testDB(t)
@@ -461,8 +460,8 @@ func TestLexicalFiltersNarrowResultsByDateRange(t *testing.T) {
 	}
 }
 
-// TestLexicalHandlesHostilePgSearchSyntaxWithoutError is the safety test
-// the task brief calls out explicitly: pg_search's query-string parser
+// TestLexicalHandlesHostilePgSearchSyntaxWithoutError is a safety test:
+// pg_search's query-string parser
 // (what a naked `text @@@ $1::text` cast invokes) errors on unbalanced
 // parens and reserved boolean keywords — verified directly against this
 // database before writing this test. Lexical must never surface that as

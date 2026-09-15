@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// TestDatabaseMetricsTracksInsertedPassagesAndEntries pins the trap called
-// out in the task brief: a "greater than zero" assertion passes whether or
+// TestDatabaseMetricsTracksInsertedPassagesAndEntries guards against a
+// well-known trap: a "greater than zero" assertion passes whether or
 // not DatabaseMetrics queried the right object, and passes just as well
 // against a constant. This asserts the DELTA the method reports actually
 // tracks passages and entries this test itself inserted -- if
@@ -110,9 +110,9 @@ func TestDatabaseMetricsIndexAndSchemaSizesTrackRealObjects(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// (Fix round 2 finding 2.) DatabaseSizeBytes previously had no
-	// independent re-read-and-compare of its own, unlike the two checks
-	// below -- a hardcoded LARGE constant (e.g. 9999999999) passed every
+	// DatabaseSizeBytes needs its own independent re-read-and-compare,
+	// unlike the two checks below -- a hardcoded LARGE constant (e.g.
+	// 9999999999) would otherwise pass every
 	// other assertion in this file, including the containment checks
 	// further down, since nothing capped it from above. Read
 	// pg_database_size directly here and require an exact match, the same
@@ -203,8 +203,7 @@ func TestDatabaseMetricsDeadTuplesTracksActualChurn(t *testing.T) {
 	// transaction commits -- pg_stat_force_next_flush() (present on this
 	// PG18 instance) forces the NEXT flush from THIS session to happen
 	// immediately, making the read below deterministic with no sleep or
-	// polling (fix round 2 finding 3: a 5-second polling loop was here
-	// before and was unnecessary).
+	// polling.
 	if _, err := s.db.Exec(`SELECT pg_stat_force_next_flush()`); err != nil {
 		t.Fatalf("unable to force a stats flush: %v", err)
 	}
@@ -236,8 +235,9 @@ func TestDatabaseMetricsDeadTuplesTracksActualChurn(t *testing.T) {
 	}
 }
 
-// TestDatabaseMetricsDistinguishesUnanalyzedFromRealZero pins fix round 2
-// finding 1: pg_class.reltuples is -1 -- Postgres' OWN sentinel -- for a
+// TestDatabaseMetricsDistinguishesUnanalyzedFromRealZero pins the
+// unanalyzed-vs-zero distinction: pg_class.reltuples is -1 -- Postgres'
+// OWN sentinel -- for a
 // relation that has never been ANALYZEd, which search.passages hits for
 // real right at the start of a fresh backfill, exactly when an operator
 // is most likely watching this page. Before this fix, -1 was silently
@@ -292,7 +292,7 @@ func TestDatabaseMetricsDistinguishesUnanalyzedFromRealZero(t *testing.T) {
 }
 
 // TestDatabaseMetricsDoesNotMarkARealZeroAsUnknown is the other half of
-// the distinguishability finding 1 asks for: reltuples = 0 (a genuine,
+// the unanalyzed-vs-zero distinction: reltuples = 0 (a genuine,
 // analyzed reading of an empty table) must NOT set the Unknown flags --
 // only Postgres' own -1 sentinel does. A fix that turned "unknown" into
 // "anything <= 0" would pass the test above but fail this one.

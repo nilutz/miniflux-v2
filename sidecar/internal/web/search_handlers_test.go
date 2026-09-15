@@ -83,11 +83,10 @@ func (f *fakeEntries) EntryIndexState(_ context.Context, entryID int64) (*store.
 // a permissive fakeKeyValidator mapping testAuthToken -> testAuthUserID
 // (and testOtherAuthToken -> testOtherUserID, for the handful of tests
 // that need a second identity). The returned handler is wrapped in
-// authedHandler (server_test.go) so every one of this file's many
-// pre-existing tests -- written before task 17 added authentication --
-// keeps exercising its own, unrelated behaviour without having to set a
-// header itself; only the tests about authentication or scoping below set
-// their own header explicitly.
+// authedHandler (server_test.go) so every test in this file that is not
+// itself about authentication keeps exercising its own, unrelated
+// behaviour without having to set a header itself; only the tests about
+// authentication or scoping below set their own header explicitly.
 func newTestSearchServer(t *testing.T, searcher SearchService, entries EntryLookup) http.Handler {
 	t.Helper()
 	keys := newFakeKeyValidator(map[string]int64{
@@ -488,7 +487,7 @@ func TestSimilarErrorIs500WithNoInternalDetailLeaked(t *testing.T) {
 	}
 }
 
-// --- user scoping (whole-branch review, finding 3) ------------------------
+// --- user scoping ----------------------------------------------------------
 
 // countingEntries is an EntryLookup that records how many times it was
 // consulted, so a test can assert that a handler did no snippet work at
@@ -508,9 +507,9 @@ func (c *countingEntries) EntryIndexState(_ context.Context, entryID int64) (*st
 	return nil, nil
 }
 
-// TestSearchWithoutUserParameterIsScopedToTheAuthenticatedUser is task
-// 17's replacement for the old "absent user means unscoped" default: once
-// GET /api/search requires a Miniflux API key (authedHandler supplies
+// TestSearchWithoutUserParameterIsScopedToTheAuthenticatedUser pins the
+// replacement for an "absent user means unscoped" default: once GET
+// /api/search requires a Miniflux API key (authedHandler supplies
 // testAuthToken -- see newTestSearchServer), an absent "user" query
 // parameter is filled in from the AUTHENTICATED caller, never left at 0
 // meaning "every user's content" -- there is no more such thing as an
@@ -552,12 +551,12 @@ func TestSearchUserParameterMatchingAuthenticatedUserIsAccepted(t *testing.T) {
 	}
 }
 
-// TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected is
-// task 17's actual security fix, pinned as a test: a caller can no longer
-// use "user" to assert a DIFFERENT identity than the one their API key
-// authenticates as. Before this task, ?user=<anyone> was trusted outright;
-// now it is rejected outright, and — the discriminating assertion — the
-// Searcher must never even be called with the wrong scope in flight.
+// TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected pins
+// the actual security fix as a test: a caller can no longer use "user" to
+// assert a DIFFERENT identity than the one their API key authenticates
+// as. ?user=<anyone> is rejected outright, and — the discriminating
+// assertion — the Searcher must never even be called with the wrong
+// scope in flight.
 func TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected(t *testing.T) {
 	fs := &fakeSearcher{}
 	handler := newTestSearchServer(t, fs, nil)
@@ -617,8 +616,8 @@ func TestSimilarUserParameterDisagreeingWithAuthenticatedUserIsRejected(t *testi
 // TestBadUserParameterIsBadRequest proves a caller that meant to scope
 // and got it wrong is told so, rather than quietly answered with the
 // whole corpus. These specific values (a non-number, zero, negative) are
-// rejected by parseUserID itself, independently of task 17's own
-// authenticated-scope check (see TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected
+// rejected by parseUserID itself, independently of the authenticated-scope
+// check (see TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected
 // for the "well-formed but disagrees with the key" case).
 func TestBadUserParameterIsBadRequest(t *testing.T) {
 	for _, target := range []string{
@@ -641,10 +640,10 @@ func TestBadUserParameterIsBadRequest(t *testing.T) {
 	}
 }
 
-// --- no snippet work on the similar path (finding 2) ----------------------
+// --- no snippet work on the similar path ------------------------------
 
-// TestSimilarDoesNoSnippetWork is the fix for the review's finding 2: the
-// fork's entry page renders a similar article's title, feed and category
+// TestSimilarDoesNoSnippetWork pins that no snippet is built on this path:
+// the fork's entry page renders a similar article's title, feed and category
 // from its own database and never reads a snippet, so /api/similar must
 // not pay for one. Asserting on the EntryLookup call count rather than on
 // the response body is deliberate — an empty snippet field would look the

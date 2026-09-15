@@ -124,8 +124,7 @@ func (f *fakeMetrics) DatabaseMetrics(context.Context) (store.DatabaseMetrics, e
 	return f.metrics, f.err
 }
 
-// fakeKeyValidator is a hermetic stand-in for APIKeyValidator (task 17):
-// an in-memory token -> user id map, mutable mid-test (delete a token to
+// fakeKeyValidator is a hermetic stand-in for APIKeyValidator: an in-memory token -> user id map, mutable mid-test (delete a token to
 // simulate Miniflux revoking an API key by deleting its api_keys row), so
 // these tests never need a database. A non-nil err makes ValidateAPIKey
 // always fail instead of consulting the map, for the "validation itself
@@ -163,8 +162,8 @@ func (f *fakeKeyValidator) revoke(token string) {
 	delete(f.tokens, token)
 }
 
-// fakeSessionValidator is a hermetic stand-in for SessionValidator (task
-// 18): an in-memory cookie-value -> user id map, mutable mid-test
+// fakeSessionValidator is a hermetic stand-in for SessionValidator: an
+// in-memory cookie-value -> user id map, mutable mid-test
 // (delete a value to simulate Miniflux deleting the underlying
 // web_sessions row -- a sign-out, or its own cleanup sweep), so these
 // tests never need a database. Mirrors fakeKeyValidator exactly, one
@@ -205,8 +204,8 @@ func (f *fakeSessionValidator) expire(cookieValue string) {
 	delete(f.cookies, cookieValue)
 }
 
-// fakeAdminChecker is a hermetic stand-in for AdminChecker (task 18): an
-// in-memory set of admin user ids, so these tests never need a database
+// fakeAdminChecker is a hermetic stand-in for AdminChecker: an in-memory
+// set of admin user ids, so these tests never need a database
 // or a real public.users.is_admin column.
 type fakeAdminChecker struct {
 	mu     sync.Mutex
@@ -239,10 +238,10 @@ func (f *fakeAdminChecker) IsAdmin(_ context.Context, userID int64) (bool, error
 // none) directly. testAuthUserID is configured as a Miniflux administrator
 // by every helper that wires an AdminChecker (newTestServer and friends,
 // below) -- these helpers exist to exercise CONTROL-endpoint behaviour
-// unrelated to task 18's authorisation itself, so they authenticate as an
-// admin by default; TestControlAndStatusEndpointsRequireAdmin (auth_test.go)
-// is what actually exercises the non-admin/no-credential cases, with its
-// own distinct fixtures.
+// unrelated to authorisation itself, so they authenticate as an admin by
+// default; TestControlAndStatusEndpointsRequireAdmin (auth_test.go) is
+// what actually exercises the non-admin/no-credential cases, with its own
+// distinct fixtures.
 const (
 	testAuthToken            = "sidecar-test-token"
 	testAuthUserID     int64 = 777
@@ -252,12 +251,11 @@ const (
 
 // authedHandler wraps h so every request it serves already carries a
 // valid X-Auth-Token header (testAuthToken), unless the request already
-// set one itself -- which lets the many pre-existing search/similar/
-// article/control/status tests that predate task 17's (and task 18's)
-// authentication requirements keep exercising their own, unrelated
-// behaviour unchanged, while auth_test.go and the handful of tests below
-// that ARE about authentication set (or deliberately omit) their own
-// header and are never overridden here.
+// set one itself -- which lets the many search/similar/article/control/
+// status tests that are not themselves about authentication keep
+// exercising their own, unrelated behaviour unchanged, while auth_test.go
+// and the handful of tests below that ARE about authentication set (or
+// deliberately omit) their own header and are never overridden here.
 type authedHandler struct{ h http.Handler }
 
 func (a authedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -288,12 +286,10 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	// for that, via newTestServerWithLive). nil, nil, nil, nil: no search
 	// service/entries/articles/metrics source either -- see
 	// search_handlers_test.go and article_handler_test.go for the first
-	// three and TestStatusPage*Metrics* below for the fourth. keys/admins
-	// (task 18): these routes are admin-gated now, so every test using
-	// this helper authenticates as testAuthUserID, configured as an admin
-	// -- via authedHandler below, which every one of this file's
-	// pre-existing tests already relies on for the same reason task 17's
-	// own report describes.
+	// three and TestStatusPage*Metrics* below for the fourth. keys/admins:
+	// these routes are admin-gated, so every test using this helper
+	// authenticates as testAuthUserID, configured as an admin -- via
+	// authedHandler below, which every test in this file relies on.
 	srv, err := New(fb, nil, nil, nil, nil, nil, nil, controlTestKeys(), nil, controlTestAdmins())
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -328,8 +324,8 @@ func newTestServerWithMetrics(t *testing.T, fb *fakeBackfill, metrics DatabaseMe
 // fakeEmbedderManager is a hermetic stand-in for *indexer.Manager: it
 // satisfies EmbedderManager by returning fixed, caller-set results and
 // recording every call it receives, so tests can exercise the Model
-// section's HTTP surface (Task 9, spec §13.1) without a real store,
-// embedder, or native ONNX Runtime library anywhere nearby.
+// section's HTTP surface (spec §13.1) without a real store, embedder, or
+// native ONNX Runtime library anywhere nearby.
 type fakeEmbedderManager struct {
 	mu sync.Mutex
 
@@ -378,7 +374,7 @@ func (f *fakeEmbedderManager) switchCallCount() int {
 }
 
 // newTestServerWithManager is newTestServer plus a real, non-nil
-// EmbedderManager, for the tests that check the Model section (Task 9).
+// EmbedderManager, for the tests that check the Model section.
 func newTestServerWithManager(t *testing.T, fb *fakeBackfill, manager EmbedderManager) http.Handler {
 	t.Helper()
 	srv, err := New(fb, nil, nil, nil, nil, nil, manager, controlTestKeys(), nil, controlTestAdmins())
@@ -510,7 +506,7 @@ func TestResumeThenStatusShowsRunning(t *testing.T) {
 	}
 }
 
-// (Task 3, spec §13.1.) The status JSON and page must distinguish an
+// (spec §13.1.) The status JSON and page must distinguish an
 // embedder-triggered pause from an operator's own Pause(): "paused by
 // operator" and "paused: embedder unreachable" are different states, and
 // an operator whose backfill stopped needs to know which one it is.
@@ -578,7 +574,7 @@ func TestStatusPageRendersOperatorPauseDistinctly(t *testing.T) {
 	}
 }
 
-// (Task 3 review round 2, spec §13.1 requirement 3.) The live lane's pause
+// (spec §13.1 requirement 3.) The live lane's pause
 // must be visible on the admin page at all -- and distinct from the
 // backfill lane's, since the two can be paused independently, for
 // independent reasons, at independent times. This asserts on the actual
@@ -824,7 +820,7 @@ func TestPauseWithGetMethodNotAllowed(t *testing.T) {
 
 // The runtime half of spec §9.2: POST /api/backfill/config carries a
 // partial configuration change through to the lane and reports back what
-// actually took effect (whole-branch fix wave, finding 1).
+// actually took effect.
 func TestConfigEndpointAppliesAPartialChange(t *testing.T) {
 	fb := &fakeBackfill{cfg: indexer.RuntimeConfig{MinWorkers: 1, MaxWorkers: 2, BatchSize: 16, PageSize: 20}}
 	handler := newTestServer(t, fb)
@@ -977,7 +973,7 @@ func TestStatusShowsTheConfigurationInForce(t *testing.T) {
 	}
 }
 
-// (Task 4, spec §13.2.) The status page's database-size section must
+// (spec §13.2.) The status page's database-size section must
 // actually be wired to Server.metrics through view() and buildView, not
 // merely renderable if handed the right statusView by hand — the same
 // concern TestStatusDistinguishesLiveLanePauseFromBackfillLane raises for
@@ -1046,7 +1042,7 @@ func TestStatusPageRendersDatabaseMetrics(t *testing.T) {
 		"8.0 MB",    // HNSW index size specifically
 		"5,681",     // passage count
 		"436",       // entry count
-		"13.03",     // passages per entry -- the ratio the task exists to surface
+		"13.03",     // passages per entry -- the ratio this section exists to surface
 		"estimated", // counts are estimates, not exact
 		"1,066",     // dead tuple count
 		"VACUUM",    // the stale-VACUUM/HNSW-truncation warning
@@ -1115,7 +1111,7 @@ func TestStatusPageShowsMetricsUnavailableOnError(t *testing.T) {
 	}
 }
 
-// (Fix round 2 finding 1.) A fresh backfill's search.passages table can
+// A fresh backfill's search.passages table can
 // report pg_class.reltuples = -1 (Postgres' own "never analyzed" sentinel
 // -- see store.DatabaseMetrics' own doc comment) at the exact moment an
 // operator is most likely watching this page. Before this fix, that state
@@ -1208,7 +1204,7 @@ func passagesPerEntryRow(t *testing.T, body string) string {
 	return body[start : start+end]
 }
 
-// --- Task 9: the admin page's Model section and its HTTP surface ---
+// --- the admin page's Model section and its HTTP surface ---
 
 func TestGetEmbedderReturnsCurrentInfo(t *testing.T) {
 	manager := &fakeEmbedderManager{info: indexer.EmbedderInfo{
@@ -1237,8 +1233,8 @@ func TestGetEmbedderReturnsCurrentInfo(t *testing.T) {
 }
 
 // TestGetEmbedderUnavailableWithoutManager proves the Model section's API
-// degrades honestly (the Addendum: "a section whose data is unavailable
-// ... must say so") rather than panicking or serving a misleading 200.
+// degrades honestly -- a section whose data is unavailable must say so --
+// rather than panicking or serving a misleading 200.
 func TestGetEmbedderUnavailableWithoutManager(t *testing.T) {
 	handler := newTestServer(t, &fakeBackfill{})
 
@@ -1267,11 +1263,11 @@ func TestStatusPageShowsModelUnavailableWithoutManager(t *testing.T) {
 	}
 }
 
-// TestStatusPageRendersModelSectionBehindTheSidebar proves the Addendum's
-// core requirement: the page has a sidebar nav, and the Model section
-// (this task's embedder controls) is reachable through it and actually
-// renders the manager's current identity -- not appended as a fifth
-// stacked section with no navigation, and not silently absent.
+// TestStatusPageRendersModelSectionBehindTheSidebar proves the page has a
+// sidebar nav, and the Model section (the embedder controls) is reachable
+// through it and actually renders the manager's current identity -- not
+// appended as a fifth stacked section with no navigation, and not
+// silently absent.
 func TestStatusPageRendersModelSectionBehindTheSidebar(t *testing.T) {
 	manager := &fakeEmbedderManager{info: indexer.EmbedderInfo{
 		Kind:             "local",
@@ -1334,8 +1330,8 @@ func TestEmbedderPreviewForwardsToManagerAndReturnsResult(t *testing.T) {
 	if len(manager.previewCalls) != 1 || manager.previewCalls[0].kind != "remote" || manager.previewCalls[0].remoteURL != "http://gpu-host:9000" {
 		t.Fatalf("expected Preview to be called once with (remote, http://gpu-host:9000), got %+v", manager.previewCalls)
 	}
-	// Section 3: a probe must never swap anything -- Switch must not have
-	// been called at all by a preview request.
+	// A probe must never swap anything -- Switch must not have been
+	// called at all by a preview request.
 	if manager.switchCallCount() != 0 {
 		t.Fatalf("expected Preview to never call Switch, got %d Switch calls", manager.switchCallCount())
 	}
@@ -1378,9 +1374,9 @@ func TestEmbedderPreviewRejectsInvalidKind(t *testing.T) {
 	}
 }
 
-// TestEmbedderSwitchWithoutConfirmationIsRejected proves section 5's "the
-// switch must not proceed without explicit confirmation" reaches the
-// manager honestly: confirm defaults to false when the field is omitted,
+// TestEmbedderSwitchWithoutConfirmationIsRejected proves "the switch must
+// not proceed without explicit confirmation" reaches the manager
+// honestly: confirm defaults to false when the field is omitted,
 // and the handler must pass that through (never silently upgrading it to
 // true) and surface indexer.Manager's own refusal as a 428.
 func TestEmbedderSwitchWithoutConfirmationIsRejected(t *testing.T) {

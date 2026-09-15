@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Command mcp is the sidecar's MCP server (task 15): a stdio child process
-// Claude Code spawns locally, exposing three tools -- search, similar and
+// Command mcp is the sidecar's MCP server: a stdio child process Claude
+// Code spawns locally, exposing three tools -- search, similar and
 // fetch_article -- that let an agent search and read this reader's
 // article corpus. It is a thin wrapper: every tool call becomes one or
 // more HTTP requests to a running sidecar's read-only search API
@@ -10,15 +10,14 @@
 // database connection and does no retrieval of its own.
 //
 // It runs over stdio, not as another HTTP service, and deliberately does
-// NOT live on the sidecar's own admin port. As of task 17, the sidecar's
-// data endpoints (GET /api/search, /api/similar, /api/article -- see
-// internal/web/auth.go) do require a Miniflux API key, but the admin
-// server's status page and control endpoints still do not (see
-// internal/web/server.go's own doc comment on Server for why), and
-// running MCP as a second HTTP service on that same port would still
-// mean opening a new network surface where none is otherwise needed. A
-// stdio child process Claude Code spawns and owns the pipes of adds no
-// network surface at all, authenticated or not.
+// NOT live on the sidecar's own admin port. The sidecar's data endpoints
+// (GET /api/search, /api/similar, /api/article -- see internal/web/auth.go)
+// require a Miniflux API key, but the admin server's status page and
+// control endpoints still do not (see internal/web/server.go's own doc
+// comment on Server for why); running MCP as a second HTTP service on
+// that same port would still mean opening a new network surface where
+// none is otherwise needed. A stdio child process Claude Code spawns and
+// owns the pipes of adds no network surface at all, authenticated or not.
 //
 // This binary is CGO-free and pulls in none of the sidecar's ONNX
 // Runtime / libtokenizers dependency: it imports internal/mcpserver and
@@ -26,9 +25,9 @@
 // internal/embed/onnx, internal/indexer or internal/store. It builds
 // (see the Makefile's build-mcp target) with CGO_ENABLED=0 and no
 // CGO_LDFLAGS, unlike cmd/sidecar, which requires -tags ORT and a linked
-// libtokenizers.a. That matters because this is the binary meant to run
-// on an operator's own laptop, next to Claude Code, not inside the
-// container that runs cmd/sidecar.
+// libtokenizers.a: this is the binary meant to run on an operator's own
+// laptop, next to Claude Code, not inside the container that runs
+// cmd/sidecar.
 //
 // MCP's stdio transport reserves stdout for the JSON-RPC protocol
 // stream -- anything else written there corrupts every message after it.
@@ -52,8 +51,8 @@ import (
 
 // version identifies this binary in MCP's initialize handshake. It is
 // intentionally independent of the sidecar binary's own versioning
-// (cmd/sidecar has none either, as of task 15) -- this is a separate
-// artifact with a separate release cadence.
+// (cmd/sidecar has none either) -- this is a separate artifact with a
+// separate release cadence.
 const version = "0.1.0"
 
 // sidecarURLEnv is read for the sidecar's base URL. Documented in
@@ -63,10 +62,10 @@ const sidecarURLEnv = "SIDECAR_URL"
 // apiKeyEnv is read for the Miniflux API key sent as X-Auth-Token on
 // every request to the sidecar (internal/sidecarclient's doc comment
 // explains why unconditionally). Named after Miniflux's own API key, not
-// the sidecar, because it is the SAME credential: as of task 17, the
-// sidecar validates this token against public.api_keys, the table and
-// header internal/api/middleware.go already reads on the main fork's own
-// REST API -- so a real Miniflux key works against both services with no
+// the sidecar, because it is the SAME credential: the sidecar validates
+// this token against public.api_keys, the table and header
+// internal/api/middleware.go already reads on the main fork's own REST
+// API -- so a real Miniflux key works against both services with no
 // separate key to manage.
 const apiKeyEnv = "MINIFLUX_API_KEY"
 
@@ -84,10 +83,10 @@ func main() {
 		// Not fatal here -- main() still starts, and connecting to a
 		// sidecar whose admin/control endpoints remain unauthenticated
 		// (server.go's own doc comment on Server explains which do and do
-		// not) still succeeds. But since task 17, GET /api/search,
-		// /api/similar and /api/article all require this key: every
-		// search/similar/fetch_article tool call will fail with an
-		// AuthError ("sidecar rejected the API key") until it is set.
+		// not) still succeeds. But GET /api/search, /api/similar and
+		// /api/article all require this key: every search/similar/
+		// fetch_article tool call will fail with an AuthError ("sidecar
+		// rejected the API key") until it is set.
 		logger.Warn(apiKeyEnv+" is not set; requests to the sidecar will carry no X-Auth-Token header",
 			slog.String("effect", "every search/similar/fetch_article tool call will fail with HTTP 401 until this is set to a valid Miniflux API key"),
 		)

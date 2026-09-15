@@ -138,7 +138,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 }
 
 // TestMigrateAddsPassagesSourceColumn pins migration 3: search.passages
-// gains a NOT NULL 'source' column defaulting to 'content', so pre-task-1.5
+// gains a NOT NULL 'source' column defaulting to 'content', so pre-existing
 // rows (all of which are body passages) remain valid without a backfill of
 // their own, and the indexer can write 'title' rows going forward.
 func TestMigrateAddsPassagesSourceColumn(t *testing.T) {
@@ -201,8 +201,8 @@ func passagesReloptions(t *testing.T, s *Store) map[string]string {
 	return opts
 }
 
-// assertPassagesAutovacuumOptions checks the exact values task 12 sets, not
-// merely that reloptions is non-empty: a test that only checked
+// assertPassagesAutovacuumOptions checks the exact values migration 4 sets,
+// not merely that reloptions is non-empty: a test that only checked
 // non-emptiness would pass whether or not the values were right, and would
 // pass if only one of the two settings had been applied.
 func assertPassagesAutovacuumOptions(t *testing.T, s *Store) {
@@ -236,7 +236,7 @@ func TestMigrateSetsPassagesAutovacuumOptions(t *testing.T) {
 }
 
 // TestMigrateAutovacuumOptionsStableOnRerun goes past the generic
-// idempotency check above to confirm the specific values task 12 sets
+// idempotency check above to confirm the specific values migration 4 sets
 // don't drift or duplicate across a second Migrate() call -- the sidecar
 // runs migrations on every start, so this path runs constantly in
 // practice.
@@ -253,10 +253,10 @@ func TestMigrateAutovacuumOptionsStableOnRerun(t *testing.T) {
 	assertPassagesAutovacuumOptions(t, s)
 }
 
-// TestMigrateAppliesTuningToExistingDatabase simulates the path the task
-// 12 brief calls out as the one that actually breaks: a database that
-// already ran migrations 1-3 (the shape every already-deployed sidecar is
-// on today) before task 12's migration existed. ALTER TABLE ... SET
+// TestMigrateAppliesTuningToExistingDatabase simulates the path that
+// actually breaks: a database that already ran migrations 1-3 (the shape
+// every already-deployed sidecar is on today) before migration 4 existed.
+// ALTER TABLE ... SET
 // requires search.passages to already exist -- unlike a from-scratch
 // Migrate() call, which creates and tunes it in the same run and could
 // silently hide an ordering bug.
@@ -319,9 +319,9 @@ func TestMigrateAppliesTuningToExistingDatabase(t *testing.T) {
 // ever ran, so a sidecar that hit migration 5's shared-memory failure was
 // left with schema_version = 4, not damaged or partially migrated.
 //
-// Task 9 appended a real migration 5 (search.embedder_settings), so a
-// from-scratch Migrate() no longer stops at 4 the way it did when this
-// test was written -- seeding has to replay migrations 1-4 by hand
+// Migration 5 (search.embedder_settings) was appended after this test was
+// written, so a from-scratch Migrate() no longer stops at 4 the way it
+// did then -- seeding has to replay migrations 1-4 by hand
 // (mirroring TestMigrateAppliesTuningToExistingDatabase's own technique
 // for the same reason) rather than relying on a fresh Migrate() call to
 // land there on its own. The behaviour under test is unchanged: Migrate()
@@ -388,8 +388,8 @@ func TestMigrateFromCrashLoopedVersionFourIsANoOp(t *testing.T) {
 
 // TestSchemaVersionIsPinned asserts the literal migration count rather than
 // just len(migrations): a migration closure silently deleted from the
-// array (as happened during task 12's review, when the since-reverted
-// index-rebuild migration was removed to test the suite) drops
+// array (as happened when the since-reverted index-rebuild migration was
+// removed to test this) drops
 // schemaVersion without any other test here failing -- every other test
 // asserts against schemaVersion itself, which moves right along with the
 // bug. This is the one check that has to hardcode the number so a
@@ -404,9 +404,9 @@ func TestSchemaVersionIsPinned(t *testing.T) {
 	}
 }
 
-// TestMigrateWidensEmbeddingColumnTo768 pins migration 5 (nomic migration
-// plan, task 2): a from-scratch database ends with search.passages.embedding
-// at vector(768), not the vector(384) migration 0 originally created --
+// TestMigrateWidensEmbeddingColumnTo768 pins migration 5: a from-scratch
+// database ends with search.passages.embedding at vector(768), not the
+// vector(384) migration 0 originally created --
 // this package's fixed-shape query pattern would otherwise silently keep
 // writing at the wrong width with no compile-time signal.
 func TestMigrateWidensEmbeddingColumnTo768(t *testing.T) {
@@ -421,8 +421,8 @@ func TestMigrateWidensEmbeddingColumnTo768(t *testing.T) {
 	}
 }
 
-// TestMigrateWidensExistingPopulatedColumn is this task's specific trap,
-// named in its own brief: a test asserting the column is vector(768) passes
+// TestMigrateWidensExistingPopulatedColumn guards against a specific trap:
+// a test asserting the column is vector(768) passes
 // on a fresh database whether or not the *widening* path actually works,
 // because CREATE TABLE never has to reconcile incompatible existing data.
 // This seeds a database at schema_version 5 -- every already-deployed
@@ -535,9 +535,8 @@ func TestMigrateWidensExistingPopulatedColumn(t *testing.T) {
 // this exact migration set max_parallel_maintenance_workers globally (via
 // SET rather than SET LOCAL) and crash-looped the sidecar's HNSW build
 // against a 64 MiB /dev/shm -- this pins the fix, on the same physical
-// connection the migration itself ran on (SetMaxOpenConns(1)), the same
-// technique task 12's own brief calls out as the one that actually proves
-// the setting didn't leak.
+// connection the migration itself ran on (SetMaxOpenConns(1)), which is
+// what actually proves the setting didn't leak.
 func TestMigrationDoesNotLeakMaintenanceSettings(t *testing.T) {
 	s := testStore(t)
 	s.db.SetMaxOpenConns(1)

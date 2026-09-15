@@ -149,9 +149,9 @@ func newTaskRecordingServer(t *testing.T, dimensions int, name, revision string)
 }
 
 // TestEmbedDocumentsSendsDocumentTaskOverHTTP and
-// TestEmbedQuerySendsQueryTaskOverHTTP are this task's proof for the
-// remote implementation, at the boundary the plan's report contract
-// calls out as the one that matters: not what a fake embedder was
+// TestEmbedQuerySendsQueryTaskOverHTTP prove the remote implementation
+// sends the task correctly, at the boundary that actually matters: not
+// what a fake embedder was
 // handed (a fake can be wired correctly while the real client sends
 // nothing, or the wrong thing, over the wire), but the literal "task"
 // field this package's own doEmbed put into the HTTP request body. A
@@ -496,7 +496,7 @@ func TestNewRequiresURL(t *testing.T) {
 	}
 }
 
-// TestEmbedConnectionFailureWrapsErrUnavailable is Task 3's (spec §13.1)
+// TestEmbedConnectionFailureWrapsErrUnavailable is the (spec §13.1)
 // classification proof at the source: internal/indexer decides "pause the
 // lane, don't mark this entry failed" purely via errors.Is(err,
 // embed.ErrUnavailable), so a genuine connectivity failure from THIS
@@ -598,7 +598,7 @@ func TestEmbedRejectsIdentityChangeMidRunWrapsErrUnavailable(t *testing.T) {
 // side makes the remote change back -- so it must additionally wrap
 // embed.ErrRequiresRestart, the signal internal/web's admin page uses to
 // tell an operator "go restart the sidecar" rather than "wait" (spec
-// §13.1, task 3 review round 2).
+// §13.1).
 func TestEmbedRejectsIdentityChangeMidRunWrapsErrRequiresRestart(t *testing.T) {
 	srv := newDriftingServer(t, 768, "bge-small-en-v1.5", "some-other-model", "abc123")
 

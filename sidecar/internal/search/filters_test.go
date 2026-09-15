@@ -10,7 +10,7 @@ import (
 )
 
 // TestFiltersWithOnlyAUserIDIsNotEmpty guards the subtle half of the
-// user-scoping fix (whole-branch review, finding 3). empty() is what
+// user-scoping fix. empty() is what
 // decides whether a retrieval joins public.entries at all; if UserID did
 // not count as a constraint, setting it would produce a query with no
 // join, no WHERE clause and no scoping — a filter that silently does

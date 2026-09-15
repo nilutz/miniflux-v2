@@ -5,15 +5,14 @@
 // against. It exists for one reason: those tests must never be able to
 // reach the database the sidecar itself is configured to serve.
 //
-// The hazard is not hypothetical. SIDECAR_DATABASE_URL is the variable an
-// operator exports to RUN the sidecar, and the sidecar's own docs tell
-// them to point it at their live Miniflux database. `make test` runs the
-// whole suite, including internal/indexer's, which sweeps the entire
-// entries table and rewrites search.passages with whatever embedder the
-// test constructed — a fake one, in most of those tests. Reading the
-// production DSN from the tests meant "start the sidecar" and "run the
-// tests" were one export apart from each other. That has already
-// destroyed a corpus once in this project.
+// SIDECAR_DATABASE_URL is the variable an operator exports to RUN the
+// sidecar, and the sidecar's own docs tell them to point it at their live
+// Miniflux database. `make test` runs the whole suite, including
+// internal/indexer's, which sweeps the entire entries table and rewrites
+// search.passages with whatever embedder the test constructed — a fake
+// one, in most of those tests. Reading the production DSN from the tests
+// would mean "start the sidecar" and "run the tests" are one export apart
+// from each other.
 //
 // So the tests read SIDECAR_TEST_DATABASE_URL, a variable whose only
 // purpose is to be a throwaway database, and DSN refuses outright when it

@@ -81,9 +81,9 @@ func TestValidateAPIKeyReturnsFalseForUnknownToken(t *testing.T) {
 	}
 }
 
-// TestValidateAPIKeyReturnsFalseAfterKeyIsRevoked is the task's own
-// required case: Miniflux revokes a key by deleting its api_keys row, and
-// the very next validation against that same token must fail -- read
+// TestValidateAPIKeyReturnsFalseAfterKeyIsRevoked covers the required
+// case: Miniflux revokes a key by deleting its api_keys row, and the very
+// next validation against that same token must fail -- read
 // live, on every call, with nothing cached that could serve a stale
 // "still valid" answer past the revocation.
 func TestValidateAPIKeyReturnsFalseAfterKeyIsRevoked(t *testing.T) {
@@ -117,9 +117,9 @@ func TestValidateAPIKeyReturnsFalseAfterKeyIsRevoked(t *testing.T) {
 
 // TestValidateAPIKeyDistinguishesTwoUsersTokens seeds two separate users,
 // each with their own key, and proves the two tokens resolve to two
-// DIFFERENT user ids -- the data-layer half of the task's "a token
-// belonging to user A must not return user B's entries" requirement. A
-// bug that returned a fixed or swapped user id would still pass a
+// DIFFERENT user ids -- the data-layer half of the "a token belonging to
+// user A must not return user B's entries" requirement. A bug that
+// returned a fixed or swapped user id would still pass a
 // single-user test like TestValidateAPIKeyReturnsOwningUser above; it
 // cannot pass this one.
 func TestValidateAPIKeyDistinguishesTwoUsersTokens(t *testing.T) {
@@ -154,8 +154,8 @@ func TestValidateAPIKeyDistinguishesTwoUsersTokens(t *testing.T) {
 	}
 }
 
-// TestValidateAPIKeyDoesNotUpdateLastUsedAt pins the brief's explicit
-// read-only requirement: the sidecar must never write api_keys.last_used_at
+// TestValidateAPIKeyDoesNotUpdateLastUsedAt pins the explicit read-only
+// requirement: the sidecar must never write api_keys.last_used_at
 // -- that column belongs to Miniflux (internal/api/middleware.go updates
 // it on the fork's own REST API), and writing it here would make the
 // sidecar a writer of upstream state for the first time. A key created

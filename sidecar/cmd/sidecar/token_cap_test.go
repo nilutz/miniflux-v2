@@ -56,16 +56,14 @@ const nomicRealTokenLimit = 8192
 // `tok.Encode("search_document: "+longPassage, true)`).
 const documentPrefix = "search_document: "
 
-// TestSplitPassageAtCapNeverExceedsNomicsRealTokenLimit is task 3's
-// stated deliverable: proof that a passage Split produces at the cap does
-// not exceed the model's REAL token limit -- not an estimate of it. It
-// exercises passage.Split with a real TokenCounter backed by nomic's own
-// tokenizer.json (nomic migration plan, task 3 brief; superseded task 13
-// brief's "count real tokens" approach), the one internal/passage cannot
-// build for itself (see passage.TokenCounter's doc comment for why, and
-// TestSplitHonoursInjectedTokenCounter in internal/passage for the
-// hermetic counterpart that proves the injection mechanism itself without
-// a real tokenizer).
+// TestSplitPassageAtCapNeverExceedsNomicsRealTokenLimit proves that a
+// passage Split produces at the cap does not exceed the model's REAL
+// token limit -- not an estimate of it. It exercises passage.Split with a
+// real TokenCounter backed by nomic's own tokenizer.json, the one
+// internal/passage cannot build for itself (see passage.TokenCounter's
+// doc comment for why, and TestSplitHonoursInjectedTokenCounter in
+// internal/passage for the hermetic counterpart that proves the
+// injection mechanism itself without a real tokenizer).
 //
 // The input text is deliberately adversarial: every "word" is a random,
 // dictionary-free string, so WordPiece has no whole-token match for any
@@ -76,13 +74,11 @@ const documentPrefix = "search_document: "
 // comfortably below it, so this is not merely "the small default cap
 // (512 words) stays safely under 8192 either way" (which would pass
 // trivially regardless of whether the injected counter is honoured at
-// all) -- it is the literal claim task 3 asks for: a passage AT THE CAP
-// does not exceed the model's real limit. If Split silently used the
-// word-based estimator instead of the injected real counter (the
-// regression this test exists to catch -- see its own discrimination
-// proof in the task report), packing "until ~8192 words" of this
-// adversarial text would produce passages of tens of thousands of real
-// tokens, comfortably caught by the assertions below.
+// all) -- it proves a passage AT THE CAP does not exceed the model's real
+// limit. If Split silently used the word-based estimator instead of the
+// injected real counter, packing "until ~8192 words" of this adversarial
+// text would produce passages of tens of thousands of real tokens,
+// comfortably caught by the assertions below.
 func TestSplitPassageAtCapNeverExceedsNomicsRealTokenLimit(t *testing.T) {
 	modelPath := os.Getenv("SIDECAR_MODEL_PATH")
 	if modelPath == "" {

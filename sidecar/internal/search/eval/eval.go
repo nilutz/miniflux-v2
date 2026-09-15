@@ -5,7 +5,7 @@
 // recall@k against a small, hand-labelled set of query -> relevant-entry-id
 // pairs. It is deliberately hermetic — no database, no embedder, no
 // network — so that RecallAtK's arithmetic can be trusted independently of
-// whatever runs it against real retrieval later (Task 4).
+// whatever runs it against real retrieval later.
 //
 // See README.md for what testdata/queries.json actually measures and what
 // it does not.
@@ -24,10 +24,10 @@ type Query struct {
 	Text             string  `json:"text"`
 	RelevantEntryIDs []int64 `json:"relevant_entry_ids"`
 
-	// Note documents why this query is in the set — e.g. which of the
-	// task brief's categories (close wording, paraphrase, rare
-	// discriminating term, short vs. sentence-length) it was chosen to
-	// cover. Purely documentary: nothing in this package reads it.
+	// Note documents why this query is in the set — e.g. which category
+	// (close wording, paraphrase, rare discriminating term, short vs.
+	// sentence-length) it was chosen to cover. Purely documentary:
+	// nothing in this package reads it.
 	Note string `json:"note,omitempty"`
 }
 
@@ -116,7 +116,7 @@ type PerQueryResult struct {
 }
 
 // Report summarises a full evaluation run: every query's individual
-// recall alongside the mean across all of them. Task 4 builds one per
+// recall alongside the mean across all of them. A caller builds one per
 // retrieval mode (keyword, semantic, hybrid, passages) by running each
 // query through that mode's retrieval, scoring it with RecallAtK, and
 // passing the resulting []PerQueryResult to NewReport.

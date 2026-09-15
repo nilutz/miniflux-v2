@@ -64,10 +64,10 @@ func TestEmbedCachedEmbedsRepeatedQueryOnce(t *testing.T) {
 	}
 }
 
-// TestEmbedCachedOnlyEverCallsEmbedQuery is the nomic migration plan's
-// task 1 call-path proof for internal/search: embedCached embeds a
-// search query, so it must call embed.Embedder.EmbedQuery and must never
-// call EmbedDocuments — an asymmetric model (nomic-embed-text-v1.5)
+// TestEmbedCachedOnlyEverCallsEmbedQuery proves embedCached's call-path
+// for internal/search: embedCached embeds a search query, so it must
+// call embed.Embedder.EmbedQuery and must never call EmbedDocuments — an
+// asymmetric model (nomic-embed-text-v1.5)
 // applies a different, incompatible prefix to each, and a query embedded
 // under the document prefix would silently rank worse, with no error
 // anywhere (see embed.Embedder's doc comment).
@@ -162,8 +162,8 @@ func TestEmbedCachedConcurrentAccessIsRaceFree(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSearcherClearQueryCacheDiscardsCachedEmbeddings is Task 9's guard
-// (spec §13.1): after a live embedder switch, a query embedding cached
+// TestSearcherClearQueryCacheDiscardsCachedEmbeddings is a guard (spec
+// §13.1): after a live embedder switch, a query embedding cached
 // under the OLD model must not keep being served. This proves
 // ClearQueryCache actually discards cache contents -- a repeated query
 // that previously hit the cache (one embed call total) must force a

@@ -331,9 +331,9 @@ func TestResavingURLUpdatesEntryInPlace(t *testing.T) {
 
 // TestSaveWebPageFailsWhenPageHasNoArticleText is the failure case spec §10
 // calls out: a scrape that returns markup but no prose must fail with a
-// message and must not create an entry. This is the exact bug class the P0
-// crawler fix (processor.ContainsAnyText) guards against; the save path
-// must apply the same guard rather than trusting "no error" as "it worked".
+// message and must not create an entry. This is the exact bug class the
+// crawler's processor.ContainsAnyText guards against; the save path must
+// apply the same guard rather than trusting "no error" as "it worked".
 func TestSaveWebPageFailsWhenPageHasNoArticleText(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	configureSavedPageTestOptions(t)
@@ -505,10 +505,9 @@ func TestSubmitSavedPageHandlerRendersErrorWithoutPanicking(t *testing.T) {
 	}
 }
 
-// TestSavedPagesFeedURLNeverCollidesWithARealSubscription is a narrow unit
-// check on the collision argument the report relies on: the URL validator
-// every real subscription's feed_url must pass through never accepts the
-// scheme the saved-pages feed_url uses.
+// TestSavedPagesFeedURLNeverCollidesWithARealSubscription checks that the
+// URL validator every real subscription's feed_url must pass through never
+// accepts the scheme the saved-pages feed_url uses.
 func TestSavedPagesFeedURLNeverCollidesWithARealSubscription(t *testing.T) {
 	feedURL := storage.SavedPagesFeedURL(42)
 	if !strings.HasPrefix(feedURL, "internal://") {

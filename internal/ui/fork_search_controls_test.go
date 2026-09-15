@@ -101,8 +101,8 @@ func TestSearchPageDefaultIncludesHiddenEntries(t *testing.T) {
 	}
 	body := w.Body.String()
 
-	// This is the §13.3 guarantee the task brief calls "not negotiable":
-	// asserted explicitly, not inferred from the absence of a filter.
+	// Asserted explicitly per spec §13.3, not inferred from the absence of
+	// a filter.
 	if !strings.Contains(body, hiddenTitle) {
 		t.Fatalf("expected the hidden entry %q to be returned when the exclude-hidden box is unchecked; body:\n%s", hiddenTitle, body)
 	}
@@ -150,8 +150,8 @@ func TestSearchPageExcludeHiddenChecked(t *testing.T) {
 
 // TestSearchPageHiddenAndUnreadFiltersAreIndependent covers all four
 // combinations of the two checkboxes, proving "unread only" and "exclude
-// hidden" do not interact - conflating them (a third state on "unread")
-// is exactly what the task brief says not to do.
+// hidden" do not interact - hidden must stay a separate boolean, not a
+// third state folded into "unread" (see spec §13.3).
 func TestSearchPageHiddenAndUnreadFiltersAreIndependent(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	store := storage.NewStorage(db)
@@ -264,21 +264,19 @@ func TestSearchPageInvalidOrderFallsBackToPreference(t *testing.T) {
 	}
 }
 
-// TestSearchPageFullTextDefaultsToRelevanceNotSavedPreference covers the
-// reviewer's Minor: with no explicit "order" query parameter, a plain
-// full-text search must stay relevance-ordered (WithSearchQuery's own
-// ts_rank), not silently switch to the reader's saved
-// entry_sorting_order the moment the sort picker exists. highRelevance's
-// content repeats the query term five times (raising its ts_rank);
-// lowRelevance's content contains it once. Their published_at values are
-// deliberately the opposite of what relevance would produce: under the
-// default preference (published_at, ascending - oldest first),
-// lowRelevance (older) would sort first; only true relevance-first
-// ordering puts highRelevance first despite being newer. A first version
-// of this fixture had the ages backwards (matching, not contradicting,
-// the date-order outcome) and stayed green under a mutation that always
-// applied the saved-preference order - see the mutation log in the task
-// report.
+// TestSearchPageFullTextDefaultsToRelevanceNotSavedPreference proves that
+// with no explicit "order" query parameter, a plain full-text search stays
+// relevance-ordered (WithSearchQuery's own ts_rank), not silently switched
+// to the reader's saved entry_sorting_order now that the sort picker
+// exists. highRelevance's content repeats the query term five times
+// (raising its ts_rank); lowRelevance's content contains it once. Their
+// published_at values are deliberately the opposite of what relevance
+// would produce: under the default preference (published_at, ascending -
+// oldest first), lowRelevance (older) would sort first; only true
+// relevance-first ordering puts highRelevance first despite being newer.
+// Ages that instead matched the date-order outcome would let this test
+// pass even if the saved-preference order were applied - the reversal is
+// what makes the assertion load-bearing.
 func TestSearchPageFullTextDefaultsToRelevanceNotSavedPreference(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	store := storage.NewStorage(db)
@@ -544,10 +542,10 @@ func TestSearchEntryPaginationWalksThePickerOrder(t *testing.T) {
 	}
 }
 
-// TestSearchPageFullTextModeWorksWithoutSidecar covers part C: the
-// explicit "fulltext" mode must return results with no sidecar
-// configured at all - the same path selecting it always ran, now reached
-// on purpose rather than only as a fallback.
+// TestSearchPageFullTextModeWorksWithoutSidecar proves the explicit
+// "fulltext" mode returns results with no sidecar configured at all - the
+// same path selecting it always ran, now reached on purpose rather than
+// only as a fallback.
 func TestSearchPageFullTextModeWorksWithoutSidecar(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	store := storage.NewStorage(db)
@@ -595,7 +593,7 @@ func selectTagHasAttr(t *testing.T, body, id, attr string) bool {
 	return strings.Contains(tag, attr)
 }
 
-// TestSearchPageSortControlsDisabledOutsideFullTextMode covers Major 2:
+// TestSearchPageSortControlsDisabledOutsideFullTextMode proves that
 // the order/direction selects have no effect on the four sidecar-ranked
 // modes (see resolveSearchResults' doc comment on relevance vs. the
 // picker), so they must render disabled - communicating "not applicable
@@ -694,12 +692,11 @@ func TestSearchPageFullTextModeNeverCallsTheSidecar(t *testing.T) {
 	}
 }
 
-// TestSearchResultLinkAndPaginationCarryAllThreeNewParameters is the
-// round-trip check the task brief calls out explicitly: excludeHidden,
-// order and direction (and the pre-existing mode) must all survive the
-// result link built at search.html's queryString dict, and the
-// pagination links built from the same pagination struct - not just on
-// first render.
+// TestSearchResultLinkAndPaginationCarryAllThreeNewParameters proves that
+// excludeHidden, order and direction (and the pre-existing mode) all
+// survive the result link built at search.html's queryString dict, and
+// the pagination links built from the same pagination struct - not just
+// on first render.
 func TestSearchResultLinkAndPaginationCarryAllThreeNewParameters(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	store := storage.NewStorage(db)

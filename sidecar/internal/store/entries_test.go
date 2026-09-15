@@ -32,8 +32,7 @@ func createTestEntryWithTitle(t *testing.T, s *Store, username, title, content s
 
 // createTestEntryWithTitleAndUser is createTestEntryWithTitle, but also
 // returns the id of the user it created -- needed by tests that assert an
-// entry is scoped to its owning user (task 17's EntryArticle ownership
-// check), which no caller needed exposed before this task.
+// entry is scoped to its owning user (EntryArticle's ownership check).
 func createTestEntryWithTitleAndUser(t *testing.T, s *Store, username, title, content string) (entryID, userID int64) {
 	t.Helper()
 
@@ -159,12 +158,12 @@ func TestEntryForIndexingChangesHashWhenContentChanges(t *testing.T) {
 }
 
 // TestEntryForIndexingChangesHashWhenTitleChangesButContentDoesNot is the
-// regression guard for the gap this task exists to close: before task 1.5,
-// content_hash covered only the entry's content, so editing only its title
-// (a headline fix, a feed re-publishing with a corrected title) left the
-// recorded hash unchanged and the entry silently un-reindexed forever —
-// its old, now-wrong title passage (or, before this task, no title passage
-// at all) would never be refreshed.
+// regression guard for a gap that used to exist: content_hash once covered
+// only the entry's content, so editing only its title (a headline fix, a
+// feed re-publishing with a corrected title) left the recorded hash
+// unchanged and the entry silently un-reindexed forever — its old,
+// now-wrong title passage (or, before the title was indexed at all, no
+// title passage) would never be refreshed.
 func TestEntryForIndexingChangesHashWhenTitleChangesButContentDoesNot(t *testing.T) {
 	s := testStore(t)
 	if err := s.Migrate(); err != nil {
@@ -204,7 +203,7 @@ func TestEntryForIndexingReturnsErrorForUnknownEntry(t *testing.T) {
 	}
 }
 
-// TestEntryArticleReturnsTitleURLPublishedAtAndContent covers task 15's
+// TestEntryArticleReturnsTitleURLPublishedAtAndContent covers
 // GET /api/article, which this method backs: it must return everything
 // that endpoint promises -- title, URL, published date and full content
 // -- by entry id, and nothing about feed/category/read state (see
@@ -259,8 +258,8 @@ func TestEntryArticleReturnsErrorForUnknownEntry(t *testing.T) {
 	}
 }
 
-// TestEntryArticleDoesNotReturnAnotherUsersEntry is task 17's ownership
-// guard on GET /api/article: an entry id that genuinely exists, but
+// TestEntryArticleDoesNotReturnAnotherUsersEntry is the ownership guard
+// on GET /api/article: an entry id that genuinely exists, but
 // belongs to a DIFFERENT user than the one asking, must be refused
 // exactly like an entry id that does not exist at all -- both wrap
 // sql.ErrNoRows, so a caller cannot use this method to tell "not mine"
@@ -468,9 +467,9 @@ func TestPendingEntryIDsIncludesFailedEntry(t *testing.T) {
 // "astronomically" race-free just because the two calls are adjacent: a
 // concurrently running package's own insert or index-state update can
 // land in the gap between them, and under combined `indexer`+`store`
-// load this reviewer measured it as roughly a 1-in-5 event, at BOTH of
-// two call sites that used to make this exact mistake (fix round 4).
-// Every comparison in this test now goes through this helper instead.
+// load this was measured as roughly a 1-in-5 event, at both of two call
+// sites that used to make this exact mistake. Every comparison in this
+// test now goes through this helper instead.
 func pendingSnapshot(t *testing.T, s *Store, afterID int64) (count int64, ids []int64) {
 	t.Helper()
 
@@ -638,8 +637,8 @@ func TestPendingEntryIDsRespectsLimit(t *testing.T) {
 }
 
 // Bumping the pipeline version makes every already-indexed entry pending
-// again, without any change to the entry's own content (whole-branch fix
-// wave, finding 6). This is the mechanism that stops a change to
+// again, without any change to the entry's own content. This is the
+// mechanism that stops a change to
 // internal/passage's ExtractText/Split from silently leaving stored
 // char_start/char_end offsets pointing into a plaintext nothing derives
 // that way any more.
@@ -823,9 +822,9 @@ func TestModelIdentityUnchangedLeavesIndexedEntryNotPending(t *testing.T) {
 // deliberately calling the two real exported methods directly rather than
 // a third hand-copied SQL fragment: PendingEntryIDs and PendingEntryCount
 // each carry their own copy of the "pending" predicate in production code,
-// and an earlier task in this project already had to fix a drift between
-// exactly those two copies. Comparing the actual methods, not a test-side
-// re-derivation of the query, is what would have caught that drift.
+// and those two copies have drifted apart before. Comparing the actual
+// methods, not a test-side re-derivation of the query, is what would
+// catch that drift.
 func TestPendingEntryIDsAndPendingEntryCountAgreeAfterModelIdentityChange(t *testing.T) {
 	s := testStore(t)
 	if err := s.Migrate(); err != nil {
@@ -905,7 +904,7 @@ func containsID(ids []int64, want int64) bool {
 // drive an ETA, without detoasting or hashing anything. The one case
 // where they legitimately differ — an entry edited since it was indexed —
 // is asserted explicitly, so the approximation's shape is recorded rather
-// than merely tolerated (whole-branch fix wave, finding 5).
+// than merely tolerated.
 func TestPendingEntryCountApproxTracksTheExactCount(t *testing.T) {
 	s := testStore(t)
 	if err := s.Migrate(); err != nil {

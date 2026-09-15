@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package mcpserver builds the MCP server cmd/mcp runs over stdio (task
-// 15): three tools -- search, similar and fetch_article -- that wrap the
+// Package mcpserver builds the MCP server cmd/mcp runs over stdio: three
+// tools -- search, similar and fetch_article -- that wrap the
 // sidecar's own read-only HTTP API (internal/sidecarclient) so a Claude
 // Code agent can search and read this reader's article corpus.
 //

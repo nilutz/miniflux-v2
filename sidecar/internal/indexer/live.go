@@ -14,7 +14,7 @@ import (
 // livePageSize bounds how many pending entry ids RunLive fetches per tick.
 // At a few hundred entries a day (spec §9.1) this is generous headroom for
 // a single poll; sustained backlog clearing across the whole corpus is the
-// backfill lane's job (Task 6), not this one's.
+// backfill lane's job, not this one's.
 const livePageSize = 50
 
 // Retry backoff for entries that fail to index, expressed as multiples of
@@ -43,11 +43,11 @@ const (
 // §13.1's requirement 3: the page must say which lane is paused and why).
 // The live lane has no backlog/throughput concept like Backfill.Stats()
 // -- it only ever auto-pauses for the one reason Backfill can also
-// auto-pause for, plus (Task 9) the same operator pause Backfill has
-// always had, so this carries just those.
+// auto-pause for, plus the same operator pause Backfill has always had,
+// so this carries just those.
 type LiveStats struct {
 	// Paused is true between Pause() and the matching Resume() -- an
-	// OPERATOR pause (Task 9), mirroring Backfill.Stats().Paused exactly;
+	// OPERATOR pause, mirroring Backfill.Stats().Paused exactly;
 	// see EmbedderPaused below for the lane's own automatic one.
 	Paused bool
 
@@ -81,7 +81,7 @@ type LiveStats struct {
 // able to show DIFFERENT pause states at the same time, so each needs its
 // own place to keep one.
 //
-// Task 9 (spec §13.1) additionally gave it an OPERATOR pause -- paused/
+// This additionally gave it an OPERATOR pause (spec §13.1) -- paused/
 // resumeCh below -- mirroring Backfill's own Pause/Resume/resumeCh
 // exactly, rather than inventing a second pause mechanism: the live lane
 // previously had no way for anything outside itself to stop it starting
@@ -98,7 +98,7 @@ type LiveMonitor struct {
 	embedderPauseReason string
 	requiresRestart     bool
 
-	// paused/resumeCh are the operator pause (Task 9), guarded by the same
+	// paused/resumeCh are the operator pause, guarded by the same
 	// mu as the fields above -- structurally identical to Backfill's own
 	// paused/resumeCh (see backfill.go's Pause/Resume/waitWhilePaused):
 	// Pause sets paused and lets a batch/tick already in flight finish;
@@ -113,7 +113,7 @@ type LiveMonitor struct {
 func NewLiveMonitor() *LiveMonitor { return &LiveMonitor{resumeCh: make(chan struct{})} }
 
 // Pause requests that the live lane stop starting new attempts -- the
-// live-lane counterpart to Backfill.Pause, added for Task 9's embedder
+// live-lane counterpart to Backfill.Pause, added for the embedder
 // switch (Manager.Switch quiesces both lanes the same way before
 // swapping). A tick already in progress is allowed to finish attempting
 // the ids it already fetched (checked between ticks, never mid-tick, the
@@ -251,7 +251,7 @@ type retryState struct {
 //
 // Its starting cursor is the highest entry id that already exists at
 // startup (store.MaxEntryID), not 0. This is deliberate coordination with
-// the Backfill lane (Task 6 fix round 1, finding 3): both lanes' default
+// the Backfill lane: both lanes' default
 // starting point was 0, so on a freshly deployed instance with an existing
 // backlog, RunLive's very first ticks would fetch and attempt to index the
 // OLDEST pending entries — exactly the rows Backfill is, separately and
@@ -276,7 +276,7 @@ type retryState struct {
 // to starting at 0 rather than refusing to start the live lane at all.
 //
 // This coordination is safe only because of an invariant Backfill upholds
-// on its side (Task 6 fix round 2): Backfill always rescans from its own
+// on its side: Backfill always rescans from its own
 // starting cursor on every process start — it persists no cursor of its
 // own across restarts, and never skips a run just because an earlier one
 // reported Done. If a future change ever violates that (persisting a
@@ -312,7 +312,7 @@ func RunLive(ctx context.Context, ix *Indexer, interval time.Duration, monitor *
 // a poller that keeps running for a test's duration still sees anything
 // ELSE created system-wide above that bound while it runs. Under Go's
 // default cross-package test parallelism something else reliably is: this
-// was proven directly (see live_test.go and Task 5's fix-round-1 report)
+// was proven directly (see live_test.go)
 // — internal/store's own fixtures commonly carry a hash that never matches
 // their entry's real content_hash (e.g. "hash-good"), which makes those
 // rows look permanently pending to PendingEntryIDs, and an unbounded live
@@ -350,7 +350,7 @@ func runLive(ctx context.Context, ix *Indexer, interval time.Duration, startAfte
 
 		// Checked once per tick, never mid-tick -- the same discipline
 		// Backfill applies between batches (spec §9.2) -- so an operator
-		// pause (Task 9) never interrupts ids already being attempted,
+		// pause never interrupts ids already being attempted,
 		// only stops the NEXT tick from starting. Blocks here until
 		// Resume(); a nil monitor never blocks.
 		if !monitor.waitWhilePaused(ctx) {

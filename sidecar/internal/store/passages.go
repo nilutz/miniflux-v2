@@ -13,8 +13,8 @@ import (
 )
 
 // PassageRow is one passage ready to be written to search.passages: its
-// text, its byte offsets into its own source string, its source ("title" or
-// "content" — task 1.5), and its already-computed embedding. It is the
+// text, its byte offsets into its own source string, its source ("title"
+// or "content"), and its already-computed embedding. It is the
 // store package's own row type so that package store never imports package
 // passage — the indexer converts between passage.Passage and PassageRow.
 //

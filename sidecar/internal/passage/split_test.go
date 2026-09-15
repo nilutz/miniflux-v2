@@ -88,10 +88,10 @@ func TestSplitBreaksOnSentenceBoundaries(t *testing.T) {
 }
 
 func TestSplitHandlesMultiByteUTF8Offsets(t *testing.T) {
-	// Beyond the brief: sentences packed with multi-byte UTF-8 runes (café,
-	// naïve, Zürich, 日本語) exercise the same offset machinery as the ASCII
-	// round-trip test above, but only this one would catch a byte offset
-	// landing mid-rune.
+	// Sentences packed with multi-byte UTF-8 runes (café, naïve, Zürich,
+	// 日本語) exercise the same offset machinery as the ASCII round-trip
+	// test above, but only this one would catch a byte offset landing
+	// mid-rune.
 	sentence := "The café in Zürich serves naïve travelers 日本語 pastries. "
 	text := strings.TrimSpace(strings.Repeat(sentence, 200))
 
@@ -125,16 +125,14 @@ func TestSplitHandlesMultiByteUTF8Offsets(t *testing.T) {
 // opts.TokenCounter when one is set, rather than silently falling back to
 // the word-based estimate regardless of what was injected — the failure
 // mode a "the units are honest now" claim would be cosmetic without a
-// test that discriminates against it (nomic migration plan, task 3
-// brief).
+// test that discriminates against it.
 //
 // This package cannot exercise a real tokenizer-backed TokenCounter
 // itself (see TokenCounter's own doc comment for why); this test proves
 // the general mechanism with a synthetic one, hermetically. See
 // cmd/sidecar's TestSplitPassageAtCapNeverExceedsNomicsRealTokenLimit for
-// the counterpart that injects the real nomic tokenizer and proves the
-// deliverable the task brief actually asks for: a passage at the cap
-// does not exceed the model's real token limit.
+// the counterpart that injects the real nomic tokenizer and proves a
+// passage at the cap does not exceed the model's real token limit.
 func TestSplitHonoursInjectedTokenCounter(t *testing.T) {
 	// Every "sentence" is the single word "Word" plus its terminator, so
 	// the word-based default estimator (one word = one "token") would

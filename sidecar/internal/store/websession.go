@@ -13,8 +13,8 @@ import (
 	"strings"
 )
 
-// This file exists so a rebase conflict is findable in one place (task
-// 18): it is the ONLY thing in the sidecar that reads Miniflux's
+// This file exists so a rebase conflict is findable in one place: it is
+// the ONLY thing in the sidecar that reads Miniflux's
 // web_sessions table, and it deliberately mirrors -- by name, hash
 // scheme and cookie format, not by re-deriving them -- four upstream
 // files on the fork this module cannot import (a Go module boundary
@@ -42,7 +42,7 @@ import (
 // where that cookie is read from an incoming request) and returns the id
 // of the user it is bound to.
 //
-// This is the sidecar's "no second login" path (task 18): a browser
+// This is the sidecar's "no second login" path: a browser
 // already signed into Miniflux carries this cookie, and reusing it here
 // -- read-only, exactly as Miniflux's own web_session_middleware.go reads
 // it -- is what lets that same browser open the sidecar's admin page

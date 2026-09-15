@@ -1,20 +1,19 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// This file is task 17's own required test coverage, extended by task 18:
-// every protected data endpoint (GET /api/search, /api/similar,
-// /api/article) rejects a missing or unknown credential (API key OR
-// session cookie), accepts and correctly SCOPES a valid one of either
-// kind, and stops accepting a credential the instant its underlying row
-// (api_keys or web_sessions) is gone (simulated here via
-// fakeKeyValidator.revoke / fakeSessionValidator.expire). Task 18 adds:
-// every control endpoint and the status page -- left unauthenticated by
-// task 17 -- now require an ADMIN credential specifically
-// (TestControlAndStatusEndpointsRequireAdmin), superseding task 17's own
-// ruling (see server.go's Server doc comment for why). Per the brief:
-// assert every case PER endpoint, not once for the group -- this project
-// has repeatedly shipped a guard that covered one call site out of
-// several.
+// This file is the required test coverage for the sidecar's
+// authentication and authorisation gates: every protected data endpoint
+// (GET /api/search, /api/similar, /api/article) rejects a missing or
+// unknown credential (API key OR session cookie), accepts and correctly
+// SCOPES a valid one of either kind, and stops accepting a credential the
+// instant its underlying row (api_keys or web_sessions) is gone
+// (simulated here via fakeKeyValidator.revoke / fakeSessionValidator.expire).
+// It also covers every control endpoint and the status page, which
+// require an ADMIN credential specifically
+// (TestControlAndStatusEndpointsRequireAdmin -- see server.go's Server
+// doc comment for why). Per the brief: assert every case PER endpoint,
+// not once for the group -- this project has repeatedly shipped a guard
+// that covered one call site out of several.
 package web // import "miniflux.app/v2/sidecar/internal/web"
 
 import (
@@ -200,7 +199,7 @@ func TestProtectedEndpointFailsClosedWithoutKeyValidator(t *testing.T) {
 	}
 }
 
-// --- Task 18: session-cookie authentication on the data endpoints ---
+// --- session-cookie authentication on the data endpoints ---
 
 // testSessionCookieValue/testSessionUserID and testOtherSessionCookieValue/
 // testOtherSessionUserID are the fixed session-cookie fixtures the tests
@@ -221,9 +220,9 @@ func withSessionCookie(req *http.Request, value string) {
 
 // TestProtectedEndpointsAcceptValidSessionCookie is
 // TestProtectedEndpointsAcceptValidToken's session-cookie counterpart
-// (task 18's "no login" requirement): a request carrying no X-Auth-Token
-// header at all, but a valid MinifluxSessionID cookie, must pass the
-// same gate every protected data endpoint uses.
+// (the "no login" requirement): a request carrying no X-Auth-Token header
+// at all, but a valid MinifluxSessionID cookie, must pass the same gate
+// every protected data endpoint uses.
 func TestProtectedEndpointsAcceptValidSessionCookie(t *testing.T) {
 	for _, pr := range protectedRequests {
 		t.Run(pr.name, func(t *testing.T) {
@@ -376,13 +375,12 @@ func TestSessionCookieScopesArticleLookupToItsOwnUser(t *testing.T) {
 	}
 }
 
-// --- Task 18: requireAdmin on every control endpoint and the status page ---
+// --- requireAdmin on every control endpoint and the status page ---
 
-// controlAndStatusRequests is every route task 17 left unauthenticated
-// and task 18 now gates behind requireAdmin -- the same nine routes
-// TestControlAndStatusEndpointsRemainUnauthenticated (task 17) asserted
-// stayed OPEN; this is that test's replacement, since task 17's ruling is
-// now explicitly superseded (server.go's Server doc comment).
+// controlAndStatusRequests is every route gated behind requireAdmin --
+// see server.go's Server doc comment for why these endpoints require an
+// admin credential rather than staying unauthenticated or accepting any
+// valid one.
 var controlAndStatusRequests = []struct {
 	name   string
 	method string
@@ -444,13 +442,11 @@ func newControlRequest(c struct {
 	return httptest.NewRequest(c.method, c.target, nil)
 }
 
-// TestControlAndStatusEndpointsRequireAdmin is task 18's central
-// authorisation guard, replacing task 17's
-// TestControlAndStatusEndpointsRemainUnauthenticated (that ruling is now
-// explicitly superseded -- see server.go's Server doc comment for why).
-// Asserted PER endpoint, PER case, exactly as the brief requires ("this
-// project has repeatedly shipped guards covering one route out of
-// several, every time caught only by mutation"):
+// TestControlAndStatusEndpointsRequireAdmin is the central authorisation
+// guard for these routes (see server.go's Server doc comment for why they
+// require admin). Asserted PER endpoint, PER case, exactly as the brief
+// requires ("this project has repeatedly shipped guards covering one
+// route out of several, every time caught only by mutation"):
 //
 //   - no credential at all -> 401
 //   - a valid, non-admin credential -> 403, never 200

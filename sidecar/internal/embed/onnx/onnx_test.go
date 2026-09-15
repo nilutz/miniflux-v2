@@ -164,10 +164,10 @@ func equalStrings(a, b []string) bool {
 
 // nomicModelPath returns SIDECAR_NOMIC_MODEL_PATH, skipping the test if
 // unset. This is deliberately a second, separate variable from
-// SIDECAR_MODEL_PATH: this task (nomic migration plan, task 1) adds
-// nomic's prefix table ahead of task 2's actual model swap, so the
-// model under test everywhere else in this file stays bge-small — this
-// test alone needs an actual nomic-embed-text-v1.5 model file on disk,
+// SIDECAR_MODEL_PATH: nomic's prefix table exists ahead of the actual
+// model swap, so the model under test everywhere else in this file
+// stays bge-small — this test alone needs an actual nomic-embed-text-v1.5
+// model file on disk,
 // at a path whose directory is named exactly "nomic-embed-text-v1.5"
 // (promptPrefixesForModel keys off that directory basename, the same
 // string embed.Identity's "name" component is built from).
@@ -180,9 +180,10 @@ func nomicModelPath(t *testing.T) string {
 	return path
 }
 
-// TestEmbedAppliesDistinctPromptPrefixesForNomic is this task's flagship
-// discrimination test, at the boundary that actually matters: not what a
-// fake embedder was handed, but what reaches the real tokenizer. Rather
+// TestEmbedAppliesDistinctPromptPrefixesForNomic is the flagship
+// discrimination test for prompt-prefix wiring, at the boundary that
+// actually matters: not what a fake embedder was handed, but what
+// reaches the real tokenizer. Rather
 // than only comparing EmbedDocuments against EmbedQuery to each other
 // (which a bug dropping BOTH prefixes identically would still pass —
 // their outputs would still agree, just wrongly), it pins each method
@@ -199,9 +200,8 @@ func nomicModelPath(t *testing.T) string {
 //
 // If either public method's prefix is ever dropped, transposed, or
 // hardcoded somewhere it doesn't apply, its output stops matching the
-// hand-prefixed reference and this test fails loudly — the exact
-// silent-degradation hazard this task exists to close, which otherwise
-// has no symptom anywhere in production.
+// hand-prefixed reference and this test fails loudly — a silent
+// degradation that otherwise has no symptom anywhere in production.
 func TestEmbedAppliesDistinctPromptPrefixesForNomic(t *testing.T) {
 	modelPath := nomicModelPath(t)
 
@@ -283,12 +283,11 @@ func vectorsAlmostEqual(a, b []float32) bool {
 
 // noPrefixModelPath returns SIDECAR_NOPREFIX_MODEL_PATH, skipping the test
 // if unset. This is deliberately a third, separate variable from both
-// SIDECAR_MODEL_PATH and SIDECAR_NOMIC_MODEL_PATH: the nomic migration plan
-// (task 2) made nomic-embed-text-v1.5 — a model modelPromptPrefixes DOES
-// list — the model SIDECAR_MODEL_PATH points at in production and in this
-// package's own gated tests, so it can no longer stand in for "a model with
-// no prefix requirement" the way it could before that task (when the
-// production model was bge-small-en-v1.5, absent from the table).
+// SIDECAR_MODEL_PATH and SIDECAR_NOMIC_MODEL_PATH: nomic-embed-text-v1.5 —
+// a model modelPromptPrefixes DOES list — is the model SIDECAR_MODEL_PATH
+// points at in production and in this package's own gated tests, so it
+// can no longer stand in for "a model with no prefix requirement" the way
+// bge-small-en-v1.5 (absent from the table) used to.
 // TestEmbedDocumentsAndEmbedQueryAgreeWithoutPrefixes needs a real model
 // that genuinely has no entry in modelPromptPrefixes to prove
 // withPrefix's empty-prefix branch is a true no-op at the tokenizer
@@ -305,16 +304,16 @@ func noPrefixModelPath(t *testing.T) string {
 
 // TestEmbedDocumentsAndEmbedQueryAgreeWithoutPrefixes is
 // TestEmbedAppliesDistinctPromptPrefixesForNomic's counterpart for a model
-// absent from modelPromptPrefixes (bge-small-en-v1.5 was that model prior
-// to the nomic migration plan's task 2; see noPrefixModelPath's own doc
+// absent from modelPromptPrefixes (bge-small-en-v1.5 was that model before
+// nomic became the production one; see noPrefixModelPath's own doc
 // comment for why this test no longer reuses SIDECAR_MODEL_PATH for it):
 // such a model must produce IDENTICAL vectors from EmbedDocuments and
 // EmbedQuery for the same text, proving withPrefix's empty-prefix branch
 // is a true no-op at the real tokenizer boundary, not just in
 // TestPromptPrefixesForModel's pure-function check. If a future change
-// hardcoded a prefix into the generic path instead of gating it by model
-// — the mistake this task's brief explicitly warns against — this is the
-// test that would catch it for a model that must never see one.
+// hardcoded a prefix into the generic path instead of gating it by model,
+// this is the test that would catch it for a model that must never see
+// one.
 func TestEmbedDocumentsAndEmbedQueryAgreeWithoutPrefixes(t *testing.T) {
 	modelPath := noPrefixModelPath(t)
 

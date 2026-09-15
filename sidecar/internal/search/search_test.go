@@ -169,8 +169,8 @@ func corpusEmbedder(queryVec []float32) *fixedVectorEmbedder {
 }
 
 // TestSearchHybridAtLargeLimitStaysWithinPgvectorsEfSearchCeiling is a
-// regression guard for a Critical found in review: pgvector 0.8.4 caps
-// hnsw.ef_search at 1000 (pg_settings: min_val 1, max_val 1000), but the
+// regression guard: pgvector 0.8.4 caps hnsw.ef_search at 1000
+// (pg_settings: min_val 1, max_val 1000), but the
 // candidate count handed to SET LOCAL compounded two 5x multipliers
 // (searchCandidateMultiplier at the fusion boundary, candidateMultiplier
 // inside Semantic) for an effective 25x amplification of Request.Limit,
@@ -188,10 +188,9 @@ func corpusEmbedder(queryVec []float32) *fixedVectorEmbedder {
 // mid-query, reinstating exactly the silent-truncation bug the SET LOCAL
 // work existed to eliminate.
 //
-// Limit = 100 is deliberate. The pre-existing regression test
-// (TestSemanticRaisesEfSearchForTheOverfetchWindow) uses limit = 40,
-// which sits one single unit below the break -- which is precisely why
-// this survived review once already.
+// Limit = 100 is deliberate: the pre-existing regression test
+// (TestSemanticRaisesEfSearchForTheOverfetchWindow) uses limit = 40, one
+// unit below the break, so it could not catch this.
 func TestSearchHybridAtLargeLimitStaysWithinPgvectorsEfSearchCeiling(t *testing.T) {
 	s := testStore(t)
 	db := testDB(t)
@@ -213,8 +212,8 @@ func TestSearchHybridAtLargeLimitStaysWithinPgvectorsEfSearchCeiling(t *testing.
 	t.Logf("ModeHybrid Limit=%d returned %d entries with no error", limit, len(resp.Entries))
 }
 
-// TestSearchEveryModeFillsTheRequestedLimit guards the measurement-
-// invalidating bug found in review: ModeKeyword and ModeSemantic passed
+// TestSearchEveryModeFillsTheRequestedLimit guards a measurement-
+// invalidating bug: ModeKeyword and ModeSemantic passed
 // Request.Limit straight through to retrieval and only then aggregated
 // passages into entries, so every entry contributing more than one
 // matching passage collapsed several retrieved rows into a single
@@ -223,8 +222,8 @@ func TestSearchHybridAtLargeLimitStaysWithinPgvectorsEfSearchCeiling(t *testing.
 // over-fetched by searchCandidateMultiplier before aggregating --
 // returned ten.
 //
-// Beyond being a plain user-visible bug, this structurally confounded the
-// task 4 evaluation: hybrid's recall@10 was compared against keyword and
+// Beyond being a plain user-visible bug, this structurally confounded any
+// recall evaluation: hybrid's recall@10 was compared against keyword and
 // semantic baselines that could not fill more than three or four of their
 // ten slots, so spec §6.3's central claim had never actually been tested.
 //

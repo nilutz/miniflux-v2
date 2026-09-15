@@ -15,9 +15,8 @@
 //
 // "task" is "document" (embed.TaskDocument) or "query" (embed.TaskQuery),
 // set by which of EmbedDocuments/EmbedQuery the caller invoked. It exists
-// because an asymmetric model — nomic-embed-text-v1.5, the model the
-// nomic migration plan's task 1 added this for — must embed a document
-// differently than it embeds a query for the identical string (it
+// because an asymmetric model — nomic-embed-text-v1.5 — must embed a
+// document differently than it embeds a query for the identical string (it
 // requires "search_document: "/"search_query: " prepended respectively),
 // and only the remote knows what, if anything, the model it is actually
 // running needs done with that distinction: this client deliberately
@@ -73,14 +72,13 @@ import (
 // confusing type error instead of this being caught as the model change
 // it is.
 //
-// Exported (Task 9) so internal/indexer's Manager can show the admin
-// page's Model section what the schema actually requires, and so a
-// probe/switch's dimension-mismatch refusal is traceable to one constant
-// rather than a second, independently maintained literal -- the nomic
-// migration plan (task 2) raised this from 384 to 768 in lockstep with
-// the schema migration that widened search.passages.embedding, and every
-// reader of this constant moved with it instead of silently disagreeing
-// with the new column width.
+// Exported so internal/indexer's Manager can show the admin page's Model
+// section what the schema actually requires, and so a probe/switch's
+// dimension-mismatch refusal is traceable to one constant rather than a
+// second, independently maintained literal — this was raised from 384 to
+// 768 in lockstep with the schema migration that widened
+// search.passages.embedding, and every reader of this constant moved
+// with it instead of silently disagreeing with the new column width.
 const WantDimensions = 768
 
 // DefaultTimeout is used for every request, including New's own startup

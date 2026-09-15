@@ -109,9 +109,9 @@ type config struct {
 // platforms (macOS) where the native library isn't found at hugot's
 // Linux-only default search path. SIDECAR_ADMIN_ADDR is also optional and
 // defaults to web.DefaultAddr (loopback-only): the status/admin page is
-// gated by task 18's requireAdmin regardless of where it binds, but
-// binding it anywhere reachable off the local machine is still an
-// operator's deliberate override, never this binary's default (see
+// gated by requireAdmin regardless of where it binds, but binding it
+// anywhere reachable off the local machine is still an operator's
+// deliberate override, never this binary's default (see
 // docker-compose.yaml's production sidecar service for the override
 // production actually uses, to publish the port behind that same gate).
 func loadConfig() (config, error) {
@@ -261,8 +261,7 @@ type resolvedEmbedderChoice struct {
 // which sets the two to DIFFERENT values and asserts which one actually
 // took effect. A test that sets only one of them (leaving the other at
 // its zero value) cannot tell "persisted wins" apart from "whichever one
-// happened to be non-empty wins" — that is the trap the task 9 brief
-// calls out by name.
+// happened to be non-empty wins".
 func resolveEmbedderChoice(cfg config, persisted *store.EmbedderSettings) resolvedEmbedderChoice {
 	if persisted != nil {
 		return resolvedEmbedderChoice{kind: persisted.Kind, remoteURL: persisted.RemoteURL}
@@ -325,7 +324,7 @@ func run() error {
 		return fmt.Errorf("sidecar: unable to run migrations: %w", err)
 	}
 
-	// Task 9, spec §13.1: "the persisted row wins; SIDECAR_EMBEDDER and
+	// spec §13.1: "the persisted row wins; SIDECAR_EMBEDDER and
 	// SIDECAR_REMOTE_EMBEDDER_URL are the initial default used only when
 	// no row exists." Without this, the compose stack's
 	// `restart: unless-stopped` would silently revert an operator's
@@ -372,18 +371,18 @@ func run() error {
 		// the only visible symptom that this binary was built without
 		// -tags ORT and is running roughly 10x slower than expected — see
 		// internal/embed/onnx/backend_noort.go. The admin page's Model
-		// section (Task 9) shows the same value continuously, not only in
-		// this one startup log line.
+		// section shows the same value continuously, not only in this one
+		// startup log line.
 		slog.Info("sidecar: embedder ready", slog.String("backend", backend))
 	}
 
 	ix := indexer.New(s, embedder)
-	// ix.Close, not a deferred embedder.Close(): Task 9's live embedder
-	// switch (Manager.Switch) can replace ix's configured embedder any
-	// number of times before shutdown, and closing the ORIGINAL embedder
-	// here would either double-close it (if it is still active) or leak
-	// whichever one actually ended up active. Indexer.Close always closes
-	// whichever embedder is configured right now.
+	// ix.Close, not a deferred embedder.Close(): the live embedder switch
+	// (Manager.Switch) can replace ix's configured embedder any number of
+	// times before shutdown, and closing the ORIGINAL embedder here would
+	// either double-close it (if it is still active) or leak whichever one
+	// actually ended up active. Indexer.Close always closes whichever
+	// embedder is configured right now.
 	defer ix.Close()
 
 	// liveMonitor tracks the live lane's own embedder-pause state,
@@ -421,24 +420,24 @@ func run() error {
 	// embedding — one ONNX Runtime session shared by every query and
 	// index path, not a second one stood up for search. s itself also
 	// satisfies web.EntryLookup (EntryForIndexing, EntryIndexState),
-	// web.ArticleLookup (EntryArticle — task 15's GET /api/article) and
+	// web.ArticleLookup (EntryArticle — GET /api/article) and
 	// web.DatabaseMetricsSource (DatabaseMetrics — spec §13.2) with no
 	// adaptation, so it is passed to web.New three more times for those.
 	//
 	// ix.AsEmbedder(), not the raw embedder value: the Searcher must keep
-	// working correctly across a live embedder switch (Task 9) too — a
-	// static embed.Embedder value fixed here would keep calling EmbedQuery
-	// on a *closed* embedder the moment Manager.Switch replaces it, which
-	// is a segfault for the ONNX backend, not an error.
+	// working correctly across a live embedder switch too — a static
+	// embed.Embedder value fixed here would keep calling EmbedQuery on a
+	// *closed* embedder the moment Manager.Switch replaces it, which is a
+	// segfault for the ONNX backend, not an error.
 	searcher := search.NewSearcher(s, search.WithEmbedder(ix.AsEmbedder()))
 
-	// manager owns the live embedder switch end to end (Task 9, spec
-	// §13.1): the admin page's Model section reads its Info, tests a
-	// candidate through its Preview, and applies a choice through its
-	// Switch, which quiesces both lanes, guarantees no in-flight embed
-	// call before closing the previous embedder, publishes the new one
-	// through ix's synchronised accessor, records its identity with the
-	// store, persists the choice, and resumes both lanes.
+	// manager owns the live embedder switch end to end (spec §13.1): the
+	// admin page's Model section reads its Info, tests a candidate through
+	// its Preview, and applies a choice through its Switch, which quiesces
+	// both lanes, guarantees no in-flight embed call before closing the
+	// previous embedder, publishes the new one through ix's synchronised
+	// accessor, records its identity with the store, persists the choice,
+	// and resumes both lanes.
 	// searcher (built above) is passed as the QueryCacheInvalidator too:
 	// a live switch must clear its query cache on every successful
 	// install (spec §13.1) -- see Manager.installEmbedder and
@@ -449,11 +448,11 @@ func run() error {
 		RemoteURL: choice.remoteURL,
 	}, searcher)
 
-	// The final three s's: task 17's APIKeyValidator and task 18's
-	// SessionValidator and AdminChecker. All three are satisfied by
-	// *store.Store with no adaptation -- ValidateAPIKey, ValidateWebSessionCookie
-	// and IsAdmin are all read-only lookups against tables Miniflux itself
-	// owns (public.api_keys, public.web_sessions, public.users) — see
+	// The final three s's: APIKeyValidator, SessionValidator and
+	// AdminChecker. All three are satisfied by *store.Store with no
+	// adaptation -- ValidateAPIKey, ValidateWebSessionCookie and IsAdmin
+	// are all read-only lookups against tables Miniflux itself owns
+	// (public.api_keys, public.web_sessions, public.users) — see
 	// web.Server's own doc comment for which endpoints require which of
 	// these, and why.
 	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s, s, manager, s, s, s)

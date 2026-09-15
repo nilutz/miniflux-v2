@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// This file implements GET /api/article?entry_id= (task 15): a minimal,
-// read-only complement to GET /api/search and GET /api/similar
+// This file implements GET /api/article?entry_id=: a minimal, read-only
+// complement to GET /api/search and GET /api/similar
 // (search_handlers.go). Those two return snippets and scores, not full
 // text — an agent (or any other caller) that finds a promising result has
 // no way to read it. This endpoint closes that gap: given an entry id, it
@@ -46,7 +46,7 @@ func toArticleResponseView(d *store.ArticleDetail) articleResponseView {
 
 // handleArticle serves GET /api/article. See this file's package-level
 // doc comment for why it carries no sameOriginOrNoOrigin check. It DOES
-// carry requireAuthenticatedUser (task 17, extended by task 18 -- auth.go): the entry lookup below is
+// carry requireAuthenticatedUser (auth.go): the entry lookup below is
 // scoped to the authenticated caller's own user id, exactly like
 // handleSearch/handleSimilar's own resolveAuthenticatedUserID — see
 // store.Store.EntryArticle's doc comment for why an entry belonging to a

@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// This file is hermetic on purpose (spec §11, task brief): no database, no
+// This file is hermetic on purpose (spec §11): no database, no
 // embedder, no network. It must pass with `go test ./internal/search/eval/`
 // alone, without -tags ORT and without SIDECAR_TEST_DATABASE_URL set.
 
@@ -161,7 +161,7 @@ func TestNewReportOfNoQueriesIsZeroNotNaN(t *testing.T) {
 
 // TestLoadQueriesLoadsTheRealEvalSet ties this hermetic test file to the
 // actual committed dataset: it is the one check that would fail if
-// testdata/queries.json regressed below the task's 25-query minimum, or
+// testdata/queries.json regressed below the required 25-query minimum, or
 // picked up a labelling error LoadQueries itself would reject. Still
 // hermetic — testdata/queries.json is a static file, not a live corpus.
 func TestLoadQueriesLoadsTheRealEvalSet(t *testing.T) {

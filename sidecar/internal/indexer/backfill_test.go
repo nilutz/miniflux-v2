@@ -174,8 +174,8 @@ func (d *variableDelayEmbedder) Dimensions() int  { return 768 }
 func (d *variableDelayEmbedder) Identity() string { return testModelIdentity }
 func (d *variableDelayEmbedder) Close() error     { return nil }
 
-// backfillUnavailableEmbedder stands in for a networked embedder (Task 2's
-// internal/embed/remote) that is down: every Embed call fails, wrapping
+// backfillUnavailableEmbedder stands in for a networked embedder
+// (internal/embed/remote) that is down: every Embed call fails, wrapping
 // embed.ErrUnavailable exactly as remote.go's own error sites do, for as
 // long as healthy is false -- an entire outage, not one bad entry, unlike
 // live_test.go's marker-scoped fakes. Flipping healthy to true simulates
@@ -263,8 +263,7 @@ func TestBackfillProcessesEveryPendingEntryAndTerminates(t *testing.T) {
 	// package can consume an id from the same shared entries sequence in
 	// between these calls, leaving a gap. Checking firstID+i against that
 	// gap silently checks a foreign row (or no row at all) instead of one
-	// of ours, which is exactly what caused this test to flake — see this
-	// fix round's report.
+	// of ours, which is exactly what caused this test to flake.
 	const n = 4
 	ids := make([]int64, n)
 	for i := 0; i < n; i++ {
@@ -363,8 +362,8 @@ func TestBackfillResumesFromCheckpointAfterInterruption(t *testing.T) {
 	cancel1() // interrupts the blocked embed call and, with it, the whole lane
 	waitDone(t, done1, 5*time.Second, "phase 1 Backfill.start")
 
-	// Interrupted by cancellation, not a genuine embedding failure: fix
-	// round 1, finding 8 changed IndexEntry to leave entry_index_state
+	// Interrupted by cancellation, not a genuine embedding failure:
+	// IndexEntry leaves entry_index_state
 	// untouched in this case rather than writing status='failed', so a
 	// graceful shutdown never manufactures a spurious failed row. The
 	// entry is exactly as untouched as one that was never attempted.
@@ -462,7 +461,7 @@ func TestBackfillPauseStopsWorkResumeContinues(t *testing.T) {
 	waitDone(t, done, 2*time.Second, "Backfill.start")
 }
 
-// 3a. (Task 3, spec §13.1.) An embedder-unavailable error pauses the lane
+// 3a. (spec §13.1.) An embedder-unavailable error pauses the lane
 // automatically -- distinguishable from Pause() via Stats().EmbedderPaused
 // vs. Stats().Paused -- leaves entries pending (never 'failed', never
 // counted in Stats().Failed), and resumes automatically the moment the
@@ -545,7 +544,7 @@ func TestBackfillPausesForEmbedderUnavailableAndResumesAutomatically(t *testing.
 	waitDone(t, done, 2*time.Second, "Backfill.start")
 }
 
-// 3b. (Task 3 review round 2, spec §13.1.) A mid-run model-identity
+// 3b. (spec §13.1.) A mid-run model-identity
 // change is a DIFFERENT pause from a plain outage in one specific way an
 // operator needs without reading prose: it never clears on its own, no
 // matter how long the lane keeps retrying, because nothing on this side
@@ -630,7 +629,7 @@ func TestBackfillRespectsScheduleWindow(t *testing.T) {
 // error/skip counts by cause.
 //
 // The failing entry here is durably, permanently broken (failMarkerEmbedder
-// never recovers), so — per fix round 1, finding 2 — Backfill.start will
+// never recovers), so Backfill.start will
 // legitimately never declare itself Done on its own: every sweep that
 // reaches its end having retried that entry resets and tries again. This
 // test therefore does not wait for natural termination; it polls Stats()
@@ -641,7 +640,7 @@ func TestBackfillStatsReportsProgressAndCauses(t *testing.T) {
 
 	okID := createTestEntry(t, db, "backfill-stats-ok",
 		"<p>A perfectly normal entry that indexes successfully.</p>")
-	// An empty title, not just script/style-only content: since task 1.5,
+	// An empty title, not just script/style-only content:
 	// a non-empty title alone is enough to index an entry (by its title)
 	// rather than skip it, so this fixture needs both to be unusable to
 	// still genuinely exercise the "skipped" outcome this test asserts on.
@@ -716,8 +715,7 @@ func TestBackfillStatsReportsProgressAndCauses(t *testing.T) {
 	}
 	// The permanently-broken entry means the backlog never actually
 	// drains: Done must stay false, not falsely report success while a
-	// failure is still pending (fix round 1, finding 2 — this is the
-	// exact assertion that used to encode the bug).
+	// failure is still pending.
 	if stats.Done {
 		t.Fatal("expected Stats().Done to remain false while a permanently-failing entry is still pending")
 	}
@@ -805,7 +803,7 @@ func TestBackfillReindexesEntryWithChangedContent(t *testing.T) {
 	}
 }
 
-// 7. (Fix round 1, finding 2.) Stats().Done must not go true while a
+// 7. Stats().Done must not go true while a
 // failed entry is still pending, and must become true once that entry is
 // genuinely retried and recovers. Before this fix, the cursor only ever
 // moved forward within one sweep: an entry that failed early in a pass
@@ -873,7 +871,7 @@ func TestBackfillDoneWaitsForFailedEntryRetry(t *testing.T) {
 	}
 }
 
-// 8. (Fix round 1, finding 10.) Start is not re-entrant: calling it again
+// 8. Start is not re-entrant: calling it again
 // while a previous call on the same Backfill is still running returns an
 // error immediately, rather than running two overlapping worker pools
 // against the same counters.
@@ -915,12 +913,12 @@ func TestBackfillStartIsNotReentrant(t *testing.T) {
 	waitDone(t, done, 2*time.Second, "first Backfill.start")
 }
 
-// 9. (Fix round 2, finding 1 -- regression fix.) The rescan loop backs off
+// 9. The rescan loop backs off
 // per entry instead of hammering a durably failing one every sweep, and
 // Stats().Failed does not grow without bound while the SAME cause keeps
 // repeating: it counts distinct problems, not attempts.
 //
-// Before this fix, fix round 1's Done-semantics change (finding 2) reset
+// Without this backoff, the naive Done-semantics rules reset
 // the cursor and reattempted every still-failing entry on every sweep,
 // gated only by a flat pollInterval pause between sweeps -- at a 20ms
 // test pollInterval that is dozens of embed calls a second, forever, for
@@ -984,7 +982,7 @@ func TestBackfillRescanBacksOffAndDoesNotInflateFailedCount(t *testing.T) {
 	}
 }
 
-// 10. (Fix round 2, finding 3.) Stats() no longer performs a blocking,
+// 10. Stats() no longer performs a blocking,
 // unbounded full-corpus scan on every call: its Remaining figure is
 // memoised behind a TTL, so a second call within that window returns the
 // cached value rather than re-querying, even though the real pending
@@ -1032,7 +1030,7 @@ func TestBackfillStatsMemoisesRemainingCount(t *testing.T) {
 	}
 }
 
-// 11. (Fix round 2, finding 4.) ThroughputPerSec reflects recent batches,
+// 11. ThroughputPerSec reflects recent batches,
 // not a lifetime average: once a slow phase is followed by a fast one,
 // the reported rate rises to track the fast phase rather than staying
 // pinned near the slow phase's rate the way dividing lifetime work by
@@ -1088,7 +1086,7 @@ func TestBackfillThroughputReflectsRecentBatchesNotLifetimeAverage(t *testing.T)
 	}
 }
 
-// 12. (Fix round 3, finding 1 -- regression against 21cd5600.) A tracked
+// 12. A tracked
 // failing entry that is later removed from the pending set ENTIRELY --
 // its row deleted, as by a feed removal or retention cleanup during this
 // lane's 4-41 hour runtime, not merely fixed -- must not pin Done open
@@ -1118,8 +1116,7 @@ func TestBackfillPrunesRetryStateForEntryRemovedFromPendingSet(t *testing.T) {
 		return entryStatus(t, db, failID) == "failed"
 	})
 	// Give it at least one more sweep to confirm it is genuinely tracked
-	// as outstanding (not a one-off race), matching the reviewer's own
-	// reproduction shape.
+	// as outstanding (not a one-off race).
 	waitFor(t, 2*time.Second, "the lane is still running with retries outstanding", func() bool {
 		return !b.Stats().Done
 	})
@@ -1151,7 +1148,7 @@ func TestBackfillPrunesRetryStateForEntryRemovedFromPendingSet(t *testing.T) {
 	}
 }
 
-// 13. (Fix round 1, review gap 1.) Exercises the PUBLIC Start(ctx) entry
+// 13. Exercises the PUBLIC Start(ctx) entry
 // point directly. Every other test in this file calls the internal
 // start(ctx, startAfter, upTo) via runStartAsync -- deliberately, to scope
 // each test to its own fixtures -- which means none of them would ever
@@ -1181,10 +1178,9 @@ func TestBackfillPrunesRetryStateForEntryRemovedFromPendingSet(t *testing.T) {
 //     state a `if !Stats().Done { return nil }`-shaped regression in
 //     Start would key off of.
 //
-// A correct Start(ctx) ignores both and indexes entryID anyway. See this
-// task's fix-round-1 report for the discrimination proof: temporarily
-// changing Start's hardcoded 0 to a large non-zero cursor makes this exact
-// test fail.
+// A correct Start(ctx) ignores both and indexes entryID anyway.
+// Temporarily changing Start's hardcoded 0 to a large non-zero cursor
+// makes this exact test fail.
 func TestBackfillStartAlwaysReSweepsFromZeroRegardlessOfPriorDone(t *testing.T) {
 	s, db := testEnv(t)
 
@@ -1229,7 +1225,7 @@ func TestBackfillStartAlwaysReSweepsFromZeroRegardlessOfPriorDone(t *testing.T) 
 
 // A content change BELOW the live lane's cursor, made after the backfill
 // lane has already reported Done, must be picked up by the same running
-// process — no restart (whole-branch fix wave, finding 3).
+// process — no restart.
 //
 // This is the exact shape of P0's scrape-backfill CLI: it rewrites
 // entries.content for old entries, which is precisely the range RunLive's
@@ -1282,7 +1278,7 @@ func TestBackfillNoticesContentChangeAfterDoneWithoutRestart(t *testing.T) {
 	// Wait on the committed row, not merely on the embedder call: the
 	// passages are written after the forward pass returns. Scoped to
 	// source='content': createTestEntry's fixture has a non-empty title,
-	// so ordinal 0 is now a title passage (task 1.5) that never carries
+	// so ordinal 0 is now a title passage that never carries
 	// either marker -- the body text lands in the content passages that
 	// follow it.
 	passageText := func() string {
@@ -1361,7 +1357,7 @@ func TestBackfillPauseAfterDoneStopsTheNextSweep(t *testing.T) {
 // exactly ONE refresh between them; the rest serve the previous value.
 // Before this, every expiry plus every ten-second admin-page reload could
 // start another unbounded scan on top of the last, against the database
-// Miniflux itself is serving from (whole-branch fix wave, finding 5).
+// Miniflux itself is serving from.
 func TestBackfillStatsRefreshesRemainingOnceUnderConcurrency(t *testing.T) {
 	s, db := testEnv(t)
 

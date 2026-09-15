@@ -9,14 +9,14 @@ import (
 	"miniflux.app/v2/sidecar/internal/store"
 )
 
-// TestResolveEmbedderChoicePrefersPersistedRowOverEnvironmentVariable is
-// the task 9 brief's own named trap: "a test asserting 'the persisted
-// setting wins over the environment variable' passes trivially if the
-// environment variable was never set in the test." cfg and persisted are
-// set here to DIFFERENT, genuinely conflicting values -- kind AND
-// remoteURL both disagree -- so this only passes if resolveEmbedderChoice
-// actually prefers the persisted row, not merely "whichever argument
-// happens to be non-empty".
+// TestResolveEmbedderChoicePrefersPersistedRowOverEnvironmentVariable
+// guards against a trap: a test asserting "the persisted setting wins
+// over the environment variable" passes trivially if the environment
+// variable was never set in the test. cfg and persisted are set here to
+// DIFFERENT, genuinely conflicting values -- kind AND remoteURL both
+// disagree -- so this only passes if resolveEmbedderChoice actually
+// prefers the persisted row, not merely "whichever argument happens to be
+// non-empty".
 func TestResolveEmbedderChoicePrefersPersistedRowOverEnvironmentVariable(t *testing.T) {
 	cfg := config{
 		embedderKind: "local",

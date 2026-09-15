@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// This file implements task 17's authentication (and, since task 18, its
-// authorisation) gates: the sidecar's data endpoints (GET /api/search,
-// /api/similar and /api/article) accept ANY credential Miniflux already
-// issues -- an API key or a browser's web session cookie -- and its
-// control endpoints and status page (task 18) additionally require that
-// credential's user to be a Miniflux administrator.
+// This file implements the sidecar's authentication and authorisation
+// gates: the sidecar's data endpoints (GET /api/search, /api/similar and
+// /api/article) accept ANY credential Miniflux already issues -- an API
+// key or a browser's web session cookie -- and its control endpoints and
+// status page additionally require that credential's user to be a
+// Miniflux administrator.
 //
 // Two credentials, both already Miniflux's, resolved by resolveCredential
 // below:
 //
-//   - API key (X-Auth-Token) -- task 17. Reads the same header Miniflux
-//     reads (authTokenHeader below, matching internal/api/middleware.go:41's
+//   - API key (X-Auth-Token). Reads the same header Miniflux reads
+//     (authTokenHeader below, matching internal/api/middleware.go:41's
 //     `r.Header.Get("X-Auth-Token")` on the fork exactly, in name and
 //     casing -- internal/sidecarclient already sends this same header on
 //     every request cmd/mcp makes, so a working Miniflux key works end to
@@ -20,8 +20,8 @@
 //     read-only, indexed lookup against public.api_keys (APIKeyValidator /
 //     store.Store.ValidateAPIKey) -- the same table Miniflux's own
 //     middleware reads.
-//   - Miniflux web session cookie (task 18) -- see session_auth.go for the
-//     cookie name and SessionValidator, and store/websession.go for the
+//   - Miniflux web session cookie -- see session_auth.go for the cookie
+//     name and SessionValidator, and store/websession.go for the
 //     read-only validation this couples to across the module boundary
 //     with Miniflux's own internal/ui and internal/model packages. This is
 //     what delivers "no login": a browser already signed into Miniflux
@@ -31,19 +31,15 @@
 // either check -- one Miniflux credential (of either kind) works against
 // both services.
 //
-// Authorisation (task 18, superseding task 17's ruling -- see server.go's
-// own doc comment on New for why that ruling is now void and what
-// replaces it): the status page, GET /api/status, and every control
-// endpoint (backfill pause/resume/config, the Task 9 embedder-switch
-// endpoints) now require requireAdmin below, not just requireAuthenticatedUser
-// -- ANY valid credential authenticates a caller, but only one whose user
+// Authorisation: the status page, GET /api/status, and every control
+// endpoint (backfill pause/resume/config, the embedder-switch endpoints)
+// require requireAdmin below, not just requireAuthenticatedUser -- ANY
+// valid credential authenticates a caller, but only one whose user
 // is_admin (AdminChecker / store.Store.IsAdmin) may reach these operator
-// surfaces. The three data endpoints keep task 17's behaviour unchanged:
-// requireAuthenticatedUser (renamed from task 17's requireAPIKey, now
-// that it also accepts a session cookie) admits any valid credential and
-// scopes the request to that credential's user -- see
-// resolveAuthenticatedUserID in search_handlers.go and handleArticle in
-// article_handler.go.
+// surfaces. The three data endpoints admit any valid credential and scope
+// the request to that credential's user via requireAuthenticatedUser --
+// see resolveAuthenticatedUserID in search_handlers.go and handleArticle
+// in article_handler.go.
 package web // import "miniflux.app/v2/sidecar/internal/web"
 
 import (
@@ -112,9 +108,9 @@ var errAuthValidatorUnavailable = errors.New("web: no validator configured for t
 
 // resolveCredential resolves the current request's caller identity from
 // either credential Miniflux issues (see this file's own package doc
-// comment): the X-Auth-Token API key header, checked first, or --
-// task 18 -- the MinifluxSessionID browser cookie (session_auth.go)
-// when no header is present. Both requireAuthenticatedUser and
+// comment): the X-Auth-Token API key header, checked first, or the
+// MinifluxSessionID browser cookie (session_auth.go) when no header is
+// present. Both requireAuthenticatedUser and
 // requireAdmin call this; it is the single place either credential is
 // actually validated.
 //
@@ -150,33 +146,30 @@ func (s *Server) resolveCredential(r *http.Request) (userID int64, ok bool, err 
 }
 
 // missingCredentialMessage is requireAuthenticatedUser and requireAdmin's
-// shared 401 body for "no credential presented at all". It names
-// authTokenHeader (task 17's own required behaviour: the error names the
-// expected header) and, since task 18, the session cookie alternative --
-// a caller reading this message can tell which credential is missing
-// without already knowing the sidecar accepts two kinds.
+// shared 401 body for "no credential presented at all". It names both
+// authTokenHeader and the session cookie alternative -- a caller reading
+// this message can tell which credential is missing without already
+// knowing the sidecar accepts two kinds.
 var missingCredentialMessage = fmt.Sprintf(
 	"authentication required: send a %s header (a Miniflux API key) or sign in to Miniflux in this browser (a %s session cookie)",
 	authTokenHeader, minifluxSessionCookieName,
 )
 
 // requireAuthenticatedUser wraps next with the sidecar's data-endpoint
-// authentication gate (task 17, extended by task 18 to also accept a
-// Miniflux session cookie -- see resolveCredential and this file's own
-// package doc comment). ANY valid credential passes: unlike requireAdmin,
-// this makes no is_admin check, matching task 18's own authorisation
-// matrix ("data endpoints: any valid credential, scoped to that user").
-// A valid credential's resolved user id is attached to the request's
-// context via authenticatedUserID for next to read -- deriving
-// search/article scope from the CREDENTIAL rather than from anything the
-// caller separately asserts is task 17's "second problem" fix; see
-// resolveAuthenticatedUserID in search_handlers.go and handleArticle in
-// article_handler.go.
+// authentication gate -- see resolveCredential and this file's own
+// package doc comment. ANY valid credential passes: unlike requireAdmin,
+// this makes no is_admin check ("data endpoints: any valid credential,
+// scoped to that user"). A valid credential's resolved user id is
+// attached to the request's context via authenticatedUserID for next to
+// read -- deriving search/article scope from the CREDENTIAL rather than
+// from anything the caller separately asserts closes the door on a
+// caller claiming a different user's id; see resolveAuthenticatedUserID
+// in search_handlers.go and handleArticle in article_handler.go.
 //
 // Fails CLOSED, never open, on every error path (missing credential,
-// unrecognised credential, or resolveCredential erroring) -- this task's
-// brief explicitly rules out any path, including a misconfiguration, that
-// ends up equivalent to a flag disabling authentication.
+// unrecognised credential, or resolveCredential erroring): no path,
+// including a misconfiguration, may end up equivalent to a flag disabling
+// authentication.
 func (s *Server) requireAuthenticatedUser(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok, err := s.resolveCredential(r)
@@ -194,13 +187,13 @@ func (s *Server) requireAuthenticatedUser(next http.HandlerFunc) http.HandlerFun
 	}
 }
 
-// requireAdmin wraps next with task 18's authorisation gate for the
-// sidecar's control endpoints and status page: it accepts the same two
-// credentials requireAuthenticatedUser does, but additionally requires
-// the resolved user to be a Miniflux administrator (AdminChecker /
-// store.Store.IsAdmin, read-only against public.users.is_admin) --
-// superseding task 17's ruling that these endpoints stay unauthenticated;
-// see server.go's own doc comment on New for why that ruling is now void.
+// requireAdmin wraps next with the authorisation gate for the sidecar's
+// control endpoints and status page: it accepts the same two credentials
+// requireAuthenticatedUser does, but additionally requires the resolved
+// user to be a Miniflux administrator (AdminChecker / store.Store.IsAdmin,
+// read-only against public.users.is_admin); see server.go's own doc
+// comment on New for why these endpoints require admin rather than
+// staying unauthenticated or accepting any valid credential.
 //
 // No credential at all -> 401 (missingCredentialMessage, same as
 // requireAuthenticatedUser). A credential that resolves to a real,

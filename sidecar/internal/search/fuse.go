@@ -32,16 +32,11 @@ const rrfK = 60
 // cross-channel agreement outrank a strong showing in a single channel
 // (TestRRFRewardsAppearingInBothLists). Either argument may be nil or
 // empty, in which case fusion degenerates to the other list's own
-// ranking with a rewritten Score.
-//
-// No production caller relies on that degenerate case. An earlier version
-// of this comment claimed ModeKeyword and ModeSemantic "fuse a real list
-// against nothing"; they do not, and never did -- both aggregate their
-// single channel's raw hits directly (see Search below) and never call
-// Fuse at all. The comment described a design that was not built, which
-// is worse than no comment: it sent a reader looking for the mode
-// dispatch in the wrong file. Fuse has exactly two callers, ModeHybrid
-// and ModePassages, and both always pass two real lists.
+// ranking with a rewritten Score, though no production caller relies on
+// that: Fuse has exactly two callers, ModeHybrid and ModePassages, and
+// both always pass two real lists (ModeKeyword and ModeSemantic
+// aggregate their single channel's raw hits directly -- see Search below
+// -- and never call Fuse at all).
 //
 // The returned hits are the union of both inputs by PassageID, ordered by
 // fused score descending, each carrying that fused score as its own Score
@@ -150,20 +145,20 @@ const defaultSearchLimit = 10
 //     therefore cannot fill Limit entries except in the degenerate case
 //     where no entry matches twice.
 //
-// The second reason was missed originally, and the cost was not merely a
-// user-visible "ask for ten, get three" bug: it structurally confounded
-// the task 4 evaluation, which compared a full-fat ModeHybrid against
-// ModeKeyword and ModeSemantic baselines that could only fill three or
-// four of their ten slots. Applying one multiplier uniformly across all
-// four modes is what makes the modes comparable at all.
+// Missing the second reason would not just be a user-visible "ask for
+// ten, get three" bug: it would structurally confound any recall
+// evaluation that compares a full-fat ModeHybrid against ModeKeyword and
+// ModeSemantic baselines, which could then only fill three or four of
+// their ten slots. Applying one multiplier uniformly across all four
+// modes is what makes the modes comparable at all.
 //
 // BEWARE THE AMPLIFICATION: this multiplier COMPOUNDS with
 // candidateMultiplier (lexical.go, also 5x), which Lexical and Semantic
 // apply again to whatever limit they are handed here. One Request.Limit
-// becomes 25x that many rows asked of an index. See candidateMultiplier's
-// own comment for the worked numbers and for the Critical that product
-// caused in the semantic path, where it is bounded by pgvector's
-// hnsw.ef_search ceiling (maxVectorCandidates, semantic.go).
+// becomes 25x that many rows asked of an index -- see candidateMultiplier's
+// own comment for the worked numbers and for why that matters in the
+// semantic path, where it is bounded by pgvector's hnsw.ef_search
+// ceiling (maxVectorCandidates, semantic.go).
 const searchCandidateMultiplier = 5
 
 // Search runs q against this Searcher's retrieval, dispatching on q.Mode

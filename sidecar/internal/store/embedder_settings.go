@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// EmbedderSettings is the operator's persisted embedder choice (Task 9,
-// spec §13.1): which kind of embedder ("local" or "remote") and, for
+// EmbedderSettings is the operator's persisted embedder choice (spec
+// §13.1): which kind of embedder ("local" or "remote") and, for
 // "remote", which URL. See search.embedder_settings' own migration
 // comment for why this is a singleton row rather than a general-purpose
 // settings table.
@@ -48,7 +48,7 @@ func (s *Store) GetEmbedderSettings(ctx context.Context) (*EmbedderSettings, err
 
 // SetEmbedderSettings persists kind/remoteURL as the operator's embedder
 // choice, overwriting whatever (if anything) was recorded before. It is
-// the only way an operator's switch (Task 9's admin page) survives a
+// the only way an operator's switch (via the admin page) survives a
 // restart -- without it, the compose stack's `restart: unless-stopped`
 // would silently revert to the environment variables' default the next
 // time the container restarts, changing the model identity back with

@@ -13,17 +13,11 @@
 // Every request carries an X-Auth-Token header when a token is configured
 // (New's apiKey parameter), matching the header internal/api/middleware.go
 // reads on the main Miniflux fork's own API
-// (validateAPIKeyAuth, `token := r.Header.Get("X-Auth-Token")`). As of
-// task 17, GET /api/search, /api/similar and /api/article all validate
-// this header against public.api_keys -- the same table and header the
+// (validateAPIKeyAuth, `token := r.Header.Get("X-Auth-Token")`).
+// GET /api/search, /api/similar and /api/article all validate this
+// header against public.api_keys -- the same table and header the
 // fork's own API already uses -- and reject a missing or unrecognised
-// token with 401 (surfaced here as AuthError, below). Because this
-// client already sent the header unconditionally before task 17 landed
-// (an unrecognised header was simply ignored by the older, unauthenticated
-// sidecar), no change was needed here for that task: a caller that
-// configures apiKey with a real Miniflux key keeps working exactly as
-// before, and one that leaves it empty now gets AuthError instead of a
-// silently-ignored header.
+// token with 401 (surfaced here as AuthError, below).
 package sidecarclient // import "miniflux.app/v2/sidecar/internal/sidecarclient"
 
 import (
@@ -67,8 +61,8 @@ type Client struct {
 // New builds a Client against baseURL (e.g. "http://localhost:8081").
 // apiKey, when non-empty, is sent as the X-Auth-Token header on every
 // request (see this package's doc comment); pass "" when none is
-// configured -- every request still succeeds against today's sidecar,
-// which does not yet check the header.
+// configured -- every data endpoint now requires a valid key, so an
+// empty apiKey makes every call fail with AuthError (below).
 func New(baseURL, apiKey string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -99,11 +93,9 @@ func (e *UnreachableError) Unwrap() error { return e.Err }
 // credentials: HTTP 401 (no/invalid token) or 403 (valid token, not
 // permitted). Distinct from APIError (below) for the same reason
 // UnreachableError is distinct from both: "your API key is wrong" and
-// "your query was malformed" call for different fixes. As of task 17,
-// GET /api/search, /api/similar and /api/article do return 401 for a
-// missing or unrecognised token (internal/web/auth.go's requireAPIKey),
-// so this case is now genuinely reachable -- see this package's own doc
-// comment.
+// "your query was malformed" call for different fixes. GET /api/search,
+// /api/similar and /api/article all return 401 for a missing or
+// unrecognised token (internal/web/auth.go's requireAPIKey).
 type AuthError struct {
 	Status  int
 	Message string

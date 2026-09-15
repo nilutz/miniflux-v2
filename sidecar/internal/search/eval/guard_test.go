@@ -45,10 +45,11 @@ func TestCheckCorpusStatsRejectsAnEmptyCorpus(t *testing.T) {
 }
 
 func TestCheckCorpusStatsRejectsMissingTitlePassages(t *testing.T) {
-	// The regression this guards: a corpus indexed before Task 1.5 (or a
-	// backfill that silently never ran after that migration) has body
-	// passages but no title passages, which would silently under-report
-	// title-only matches without ever producing an error of its own.
+	// The regression this guards: a corpus indexed before entry titles
+	// were added to the index (or a backfill that silently never ran
+	// after that migration) has body passages but no title passages,
+	// which would silently under-report title-only matches without ever
+	// producing an error of its own.
 	stats := CorpusStats{
 		TotalPassages:    5245,
 		TitlePassages:    0,
@@ -82,7 +83,7 @@ func TestCheckCorpusStatsRejectsMissingEmbeddings(t *testing.T) {
 }
 
 func TestCheckCorpusStatsRejectsNonNormalisedEmbeddings(t *testing.T) {
-	// This is the exact failure mode the task brief names: a fake
+	// This is the exact failure mode this guard exists for: a fake
 	// embedder sweep overwrote real corpus vectors with something that
 	// is not unit-norm. The symptom is not an error from anything else —
 	// only this check catches it.
@@ -134,9 +135,8 @@ func assertMentionsReindex(t *testing.T, err error) {
 // deliberately broken, for the same reason store's own tests break it:
 // there is no way to verify VerifyCorpusIntegrity's SQL against anything
 // but a real ParadeDB database. They skip without SIDECAR_TEST_DATABASE_URL,
-// per the plan's global constraints, and they never write anything —
-// only SELECT — so there is no way for them to touch, let alone corrupt,
-// the corpus.
+// and they never write anything — only SELECT — so there is no way for
+// them to touch, let alone corrupt, the corpus.
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()

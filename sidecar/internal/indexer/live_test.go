@@ -120,8 +120,8 @@ func (f *flippableEmbedder) Dimensions() int  { return 768 }
 func (f *flippableEmbedder) Identity() string { return testModelIdentity }
 func (f *flippableEmbedder) Close() error     { return nil }
 
-// liveUnavailableEmbedder stands in for a networked embedder (Task 2's
-// internal/embed/remote) that is entirely down: every Embed call fails,
+// liveUnavailableEmbedder stands in for a networked embedder
+// (internal/embed/remote) that is entirely down: every Embed call fails,
 // wrapping embed.ErrUnavailable exactly as remote.go's own error sites do,
 // for as long as healthy is false. Unlike flippableEmbedder/failMarker-
 // Embedder above, this is not scoped to one marked entry -- it fails EVERY
@@ -186,9 +186,8 @@ func (i *liveIdentityChangedEmbedder) Close() error     { return nil }
 // cooperative-cancellation-unaware embedder would do. It is deliberately
 // NOT select{}-ing on ctx.Done(): if it were, TestRunLiveCancelsMidPass-
 // BetweenEntries could pass purely because of that internal race rather
-// than because of RunLive's own per-entry ctx check — the exact false
-// confidence a fix-round review caught. With this embedder, the ONLY thing
-// that can produce an early return from a multi-entry pass once ctx is
+// than because of RunLive's own per-entry ctx check. With this embedder,
+// the ONLY thing that can produce an early return from a multi-entry pass once ctx is
 // cancelled is RunLive checking ctx.Done() before starting the next entry.
 type blockingEmbedder struct {
 	delay      time.Duration
@@ -328,7 +327,7 @@ func TestRunLiveSurvivesOneEntryFailing(t *testing.T) {
 // not wait out a full poll interval, let alone longer. This test exercises
 // the exported RunLive directly (unbounded upTo; startAfter is whatever
 // RunLive's own store.MaxEntryID snapshot resolves to at the moment it
-// starts, not 0 — see RunLive's doc comment, fix round 1 finding 3), the
+// starts, not 0 — see RunLive's doc comment), the
 // only test in this file that does, to prove the public entry point is
 // wired correctly and not just runLive. It creates no entries of its own
 // and keeps its window deliberately short (one tick) to minimise — it
@@ -489,7 +488,7 @@ func TestRunLiveRetriesFailedEntryWithBackoff(t *testing.T) {
 	}
 }
 
-// 5a. (Task 3, spec §13.1.) The live lane must behave exactly like the
+// 5a. (spec §13.1.) The live lane must behave exactly like the
 // backfill lane when the embedder reports itself unavailable: the entry
 // stays pending (never 'failed'), and indexing resumes automatically the
 // moment the embedder recovers, with no operator action in between.
@@ -580,7 +579,7 @@ func TestRunLiveSurvivesEmbedderOutageWithoutMarkingEntriesFailed(t *testing.T) 
 	}
 }
 
-// 5b. (Task 3 review round 2, spec §13.1.) A mid-run model-identity change
+// 5b. (spec §13.1.) A mid-run model-identity change
 // is a DIFFERENT pause from a plain outage in one specific way an operator
 // needs to know without reading prose: it never clears on its own, no
 // matter how long the lane keeps retrying, because nothing on this side
@@ -684,7 +683,7 @@ func TestRunLiveDoesNotBlockNewerEntriesOnPersistentFailure(t *testing.T) {
 	}
 }
 
-// 7. (Fix round 1, finding 3; test added fix round 2.) RunLive actually
+// 7. RunLive actually
 // skips pre-existing entries at startup — not merely that store.MaxEntryID
 // itself works in isolation (already covered in the store package), but
 // that the exported RunLive genuinely uses it as a cursor floor and never
@@ -699,9 +698,7 @@ func TestRunLiveDoesNotBlockNewerEntriesOnPersistentFailure(t *testing.T) {
 // Go's default cross-package test parallelism -- it's why the
 // pre-existing TestRunLiveExitsOnContextCancellation, the one test in
 // this file that does exercise the real RunLive entry point directly,
-// creates no entries of its own and keeps to a single tick. An earlier
-// version of this test made exactly that mistake in the other direction
-// (fix round 3 review).
+// creates no entries of its own and keeps to a single tick.
 //
 // Instead, this calls store.MaxEntryID() itself -- the exact call
 // RunLive makes internally -- and feeds the result into the
@@ -756,7 +753,7 @@ func TestRunLiveSkipsPreexistingEntries(t *testing.T) {
 }
 
 // TestRunLiveHonorsOperatorPauseAndResumesOnResume proves LiveMonitor's
-// Task 9 operator Pause()/Resume() actually gates runLive's own loop --
+// operator Pause()/Resume() actually gates runLive's own loop --
 // not merely a flag Stats() reflects with nothing checking it. Paused
 // before runLive starts, the lane must not attempt the one entry in
 // scope for several poll intervals; Resume() must let it proceed and

@@ -123,8 +123,8 @@ func (c *queryCache) clear() {
 // every vector a given cache instance holds was produced by the same
 // side of the asymmetric split.
 //
-// It IS a hazard across a live embedder switch (sidecar Task 9, spec
-// §13.1): the sidecar's Searcher is built once in cmd/sidecar/main.go,
+// It IS a hazard across a live embedder switch (spec §13.1): the
+// sidecar's Searcher is built once in cmd/sidecar/main.go,
 // but — unlike an earlier version of this comment claimed — swapping
 // embedders no longer needs a restart. Indexer.AsEmbedder keeps the
 // Searcher calling whichever embedder is CURRENTLY configured (so a

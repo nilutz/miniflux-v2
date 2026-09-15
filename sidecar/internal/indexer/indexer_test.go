@@ -36,13 +36,12 @@ import (
 const testModelIdentity = "fake-embedder@test#768"
 
 // fakeEmbedder is a deterministic, call-counting stand-in for the real ONNX
-// Embedder (Task 2). This task tests pipeline wiring, not inference: the
+// Embedder, testing pipeline wiring, not inference: the
 // call count is what makes "an unchanged/skipped entry is not re-embedded"
 // assertions possible at all. calls is an atomic.Int64, not a plain int:
 // Backfill's worker pool can call Embed from multiple goroutines
 // concurrently, and an unsynchronised counter there is only safe by
-// accident of whatever MaxWorkers a given test happens to pin (fix round
-// 1, finding 12).
+// accident of whatever MaxWorkers a given test happens to pin.
 type fakeEmbedder struct {
 	calls atomic.Int64
 	err   error
@@ -77,7 +76,7 @@ func (f *fakeEmbedder) Identity() string { return testModelIdentity }
 func (f *fakeEmbedder) Close() error     { return nil }
 
 // unavailableEmbedder is a fake standing in for a networked embedder
-// (Task 2's internal/embed/remote) that is currently unreachable: every
+// (internal/embed/remote) that is currently unreachable: every
 // Embed call fails with an error wrapping embed.ErrUnavailable, exactly
 // how remote.go's own error sites are wrapped. It exists to prove
 // IndexEntry classifies THIS kind of error as lane-level (spec §13.1) --
@@ -103,8 +102,7 @@ func (u *unavailableEmbedder) Identity() string { return testModelIdentity }
 func (u *unavailableEmbedder) Close() error     { return nil }
 
 // batchRecordingEmbedder records how many texts each Embed call received,
-// so a test can observe the actual runtime batch size IndexEntry used
-// (fix round 2, finding 2).
+// so a test can observe the actual runtime batch size IndexEntry used.
 type batchRecordingEmbedder struct {
 	mu         sync.Mutex
 	batchSizes []int
@@ -215,7 +213,7 @@ func createTestEntry(t *testing.T, db *sql.DB, username, content string) int64 {
 }
 
 // createTestEntryWithTitle is createTestEntry with a caller-chosen title,
-// for tests exercising title indexing itself (task 1.5): an empty title,
+// for tests exercising title indexing itself: an empty title,
 // a title distinct from the body, a title edited independently of content.
 func createTestEntryWithTitle(t *testing.T, db *sql.DB, username, title, content string) int64 {
 	t.Helper()
@@ -367,7 +365,7 @@ func TestIndexEntryIndexesAPlainEntry(t *testing.T) {
 }
 
 // TestIndexEntryOnlyEverCallsEmbedDocuments is the nomic migration plan's
-// task 1 call-path proof for internal/indexer: IndexEntry indexes
+// call-path proof for internal/indexer: IndexEntry indexes
 // passages, so it must call embed.Embedder.EmbedDocuments and must never
 // call EmbedQuery — an asymmetric model (nomic-embed-text-v1.5) applies a
 // different, incompatible prefix to each, and passages embedded under the
@@ -395,10 +393,10 @@ func TestIndexEntryOnlyEverCallsEmbedDocuments(t *testing.T) {
 	}
 }
 
-// 1a. (Task 1.5) Indexing an entry produces a title passage: ordinal 0,
+// 1a. Indexing an entry produces a title passage: ordinal 0,
 // source='title', text exactly the entry's title, offsets spanning the
 // whole title -- and the body's passages follow it as source='content'
-// with ordinals from 1. This is the regression Task 1.5 exists to prevent:
+// with ordinals from 1. This is the regression this guards against:
 // before it, a query matching only the title (e.g. "Why Raft is hard" for
 // a post whose body never repeats "Raft") had nothing to find.
 func TestIndexEntryCreatesATitlePassageAndContentPassages(t *testing.T) {
@@ -447,7 +445,7 @@ func TestIndexEntryCreatesATitlePassageAndContentPassages(t *testing.T) {
 	}
 }
 
-// 1b. (Task 1.5) An entry with an empty (or whitespace-only) title produces
+// 1b. An entry with an empty (or whitespace-only) title produces
 // no title passage at all -- not an empty one that would waste an ordinal
 // and an embedding call on nothing.
 func TestIndexEntryEmptyTitleProducesNoTitlePassage(t *testing.T) {
@@ -489,7 +487,7 @@ func TestIndexEntryWhitespaceOnlyTitleProducesNoTitlePassage(t *testing.T) {
 	}
 }
 
-// 1c. (Task 1.5) THE TRAP: a title passage's char_start/char_end must index
+// 1c. THE TRAP: a title passage's char_start/char_end must index
 // into the title itself, never into the body's extracted plaintext. The
 // title here is deliberately multi-byte (accented characters), and the
 // content is deliberately a very different length, so an implementation
@@ -540,7 +538,7 @@ func TestIndexEntryTitleOffsetsIndexIntoTitleNotContentPlaintext(t *testing.T) {
 	}
 }
 
-// 1d. (Task 1.5) An entry whose body has no usable text at all (e.g. a
+// 1d. An entry whose body has no usable text at all (e.g. a
 // link post with only a script tag) still indexes -- by its title alone --
 // rather than being skipped outright, now that the title carries its own
 // searchable passage.
@@ -576,7 +574,7 @@ func TestIndexEntryTitleOnlyEntryWithNoUsableBodyIndexesJustTheTitle(t *testing.
 	}
 }
 
-// 1e. (Task 1.5) Re-indexing after both the title and the content change
+// 1e. Re-indexing after both the title and the content change
 // replaces both kinds of passage atomically -- no orphaned title or body
 // passage from the previous version survives.
 func TestIndexEntryReindexReplacesTitleAndContentPassagesAtomically(t *testing.T) {
@@ -613,11 +611,11 @@ func TestIndexEntryReindexReplacesTitleAndContentPassagesAtomically(t *testing.T
 // 2. An entry with no usable text ANYWHERE -- no title and no usable body
 // -- is skipped: no passages written, status='skipped', reason non-empty,
 // and a second IndexEntry call does not re-embed it; the entry also stays
-// out of the pending set (not retried). (Task 1.5 changed what "no usable
-// text" means: an entry with a usable title but no usable body no longer
-// takes this path -- see TestIndexEntryTitleOnlyEntryWithNoUsableBody...
-// below -- so this fixture must have an empty title too, to still
-// genuinely exercise "nothing to index at all".)
+// out of the pending set (not retried). (An entry with a usable title but
+// no usable body no longer takes this path -- see
+// TestIndexEntryTitleOnlyEntryWithNoUsableBody... below -- so this
+// fixture must have an empty title too, to still genuinely exercise
+// "nothing to index at all".)
 func TestIndexEntryWithNoUsableTextIsSkipped(t *testing.T) {
 	s, db := testEnv(t)
 	entryID := createTestEntryWithTitle(t, db, "index-empty", "",
@@ -886,13 +884,13 @@ func TestIndexEntryEmbeddingFailureMarksFailedAndRetryable(t *testing.T) {
 	}
 }
 
-// 5a. (Task 3, spec §13.1.) An embedder reporting itself UNAVAILABLE —
+// 5a. (spec §13.1.) An embedder reporting itself UNAVAILABLE —
 // wrapping embed.ErrUnavailable, exactly as internal/embed/remote's own
 // error sites do — must NOT be treated like the ordinary embedding
 // failure above: IndexEntry must classify it (isEmbedderUnavailable) and
 // must leave entry_index_state completely untouched, not call
-// MarkEntryFailed. This is the load-bearing distinction the whole task
-// exists to draw: a network outage must never mark the entry it happened
+// MarkEntryFailed. This is the load-bearing distinction this design
+// draws: a network outage must never mark the entry it happened
 // to be embedding when it hit "failed", because that is what forces
 // thousands of entries into the retry-backoff machinery during a
 // five-minute blip.
@@ -963,7 +961,7 @@ func TestFailureCauseClassifiesEmbedderUnavailableDefensively(t *testing.T) {
 	}
 }
 
-// (Task 3 review round 2, spec §13.1.) requiresEmbedderRestart must
+// (spec §13.1.) requiresEmbedderRestart must
 // distinguish a plain outage (self-heals) from a mid-run identity change
 // (never self-heals) purely via errors.Is against embed.ErrRequiresRestart
 // -- both wrap embed.ErrUnavailable, so isEmbedderUnavailable alone cannot
@@ -987,7 +985,7 @@ func TestRequiresEmbedderRestartDistinguishesIdentityChangeFromPlainOutage(t *te
 	}
 }
 
-// 6. (Fix round 2, finding 2.) SetBatchSize is the runtime-editable knob
+// 6. SetBatchSize is the runtime-editable knob
 // spec §9.2 actually names ("batch size — passages per forward pass; the
 // main lever on CPU efficiency"), distinct from Backfill.SetPageSize
 // (entry ids fetched per pagination page). It clamps to
@@ -1063,7 +1061,7 @@ func TestIndexerSetBatchSizeClampsAndTakesEffect(t *testing.T) {
 
 // Every error IndexEntry can return must classify to a short, stable
 // label, so that the backfill lane's by-cause aggregation is a breakdown
-// by cause and not one row per entry (whole-branch fix wave, finding 4).
+// by cause and not one row per entry.
 func TestFailureCauseIsStableAcrossEntries(t *testing.T) {
 	embedErr := errors.New("onnxruntime: input tensor shape mismatch at offset 4096")
 

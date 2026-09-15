@@ -35,11 +35,11 @@ func longFixtureBody() string {
 // It is not here to assert the pipeline is *correct* — the extraction and
 // splitting tests next to it do that. It is here to fail loudly when the
 // pipeline's output CHANGES, because search.passages stores char_start /
-// char_end offsets into a plaintext that is never persisted anywhere: P1b
-// re-derives it by calling ExtractText again. A change to either function
-// therefore silently invalidates every stored offset and passage boundary
-// in the corpus, with the entries' own HTML — and so their content hash —
-// completely unchanged.
+// char_end offsets into a plaintext that is never persisted anywhere: it
+// has to be re-derived by calling ExtractText again. A change to either
+// function therefore silently invalidates every stored offset and passage
+// boundary in the corpus, with the entries' own HTML — and so their
+// content hash — completely unchanged.
 //
 // If this test fails because you deliberately changed the pipeline, that
 // is fine and expected: bump store.PipelineVersion (internal/store/

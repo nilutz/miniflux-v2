@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// This file implements the sidecar's read-only search HTTP API (task 7):
+// This file implements the sidecar's read-only search HTTP API:
 //
 //	GET /api/search?q=&mode=&limit=&user=&feed=&category=&unread=&starred=&since=&until=
 //	GET /api/similar?entry_id=&limit=&user=&feed=&category=&unread=&starred=&since=&until=
@@ -12,26 +12,26 @@
 // That check exists to stop Cross-Site Request Forgery — a page open in
 // the operator's own browser, on any origin, silently firing a
 // state-changing request at this loopback-bound service, riding whatever
-// ambient credential (task 18's MinifluxSessionID cookie) the browser
-// attaches automatically. CSRF is specifically an attack on STATE
-// CHANGE: it works by getting the victim's browser to *cause an effect* (pause the backfill, change its
-// concurrency) using credentials/network-position the attacker doesn't
-// have themselves. A GET against /api/search or /api/similar changes
-// nothing server-side — it returns a read of already-indexed public.entries
-// content back to whatever page asked for it. The worst a hostile page
-// could do by firing this request cross-origin is *read search results
-// back into itself*, which is a real information-disclosure concern in
-// general (this is why browsers' own Fetch/CORS model still blocks a
-// cross-origin page from reading the *response* body of a fetch() call
-// unless the server opts in) — but the browser's own same-origin policy
-// already provides that protection for a page's own script, independent
-// of anything this server does. sameOriginOrNoOrigin is this server's OWN
-// defence against a *simple, credential-less* cross-site request causing
-// a side effect; it has nothing to add on top of the browser's built-in
-// protection for a request whose entire "effect" is its response body.
-// A curl/CLI caller (RunLive's own health checks, a future fork client,
-// task 8's searchclient) never sends an Origin header either way, so this
-// check would not protect them regardless.
+// ambient credential (the MinifluxSessionID cookie) the browser attaches
+// automatically. CSRF is specifically an attack on STATE CHANGE: it works
+// by getting the victim's browser to *cause an effect* (pause the backfill,
+// change its concurrency) using credentials/network-position the attacker
+// doesn't have themselves. A GET against /api/search or /api/similar
+// changes nothing server-side — it returns a read of already-indexed
+// public.entries content back to whatever page asked for it. The worst a
+// hostile page could do by firing this request cross-origin is *read
+// search results back into itself*, which is a real information-disclosure
+// concern in general (this is why browsers' own Fetch/CORS model still
+// blocks a cross-origin page from reading the *response* body of a
+// fetch() call unless the server opts in) — but the browser's own
+// same-origin policy already provides that protection for a page's own
+// script, independent of anything this server does. sameOriginOrNoOrigin
+// is this server's OWN defence against a *simple, credential-less*
+// cross-site request causing a side effect; it has nothing to add on top
+// of the browser's built-in protection for a request whose entire
+// "effect" is its response body. A curl/CLI caller (RunLive's own health
+// checks, a future fork client) never sends an Origin header either way,
+// so this check would not protect them regardless.
 //
 // They still live on the same loopback-bound Server as the control
 // endpoints (New's caller, cmd/sidecar/main.go, binds it to 127.0.0.1 by
@@ -427,7 +427,7 @@ func parseDateParam(raw, name string) (time.Time, error) {
 // parseUserID parses the optional "user" query parameter into
 // search.Filters.UserID.
 //
-// Since task 17, GET /api/search and /api/similar are authenticated, and
+// GET /api/search and /api/similar are authenticated, and
 // resolveAuthenticatedUserID (below) always overwrites whatever this
 // returns with the id the caller's own API key resolved to before a
 // request reaches the Searcher — so a value parsed here is no longer the
@@ -438,9 +438,8 @@ func parseDateParam(raw, name string) (time.Time, error) {
 // resolveAuthenticatedUserID rejects. Absent/blank still means 0 at this
 // parsing stage — resolveAuthenticatedUserID reads that as "the caller
 // expressed no opinion" and fills in the authenticated user unconditionally,
-// never as "every user's content is eligible" the way it did before
-// authentication existed (see search.Filters.UserID's own doc comment for
-// why an unscoped search was already a footgun even before this task).
+// never as "every user's content is eligible" (see search.Filters.UserID's
+// own doc comment for why an unscoped search was already a footgun).
 //
 // A present-but-nonsensical value (not a whole number, zero, negative)
 // is a 400 rather than a silent fall back to "unscoped": a caller that
@@ -499,11 +498,11 @@ func parseFilters(q url.Values) (search.Filters, error) {
 	return f, nil
 }
 
-// resolveAuthenticatedUserID is task 17's "second problem" fix, applied to
-// both GET /api/search and GET /api/similar: it reconciles f.UserID (as
-// parsed by parseFilters, above, from the caller-supplied "user" query
-// parameter) against the user id the caller's own API key resolved to
-// (requireAuthenticatedUser in auth.go, always run first on both routes).
+// resolveAuthenticatedUserID reconciles f.UserID (as parsed by
+// parseFilters, above, from the caller-supplied "user" query parameter)
+// against the user id the caller's own API key resolved to
+// (requireAuthenticatedUser in auth.go, always run first on both routes),
+// applied to both GET /api/search and GET /api/similar.
 //
 //   - f.UserID == 0 (the caller expressed no opinion): filled in from the
 //     authenticated user unconditionally. Once a request is authenticated
@@ -516,11 +515,9 @@ func parseFilters(q url.Values) (search.Filters, error) {
 //     deliberate choice among three defensible ones (ignore it, remove
 //     the parameter entirely, or reject a disagreement) — rejecting
 //     follows the same fail-loud policy parseUserID's own doc comment
-//     already established for a malformed value, and it is what actually
-//     closes the hole this task exists to close: before this task, the
-//     "user" parameter was the caller's unchecked assertion of identity;
-//     after it, a caller can no longer make that assertion at all, loudly
-//     or quietly — the key is what decides who they are.
+//     already established for a malformed value: the "user" parameter is
+//     not the caller's unchecked assertion of identity, loudly or
+//     quietly — the key is what decides who they are.
 //
 // Writes a 400 or 500 response and returns false when it refuses the
 // request; returns true, with f.UserID authoritatively set to the

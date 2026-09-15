@@ -18,7 +18,7 @@ import (
 	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
-// This file, not internal/search, is deliberately where the task 4
+// This file, not internal/search, is deliberately where the
 // evaluation run against the real corpus lives. cmd/sidecar is documented
 // (main.go's own package comment, README.md's "The ORT build tag" section)
 // as the ONLY package in this module that imports internal/embed/onnx --
@@ -47,8 +47,7 @@ import (
 // to this package's directory.
 const evalQueriesPath = "../../internal/search/eval/testdata/queries.json"
 
-// evalK is the k this evaluation run scores recall@k against, matching
-// the task brief's recall@10.
+// evalK is the k this evaluation run scores recall@k against (recall@10).
 const evalK = 10
 
 func TestEvalRecall(t *testing.T) {
@@ -125,8 +124,8 @@ func TestEvalRecall(t *testing.T) {
 
 // evalModes is the fixed set of retrieval modes every recall-reporting run
 // in this package scores -- shared by TestEvalRecall and TestChunkingSweep
-// (task 3's sweep tool) so the two can never silently drift into scoring a
-// different set of modes from one another.
+// so the two can never silently drift into scoring a different set of
+// modes from one another.
 var evalModes = []struct {
 	name string
 	mode search.Mode

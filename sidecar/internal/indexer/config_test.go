@@ -67,7 +67,7 @@ func TestParseWindow(t *testing.T) {
 	}
 }
 
-// The whole point of finding 1: a configuration change actually reaches
+// A configuration change actually reaches
 // the Controller, the Indexer and the lane, and is visible afterwards.
 func TestApplyConfigReachesEveryKnob(t *testing.T) {
 	b := newConfigTestBackfill(t)

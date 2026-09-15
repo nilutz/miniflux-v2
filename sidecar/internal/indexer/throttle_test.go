@@ -14,8 +14,7 @@ import (
 // fixedClock returns a func() time.Time that always reports t, for
 // injecting a controllable clock into newController — a controller test
 // that depends on wall-clock time passing for real would be flaky, and one
-// that samples the host's real load average would not be a test at all
-// (task-6 brief).
+// that samples the host's real load average would not be a test at all.
 func fixedClock(t time.Time) func() time.Time {
 	return func() time.Time { return t }
 }
@@ -48,7 +47,7 @@ func establishBaseline(c *Controller) {
 // degradation" at every worker count -- which is the point: feeding a
 // constant per-entry latency as workers climb would describe a machine
 // whose per-worker service time is DOUBLING each step, and the controller
-// is now supposed to notice that (whole-branch review, finding 2).
+// is now supposed to notice that.
 func observeHealthy(c *Controller) {
 	w := c.Workers()
 	if w < 1 {
@@ -194,7 +193,7 @@ func TestControllerOutsideWindowReportsZeroWorkers(t *testing.T) {
 // which workersLocked clamped right back to 0 -- Backfill.start reads any
 // workers<=0 exactly like "outside the schedule window" and polls
 // forever, silently, since Reason() would still claim "starting at the
-// configured minimum worker count" (fix round 1, finding 1).
+// configured minimum worker count".
 func TestControllerZeroValueConfigDoesNotStall(t *testing.T) {
 	c := newController(ControllerConfig{}, fixedClock(time.Now()), fixedLoad(0.1))
 
@@ -331,8 +330,7 @@ func TestNormalizeLoadIsPerCore(t *testing.T) {
 // CPU-bound embedding workers pushed it past LoadThreshold=0.8 within a
 // minute on any machine and held it there, so every Observe after the
 // baseline took the load branch and stepped down, and the condition never
-// cleared again -- one worker for the entire backfill (whole-branch
-// review, finding 2).
+// cleared again -- one worker for the entire backfill.
 func TestControllerStepsUpUnderHealthyPerCoreLoad(t *testing.T) {
 	cfg := ControllerConfig{MinWorkers: 1, MaxWorkers: 4, LatencyMargin: 1.5, LoadThreshold: 0.8}
 
@@ -401,8 +399,7 @@ func TestControllerStepsBackUpAfterLoadClears(t *testing.T) {
 // out. Before that, a batch whose per-entry latency was UNCHANGED at two
 // workers -- i.e. adding a worker bought nothing, per-worker service time
 // doubled -- read as twice as healthy as the baseline, and the latency arm
-// could only ever vote to step up (whole-branch review, finding 2, the
-// folded-in deferred baseline finding).
+// could only ever vote to step up.
 func TestControllerLatencyBaselineIsComparedPerWorker(t *testing.T) {
 	cfg := ControllerConfig{MinWorkers: 1, MaxWorkers: 4, LatencyMargin: 1.5, LoadThreshold: 0.8}
 

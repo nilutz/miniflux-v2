@@ -80,19 +80,18 @@ const reachabilityProbeTimeout = 5 * time.Second
 // uses for the identical reason); production never changes it.
 var reachabilityCacheTTL = 20 * time.Second
 
-// measuredPassagesPerSecond and measuredPassagesPerEntry are the task 9
-// brief's own measured throughput figures (spec §13.1's re-index cost
-// estimate): ~33.9 passages/sec, 13 passages per entry, used only to
-// estimate how long re-indexing the corpus will take after a model
-// switch -- shown to the operator BEFORE they confirm (section 5: "the
-// confirmation must state the actual entry count and the estimate").
+// measuredPassagesPerSecond and measuredPassagesPerEntry are the measured
+// throughput figures behind spec §13.1's re-index cost estimate: ~33.9
+// passages/sec, 13 passages per entry, used only to estimate how long
+// re-indexing the corpus will take after a model switch -- shown to the
+// operator before they confirm, alongside the actual entry count.
 const (
 	measuredPassagesPerSecond = 33.9
 	measuredPassagesPerEntry  = 13.0
 )
 
-// EmbedderInfo is what the admin page's Model section (Task 9, spec
-// §13.1) shows about the embedder currently in use: kind, backend,
+// EmbedderInfo is what the admin page's Model section (spec §13.1) shows
+// about the embedder currently in use: kind, backend,
 // identity, dimensions, and for a remote embedder its URL and whether it
 // is currently reachable.
 type EmbedderInfo struct {
@@ -118,8 +117,8 @@ type EmbedderInfo struct {
 }
 
 // ProbeResult is what a candidate remote embedder reports before
-// anything is swapped (Task 9, section 3: "test before committing").
-// Error is non-empty, and every other field is the zero value, when the
+// anything is swapped, tested before committing to it. Error is
+// non-empty, and every other field is the zero value, when the
 // candidate could not be constructed at all -- unreachable, or (via
 // EmbedderFactory delegating to remote.New) a dimension mismatch against
 // the fixed schema width, refused here rather than after a switch has
@@ -132,9 +131,9 @@ type ProbeResult struct {
 	Error      string `json:"error"`
 }
 
-// SwitchPreview is what the admin page shows an operator BEFORE they
-// confirm a switch (Task 9, section 5): the candidate's own ProbeResult,
-// plus how many entries the corpus has right now and how long
+// SwitchPreview is what the admin page shows an operator before they
+// confirm a switch: the candidate's own ProbeResult, plus how many
+// entries the corpus has right now and how long
 // re-indexing all of them is estimated to take at the measured
 // throughput -- unless SameIdentity is true (the "same model on another
 // machine" case), in which case nothing needs re-indexing at all.
@@ -165,10 +164,10 @@ type SwitchResult struct {
 	SameIdentity bool   `json:"same_identity"`
 }
 
-// ErrSwitchNotConfirmed is returned by Switch when confirm is false --
-// section 5's "the switch must not proceed without explicit
-// confirmation", enforced here rather than trusted to the caller (the
-// admin page's own JS dialog) alone.
+// ErrSwitchNotConfirmed is returned by Switch when confirm is false: the
+// switch must not proceed without explicit confirmation, enforced here
+// rather than trusted to the caller (the admin page's own JS dialog)
+// alone.
 var ErrSwitchNotConfirmed = fmt.Errorf("indexer: embedder switch requires explicit confirmation")
 
 // SettingsStore is the subset of *store.Store Manager needs to persist an
@@ -185,13 +184,11 @@ type SettingsStore interface {
 // queryCache caches EmbedQuery's output keyed on query TEXT alone, with
 // no notion of which model produced a cached vector -- a live switch
 // (this file) changes what EmbedQuery returns for the identical text,
-// and nothing else invalidates that cache (a review-round finding: the
-// first version of this file fixed the embedder REFERENCE via
-// Indexer.AsEmbedder but left every already-cached query vector from the
-// old model being served, silently, after a perfectly successful
-// switch -- spec §13.1's cross-model corruption, reopened one layer up
-// from search.passages, which the content-hash mechanism does nothing to
-// protect).
+// and nothing else invalidates that cache. Left unhandled, an
+// already-cached query vector from the old model keeps being served,
+// silently, after a perfectly successful switch -- spec §13.1's
+// cross-model corruption, reopened one layer up from search.passages,
+// which the content-hash mechanism does nothing to protect.
 //
 // An interface, not *search.Searcher directly: internal/indexer must not
 // import internal/search (a layering internal/search itself avoids the
@@ -214,8 +211,8 @@ type QueryCacheInvalidator interface {
 // interleave.
 var ErrSwitchInProgress = fmt.Errorf("indexer: another embedder switch is already in progress")
 
-// Manager owns the live-swappable embedder end to end (Task 9, spec
-// §13.1): showing what is currently configured, testing a candidate
+// Manager owns the live-swappable embedder end to end (spec §13.1):
+// showing what is currently configured, testing a candidate
 // remote before committing, and performing the swap itself -- quiesce
 // both lanes, guarantee no in-flight embed call before closing the old
 // embedder, publish the new one through Indexer's synchronised accessor,
@@ -292,11 +289,10 @@ func (m *Manager) Info(ctx context.Context) EmbedderInfo {
 	return info
 }
 
-// Preview probes a candidate embedder (Task 9, section 3: "without
-// swapping anything") and, when it is reachable, adds section 5's
-// re-index cost estimate against the corpus's current entry count. It
-// swaps nothing and touches neither lane -- see Switch for the operation
-// that actually applies a choice.
+// Preview probes a candidate embedder without swapping anything and,
+// when it is reachable, adds the re-index cost estimate against the
+// corpus's current entry count. It swaps nothing and touches neither
+// lane -- see Switch for the operation that actually applies a choice.
 func (m *Manager) Preview(ctx context.Context, kind, remoteURL string) SwitchPreview {
 	result := m.probe(ctx, kind, remoteURL)
 	preview := SwitchPreview{ProbeResult: result, Kind: kind, RemoteURL: remoteURL}
@@ -328,7 +324,7 @@ func (m *Manager) Preview(ctx context.Context, kind, remoteURL string) SwitchPre
 	return preview
 }
 
-// estimateReindexDuration applies section 5's measured throughput figures
+// estimateReindexDuration applies the measured throughput figures above
 // to entryCount, rounding up to the nearest second so a nonzero-but-tiny
 // corpus never estimates to 0s.
 func estimateReindexDuration(entryCount int64) time.Duration {
@@ -410,12 +406,12 @@ type switchOutcome struct {
 
 // Switch constructs kind/remoteURL as a candidate, quiesces both lanes,
 // and starts installEmbedder to perform the actual swap, waiting up to
-// switchTimeout (or ctx) for it to finish (Task 9, section 4).
+// switchTimeout (or ctx) for it to finish.
 //
 // confirm must be true or Switch returns ErrSwitchNotConfirmed without
-// touching anything -- section 5's "the switch must not proceed without
-// explicit confirmation", enforced server-side rather than trusted
-// entirely to the admin page's own confirmation dialog.
+// touching anything: the switch must not proceed without explicit
+// confirmation, enforced server-side rather than trusted entirely to the
+// admin page's own confirmation dialog.
 //
 // Only one Switch may run at a time (ErrSwitchInProgress) -- see
 // switchMu's own doc comment for why the lock it holds is released by
@@ -425,13 +421,10 @@ type switchOutcome struct {
 // candidate (installEmbedder decides, atomically with the install
 // decision, whether that is ever safe), and not the previous one either
 // (only installEmbedder, immediately after actually installing the
-// candidate, knows a fresh old value exists to close). A prior version of
-// this function closed the candidate here on a ctx-cancelled/timeout
-// path, racing installEmbedder's own still-pending attempt to install
-// that exact value -- fixed after a review round found a deterministic
-// reproduction: block an in-flight embed to hold the RLock, call Switch
-// with an already-cancelled context, release the block, and the active
-// embedder came back closed.
+// candidate, knows a fresh old value exists to close). Closing the
+// candidate here on a ctx-cancelled/timeout path would race
+// installEmbedder's own still-pending attempt to install that exact
+// value, and could close the active embedder out from under it.
 func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bool) (SwitchResult, error) {
 	if !confirm {
 		return SwitchResult{}, ErrSwitchNotConfirmed
@@ -455,9 +448,9 @@ func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bo
 		return SwitchResult{}, err
 	}
 
-	// Quiesce both lanes (spec §13.1's requirement; reuses Task 3's own
+	// Quiesce both lanes (spec §13.1's requirement; reuses Backfill's own
 	// pause/resume machinery on both -- Backfill.Pause/Resume unmodified,
-	// LiveMonitor.Pause/Resume added by this task following the identical
+	// LiveMonitor.Pause/Resume added following the identical
 	// pattern) so neither starts NEW work while the swap below is in
 	// progress. This is defense in depth, not the correctness mechanism
 	// itself -- SetEmbedderIfNotAbandoned is what actually proves no
@@ -505,11 +498,11 @@ func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bo
 //   - installed: newEmbedder is now active. old (if any) is safe to Close
 //     immediately -- SetEmbedderIfNotAbandoned's own guarantee. This
 //     branch does everything a successful switch requires: records the
-//     new identity with the store, invalidates the query cache (a
-//     review-round finding: without this, a cached pre-switch query
-//     vector keeps being served under the new model's identity, spec
-//     §13.1's cross-model corruption one layer up from search.passages),
-//     persists the choice, and updates Manager's own metadata -- ALL of
+//     new identity with the store, invalidates the query cache (without
+//     this, a cached pre-switch query vector keeps being served under
+//     the new model's identity -- spec §13.1's cross-model corruption
+//     one layer up from search.passages), persists the choice, and
+//     updates Manager's own metadata -- ALL of
 //     it here, unconditionally, regardless of whether Switch's own caller
 //     is still waiting on outcomeCh or gave up long ago. That is
 //     deliberate: the swap either fully happened or it fully did not,

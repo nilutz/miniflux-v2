@@ -16,10 +16,10 @@ import (
 // boolean column, unlike web_sessions' shape; there is no comparable
 // coupling risk here to call out the way there is in websession.go).
 //
-// This is task 18's authorisation check for the sidecar's control
-// endpoints and status page: any valid Miniflux credential (API key or
-// web session) identifies a user, but only an is_admin user may reach an
-// operator surface -- see sidecar/internal/web/auth.go's requireAdmin.
+// This is the authorisation check for the sidecar's control endpoints and
+// status page: any valid Miniflux credential (API key or web session)
+// identifies a user, but only an is_admin user may reach an operator
+// surface -- see sidecar/internal/web/auth.go's requireAdmin.
 //
 // A userID with no matching row (a stale session or key whose user was
 // deleted, which foreign keys ON DELETE CASCADE should prevent, but this

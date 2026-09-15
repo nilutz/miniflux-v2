@@ -14,15 +14,14 @@ import (
 // decodeFeedCreationRequest decodes a POST /v1/feeds payload, applying
 // CRAWLER_ENABLED_BY_DEFAULT when the payload omits "crawler".
 //
-// This deviates from upstream, where an omitted "crawler" always yields false.
-// Mobile clients create feeds through this endpoint and never send the field,
-// and a feed created with the crawler off keeps only RSS excerpts forever,
-// which is the gap the search corpus exists to close.
+// Deviates from upstream, where an omitted "crawler" always yields false:
+// mobile clients create feeds through this endpoint and never send the
+// field, leaving the crawler off and the feed with only RSS excerpts
+// forever, which defeats full-text search.
 //
-// The default is pre-set on the struct rather than applied afterwards because
-// encoding/json leaves fields absent from the payload untouched: that is what
-// makes an omitted "crawler" distinguishable from an explicit false, which is
-// still honoured.
+// The default is pre-set on the struct rather than applied afterwards
+// because encoding/json leaves absent fields untouched, which is what
+// keeps an omitted "crawler" distinguishable from an explicit false.
 func decodeFeedCreationRequest(body io.Reader, feedCreationRequest *model.FeedCreationRequest) error {
 	feedCreationRequest.Crawler = config.Opts.CrawlerEnabledByDefault()
 

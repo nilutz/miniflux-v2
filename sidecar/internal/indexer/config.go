@@ -19,8 +19,7 @@ import (
 // flag, no environment variable, no endpoint — so the window was
 // permanently "always", concurrency permanently [1,2] and batch size
 // permanently 16. For a 41-hour CPU-saturating job on a personal machine
-// an unbounded window is exactly what §9.2's window exists to prevent
-// (whole-branch review, finding 1).
+// an unbounded window is exactly what §9.2's window exists to prevent.
 //
 // This file is the one place that decides what a valid value is, so the
 // startup path (cmd/sidecar's environment variables) and the runtime path

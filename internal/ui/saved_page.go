@@ -26,9 +26,9 @@ import (
 // ErrSavedPageHasNoArticle is returned when a page was fetched without a
 // transport or parsing error but holds no extractable article text.
 //
-// Spec §10's rule applies here exactly as it does to the crawler and the P0
-// backfill: readability never fails on a well-formed page with no article,
-// it just returns markup holding no text (an empty <div></div>, a
+// Spec §10's rule applies here exactly as it does to the crawler and the
+// full-text backfill: readability never fails on a well-formed page with no
+// article, it just returns markup holding no text (an empty <div></div>, a
 // JavaScript app shell's mount point, ...). Treating "no error" as "it
 // worked" would record an empty page as a saved entry.
 var ErrSavedPageHasNoArticle = errors.New("ui: saved page holds no article text")
@@ -84,7 +84,7 @@ func (h *handler) submitSavedPage(w http.ResponseWriter, r *http.Request) {
 
 // saveWebPage fetches pageURL, extracts its article text through
 // processor.ProcessEntryWebPage - the same crawler path the per-entry
-// "fetch content" button and the P0 full-text backfill use - and stores the
+// "fetch content" button and the full-text backfill use - and stores the
 // result as an entry in user's saved-pages feed, creating that feed lazily
 // on first use (spec §13.4).
 //

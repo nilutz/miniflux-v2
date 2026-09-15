@@ -52,8 +52,7 @@ const corruptionSuffix = "the corpus is corrupted and must be re-indexed — do 
 // checkCorpusStats judges a CorpusStats snapshot, pure logic with no I/O.
 // It never returns a degraded number: every failure is a hard error naming
 // what looked wrong and why the corpus must be re-indexed rather than
-// measured, per the task brief's "fail loudly ... never return a degraded
-// number".
+// measured.
 func checkCorpusStats(stats CorpusStats) error {
 	if stats.TotalPassages == 0 {
 		return fmt.Errorf("eval: corpus has no passages — %s", corruptionSuffix)
@@ -88,8 +87,7 @@ func checkCorpusStats(stats CorpusStats) error {
 // database, doing the aggregation in SQL so no row ever crosses the wire
 // to be judged in Go. vector_norm is pgvector's own L2 norm function,
 // applied per-row before min()/max() aggregate across the whole table —
-// exactly the "assert every passage embedding is L2-normalised" the task
-// brief asks for, not a sample.
+// asserting every passage embedding is L2-normalised, not sampling.
 func queryCorpusStats(db *sql.DB) (CorpusStats, error) {
 	var stats CorpusStats
 
@@ -120,20 +118,18 @@ func queryCorpusStats(db *sql.DB) (CorpusStats, error) {
 // VerifyCorpusIntegrity is the precondition every recall-reporting run
 // must pass before it runs a single query: it checks that the connected
 // corpus's passage embeddings are L2-normalised and that title passages
-// exist, per the task brief's corpus-integrity guard.
+// exist.
 //
-// This exists because the previous task's pre-existing indexer test suite
-// swept the entire entries table with a fake embedder and overwrote real
-// corpus vectors — caught only because someone happened to check. The
+// This guards against a real failure mode: a process that sweeps entries
+// with a fake embedder can silently overwrite real corpus vectors. The
 // resulting symptom is not an error, it is plausible-looking bad recall
 // numbers: the worst failure mode a measurement tool can have, because
 // nothing about running it tells you it lied. VerifyCorpusIntegrity is
 // what makes that failure loud instead of silent.
 //
 // Call this before LoadQueries/RecallAtK/NewReport are driven against a
-// live corpus (Task 4's recall runner). It performs read-only SELECTs
-// only — it can never itself touch, let alone corrupt, the corpus it is
-// checking.
+// live corpus. It performs read-only SELECTs only — it can never itself
+// touch, let alone corrupt, the corpus it is checking.
 func VerifyCorpusIntegrity(db *sql.DB) error {
 	stats, err := queryCorpusStats(db)
 	if err != nil {

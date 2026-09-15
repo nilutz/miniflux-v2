@@ -147,11 +147,11 @@ func TestManagerPreviewAgainstUnreachableURLReportsUnreachableAndSwapsNothing(t 
 	}
 }
 
-// TestManagerSwitchRequiresConfirmation proves section 5's "the switch
-// must not proceed without explicit confirmation" is enforced by Switch
-// itself, not merely trusted to the admin page's own confirmation
-// dialog: confirm=false must neither call the factory nor touch the
-// active embedder.
+// TestManagerSwitchRequiresConfirmation proves that "the switch must not
+// proceed without explicit confirmation" is enforced by Switch itself,
+// not merely trusted to the admin page's own confirmation dialog:
+// confirm=false must neither call the factory nor touch the active
+// embedder.
 func TestManagerSwitchRequiresConfirmation(t *testing.T) {
 	called := false
 	factory := func(context.Context, string, string, time.Duration) (embed.Embedder, string, error) {
@@ -203,8 +203,7 @@ func TestManagerSwitchResumesBothLanesAfterward(t *testing.T) {
 // store.SetModelIdentity with the NEW identity -- asserted through the
 // exported store.PendingEntryIDs/PendingEntryCount, never by reading the
 // unexported modelIdentity var directly, which is exactly the guard that
-// would keep passing if the wiring were deleted (task 9 brief, echoing
-// task 1's own mistake).
+// would keep passing if the wiring were deleted.
 func TestManagerSwitchRecordsNewModelIdentityAndMarksCorpusPending(t *testing.T) {
 	s, db := testEnv(t)
 
@@ -270,9 +269,9 @@ func TestManagerSwitchRecordsNewModelIdentityAndMarksCorpusPending(t *testing.T)
 }
 
 // TestManagerSwitchToIdenticalIdentityLeavesEntriesNotPending is the
-// "same model, different machine" case section 5 calls out as the whole
-// point of the feature: a candidate that reports EXACTLY the identity
-// already active must not mark anything pending.
+// "same model, different machine" case -- the whole point of the
+// feature: a candidate that reports EXACTLY the identity already active
+// must not mark anything pending.
 func TestManagerSwitchToIdenticalIdentityLeavesEntriesNotPending(t *testing.T) {
 	s, db := testEnv(t)
 
@@ -314,9 +313,9 @@ func TestManagerSwitchToIdenticalIdentityLeavesEntriesNotPending(t *testing.T) {
 	}
 }
 
-// TestManagerSwitchWaitsForInFlightEmbedBeforeClosingOldEmbedder is the
-// core guarantee behind section 4: Switch must not close the previous
-// embedder while a call into it is still in flight -- for the ONNX
+// TestManagerSwitchWaitsForInFlightEmbedBeforeClosingOldEmbedder is a
+// core guarantee: Switch must not close the previous embedder while a
+// call into it is still in flight -- for the ONNX
 // backend that is a segfault, not an error. This drives a real,
 // deterministically-blocked IndexEntry call and proves, in order: Switch
 // does not return while the call is still blocked, the old embedder is
@@ -397,9 +396,9 @@ func TestManagerSwitchWaitsForInFlightEmbedBeforeClosingOldEmbedder(t *testing.T
 // IndexEntry (and therefore embedPassages, which reads idx.embedder
 // under embedderMu), while Manager.Switch concurrently replaces it. It
 // asserts no data race under `go test -race` and that the lane keeps
-// running (and eventually drains) across the switch -- this is the "run
-// the race detector over these paths with a lane actively indexing"
-// requirement from the task 9 brief, not merely the unit tests above.
+// running (and eventually drains) across the switch -- this is "run
+// the race detector over these paths with a lane actively indexing",
+// not merely the unit tests above.
 func TestManagerSwitchIsRaceFreeWithBackfillLaneActivelyIndexing(t *testing.T) {
 	s, db := testEnv(t)
 
@@ -452,8 +451,8 @@ func TestManagerSwitchIsRaceFreeWithBackfillLaneActivelyIndexing(t *testing.T) {
 }
 
 // TestManagerSwitchAbandonedByCancelledContextNeverInstallsAClosedEmbedder
-// is the deterministic reproduction of the review round's Critical 1: a
-// prior version of Switch closed its candidate embedder itself on the
+// is the deterministic reproduction of a bug where a prior version of
+// Switch closed its candidate embedder itself on the
 // ctx-cancelled/timeout escape hatch, racing the still-running background
 // goroutine's own, entirely separate attempt to install that exact
 // value -- so the goroutine could go on to publish an ALREADY-CLOSED
@@ -556,9 +555,9 @@ func TestManagerSwitchAbandonedByCancelledContextNeverInstallsAClosedEmbedder(t 
 	}
 }
 
-// TestManagerSwitchRejectsConcurrentSwitchWhileOneIsInFlight is the Major
-// finding's guard: a second Switch call while one is already running
-// must be rejected with ErrSwitchInProgress rather than interleave with
+// TestManagerSwitchRejectsConcurrentSwitchWhileOneIsInFlight verifies: a
+// second Switch call while one is already running must be rejected with
+// ErrSwitchInProgress rather than interleave with
 // it, and the guard must stay held until the FIRST switch's background
 // work has genuinely finished -- not merely until its own Switch call
 // returned -- so a third attempt, made only after the first truly
@@ -649,8 +648,8 @@ type fakeQueryCacheInvalidator struct {
 
 func (f *fakeQueryCacheInvalidator) ClearQueryCache() { f.calls.Add(1) }
 
-// TestManagerSwitchClearsQueryCacheOnlyOnSuccessfulInstall is Critical 2's
-// guard: a successful switch must invalidate the query cache exactly
+// TestManagerSwitchClearsQueryCacheOnlyOnSuccessfulInstall verifies: a
+// successful switch must invalidate the query cache exactly
 // once; a REFUSED switch (no confirmation) and an ABANDONED one (context
 // cancelled before installation) must not touch it at all -- a spurious
 // clear on a switch that never actually happened would just be a cache
@@ -763,8 +762,8 @@ func TestManagerSwitchGuardStaysHeldThroughAnAbandonedSwitchsBackgroundWork(t *t
 	}
 }
 
-// TestManagerInfoCachesReachabilityWithinTTL is the Minor finding's
-// guard: GET / and GET /api/embedder must not each trigger a fresh
+// TestManagerInfoCachesReachabilityWithinTTL verifies: GET / and GET
+// /api/embedder must not each trigger a fresh
 // network probe against the configured remote on every call -- a
 // repeated Info() call within reachabilityCacheTTL must reuse the
 // memoised result rather than calling the factory again.

@@ -62,8 +62,8 @@ func createTestWebSession(t *testing.T, s *Store, sessionID, secret string, user
 	return sessionID + "." + secret
 }
 
-// TestWebSessionsTableHasTheShapeThisFileDependsOn is task 18's own
-// required schema-shape guard (websession.go's package doc comment names
+// TestWebSessionsTableHasTheShapeThisFileDependsOn is the required
+// schema-shape guard (websession.go's package doc comment names
 // the coupling risk this pins against): ValidateWebSessionCookie's raw
 // SQL selects web_sessions.id/secret_hash/user_id by name, with no
 // compile-time link to internal/database/migrations.go's CREATE TABLE on
@@ -244,8 +244,8 @@ func TestValidateWebSessionCookieRejectsUnauthenticatedSession(t *testing.T) {
 	}
 }
 
-// TestValidateWebSessionCookieReturnsFalseAfterSessionIsDeleted is the
-// brief's own required case for sessions, mirroring
+// TestValidateWebSessionCookieReturnsFalseAfterSessionIsDeleted covers
+// the required case for sessions, mirroring
 // TestValidateAPIKeyReturnsFalseAfterKeyIsRevoked: a session that
 // validates successfully must stop working the instant its web_sessions
 // row is gone (Miniflux's own session cleanup, or a user signing out
@@ -317,8 +317,8 @@ func TestValidateWebSessionCookieDistinguishesTwoUsersSessions(t *testing.T) {
 	}
 }
 
-// TestValidateWebSessionCookieDoesNotWriteWebSessions pins the brief's
-// explicit read-only requirement for sessions (mirroring
+// TestValidateWebSessionCookieDoesNotWriteWebSessions pins the explicit
+// read-only requirement for sessions (mirroring
 // TestValidateAPIKeyDoesNotUpdateLastUsedAt for api_keys): validating a
 // cookie any number of times must never modify the underlying row --
 // Miniflux owns web_sessions exclusively, and a write here (a rotation,

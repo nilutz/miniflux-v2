@@ -69,8 +69,7 @@ type ControllerConfig struct {
 	// average past 0.8 within a minute and holds it there, so an absolute
 	// 0.8 made every Observe after the baseline take the load branch and
 	// step down, with the condition never clearing again — a one-way
-	// ratchet to MinWorkers for the whole run (whole-branch review,
-	// finding 2).
+	// ratchet to MinWorkers for the whole run.
 	LoadThreshold float64
 }
 
@@ -123,7 +122,7 @@ type LoadAverage func() (float64, error)
 // the worker count at most one step per Observe call within [MinWorkers,
 // MaxWorkers] -- one step at a time so it does not oscillate. It records a
 // short human-readable reason for the current count (Reason), because the
-// admin page (Task 7, spec §9.4) displays it and "why is it at 1?" is the
+// admin page (spec §9.4) displays it and "why is it at 1?" is the
 // first question an operator asks.
 type Controller struct {
 	cfg  ControllerConfig
@@ -218,7 +217,7 @@ func (c *Controller) workersLocked() int {
 }
 
 // Reason returns a short, human-readable explanation of the current worker
-// count, for the admin page (Task 7).
+// count, for the admin page.
 func (c *Controller) Reason() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -241,8 +240,7 @@ func (c *Controller) Reason() string {
 // Comparing it directly against a baseline captured at MinWorkers, as this
 // did before, made every multi-worker sample read as roughly workers-times
 // healthier than the baseline no matter what the machine was doing: the
-// latency arm could then only ever vote "step up" (whole-branch review,
-// finding 2, folding in the deferred baseline finding). Multiplying it
+// latency arm could then only ever vote "step up". Multiplying it
 // back out by the worker count in effect recovers the per-worker service
 // time -- how long one worker takes for one entry -- which is flat under
 // perfect scaling, rises under contention, and is therefore comparable
@@ -321,9 +319,9 @@ func (c *Controller) stepUp(reason string) {
 // so what the Controller compares against LoadThreshold is a per-core
 // figure (see ControllerConfig.LoadThreshold for why an absolute one was
 // unusable). It is never exercised by the controller unit tests
-// (throttle_test.go), which inject a fixed LoadAverage instead -- per the
-// task-6 brief, "a controller test that samples the host's real load
-// average is not a test".
+// (throttle_test.go), which inject a fixed LoadAverage instead -- a
+// controller test that samples the host's real load average would not
+// be a test.
 func sampleLoadAverage() (float64, error) {
 	raw, err := rawLoadAverage()
 	if err != nil {

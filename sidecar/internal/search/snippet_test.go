@@ -93,10 +93,10 @@ func TestBuildSnippetHighlightsQueryTermsInReDerivedPlaintext(t *testing.T) {
 	}
 }
 
-// TestBuildSnippetTitleSourceSlicesTitleNotBody is the trap Task 1.5's
-// brief names explicitly: a title passage's offsets index into the
-// title, a completely different string from the body plaintext, and
-// source distinguishes them. If BuildSnippet ever sliced the body
+// TestBuildSnippetTitleSourceSlicesTitleNotBody guards a specific trap:
+// a title passage's offsets index into the title, a completely
+// different string from the body plaintext, and source distinguishes
+// them. If BuildSnippet ever sliced the body
 // instead, this test's title text ("Widgets") does not appear anywhere
 // in the body, so the mistake would be visible immediately rather than
 // coincidentally passing.

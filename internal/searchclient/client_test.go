@@ -222,8 +222,7 @@ func TestClientSimilar_Success(t *testing.T) {
 // TestClientSendsTheUserScope proves both endpoints put the caller's user
 // id on the wire. The sidecar's index is global; without this parameter
 // its candidate set is drawn from every user's content and the reader
-// silently gets a shorter page of their own (whole-branch review,
-// finding 3).
+// silently gets a shorter page of their own.
 func TestClientSendsTheUserScope(t *testing.T) {
 	var got string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -263,10 +262,9 @@ func TestClientSendsTheUserScope(t *testing.T) {
 }
 
 // TestSimilarTimeoutIsShorterThanSearch pins the relationship the entry
-// page depends on (whole-branch review, finding 2): the similar-articles
-// block is a sidebar on an already-loaded page and must not be allowed
-// to hold the render path as long as a search the reader actually asked
-// for.
+// page depends on: the similar-articles block is a sidebar on an
+// already-loaded page and must not be allowed to hold the render path as
+// long as a search the reader actually asked for.
 func TestSimilarTimeoutIsShorterThanSearch(t *testing.T) {
 	if SimilarTimeout >= DefaultTimeout {
 		t.Fatalf("SimilarTimeout (%v) must be shorter than DefaultTimeout (%v)", SimilarTimeout, DefaultTimeout)
@@ -301,11 +299,12 @@ func TestClientTimeoutBoundsASlowSidecar(t *testing.T) {
 	}
 }
 
-// TestClientsReuseOneConnection is the review's minor: a *http.Client per
-// request meant a Transport per request, so every search and every entry
-// page view opened a fresh TCP connection to a service on loopback and
-// threw the pool away. Counting connections at the server, rather than
-// inspecting the client, is what actually proves the pool is shared.
+// TestClientsReuseOneConnection guards against a *http.Client per request:
+// that would mean a Transport per request, so every search and every
+// entry page view would open a fresh TCP connection to a service on
+// loopback and throw the pool away. Counting connections at the server,
+// rather than inspecting the client, is what actually proves the pool is
+// shared.
 func TestClientsReuseOneConnection(t *testing.T) {
 	var mu sync.Mutex
 	conns := map[net.Conn]struct{}{}

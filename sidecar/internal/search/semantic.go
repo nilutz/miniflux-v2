@@ -45,8 +45,8 @@ type txBeginner interface {
 // a constant the candidate arithmetic is clamped against rather than a
 // value the code hopes it never reaches.
 //
-// There is a second, nastier reason this clamp exists, and it is the one
-// worth remembering. hnsw.ef_search only becomes a real, range-checked
+// There is a second, nastier reason this clamp exists. hnsw.ef_search
+// only becomes a real, range-checked
 // GUC once pgvector's module has actually been loaded into the backend.
 // On a freshly handed-out pooled connection it is still a *placeholder*
 // GUC, and PostgreSQL accepts any value for a placeholder. Verified
@@ -206,25 +206,22 @@ func (s *Searcher) Semantic(ctx context.Context, query string, limit int, f Filt
 	defer tx.Rollback()
 
 	// hnsw.ef_search (pgvector's HNSW search-time candidate list, default
-	// 40) must be raised to at least candidates — and never above
-	// maxEfSearch, which vectorCandidates already guarantees for the
-	// value used here — the LIMIT the query
-	// below asks its own index scan for — or the scan silently returns
-	// fewer rows than requested, not an error, just quietly short. This
-	// has to be its own statement, executed strictly before the query it
-	// configures, on the same connection: an earlier version folded
-	// set_config into a MATERIALIZED CTE inside the same query, which
-	// looked right but did not take effect (found in review) — EXPLAIN
-	// ANALYZE showed the planner was free to place that CTE on the
-	// *inner* side of a nested loop whose *outer* side was the very
-	// index scan it was meant to configure, so it ran *after* the scan,
-	// once per already-produced outer row, never before it.
-	// MATERIALIZED stops a CTE being inlined away; it does not order
-	// execution. SET LOCAL, run here as its own round trip inside this
-	// explicit transaction, is ordered by the wire protocol instead:
-	// this statement completes before the next one is even sent. It is
-	// also scoped to this transaction alone (never leaks to whatever
-	// query the pooled connection serves next once this one ends).
+	// 40) must be raised to at least candidates (never above maxEfSearch,
+	// which vectorCandidates already guarantees) before the query below
+	// runs its index scan, or the scan silently returns fewer rows than
+	// requested — not an error, just quietly short. This has to be its
+	// own statement, executed strictly before the query it configures, on
+	// the same connection: folding set_config into a MATERIALIZED CTE in
+	// the same query looks right but does not take effect — MATERIALIZED
+	// only stops the CTE being inlined away, it does not order execution,
+	// and the planner is free to place it on the inner side of a nested
+	// loop whose outer side is the very index scan it was meant to
+	// configure, running it after the scan instead of before. SET LOCAL,
+	// run here as its own round trip inside this explicit transaction, is
+	// ordered by the wire protocol instead: this statement completes
+	// before the next one is even sent, and it is scoped to this
+	// transaction alone (never leaks to whatever query the pooled
+	// connection serves next once this one ends).
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL hnsw.ef_search = %d", candidates)); err != nil {
 		return nil, fmt.Errorf("search: unable to raise hnsw.ef_search: %w", err)
 	}

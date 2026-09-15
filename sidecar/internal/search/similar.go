@@ -47,8 +47,8 @@ const maxSeedPassages = 32
 
 // Similar returns entries whose own passages rank as nearest neighbours
 // of entryID's passages, aggregated to entry level exactly as Search's
-// own semantic and hybrid modes are (aggregate, fuse.go -- task 4's
-// machinery, reused verbatim rather than re-derived here). entryID
+// own semantic and hybrid modes are (aggregate, fuse.go, reused verbatim
+// rather than re-derived here). entryID
 // itself never appears in its own results: every underlying nearest-
 // neighbour query excludes entryID's passages at the SQL level, before
 // candidates are even counted against limit, so its own text can never

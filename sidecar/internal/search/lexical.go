@@ -39,13 +39,11 @@ import (
 //	Request.Limit=40  ->  200 per channel ->  1000 index candidates
 //	Request.Limit=100 -> 500 per channel  -> 2500 index candidates (clamped)
 //
-// Each multiplier's comment used to describe only its own layer, which
-// is exactly how a Critical went unnoticed for a full review cycle: the
-// semantic path feeds this product into `SET LOCAL hnsw.ef_search`,
-// which pgvector caps at 1000 (see maxVectorCandidates in semantic.go),
-// so every hybrid search asking for more than 40 results failed
-// outright. Any change to either constant must be reasoned about as a
-// change to the product.
+// The semantic path feeds this product into `SET LOCAL hnsw.ef_search`,
+// which pgvector caps at 1000 (see maxVectorCandidates in semantic.go);
+// the two constants disagreeing is why a hybrid search asking for more
+// than 40 results once failed outright. Any change to either constant
+// must be reasoned about as a change to the product.
 const candidateMultiplier = 5
 
 // minCandidates is a floor under candidateMultiplier*limit so that a
@@ -62,9 +60,8 @@ const minCandidates = 50
 // no server-side limit of its own that 2000 corresponds to. The vector
 // path must NOT reuse it — pgvector imposes a real, database-enforced
 // ceiling on hnsw.ef_search that is half this value, so semantic.go and
-// similar.go clamp against maxVectorCandidates instead. Reusing this
-// constant there is what caused the Critical documented on
-// candidateMultiplier above.
+// similar.go clamp against maxVectorCandidates instead (see
+// candidateMultiplier above for what reusing this one there costs).
 const maxCandidates = 2000
 
 // Searcher runs retrieval queries against search.passages and

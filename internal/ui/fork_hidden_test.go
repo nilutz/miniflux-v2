@@ -192,9 +192,9 @@ func withUIHiddenTestContext(r *http.Request, userID int64) *http.Request {
 // spec §13.3's core requirement: hiding an entry must actually remove it
 // from the rendered /unread page and from the unread counter, not merely
 // from a query builder unit test. It asserts the entry was on the page
-// first (the trap the task brief calls out: a "not found" assertion can
-// pass for the wrong reason), then that hiding makes it - and only its
-// contribution to the counter - disappear.
+// first (a "not found" assertion can otherwise pass for the wrong reason),
+// then that hiding makes it - and only its contribution to the counter -
+// disappear.
 func TestUnreadPageDropsHiddenEntryAndItsCount(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	store := storage.NewStorage(db)
@@ -278,7 +278,7 @@ func TestHiddenEntryStillReachableInFeedAndCategoryAllViews(t *testing.T) {
 
 // TestFeedAndCategoryUnreadViewsDropHiddenEntry covers the default (unread
 // only) feed and category views, the counterpart to the badge coverage
-// Task 5 already gave feed_query_builder.go / category.go: the list itself,
+// already given to feed_query_builder.go / category.go: the list itself,
 // not just the sidebar counter, must exclude a hidden entry.
 func TestFeedAndCategoryUnreadViewsDropHiddenEntry(t *testing.T) {
 	db := uiHiddenTestDB(t)

@@ -35,19 +35,18 @@ const DefaultBackfillPollInterval = 5 * time.Second
 // memoised value. That query has no LIMIT to stop early at and must
 // content-hash every candidate row (see PendingEntryCount's own doc
 // comment) — on a large, mostly-unindexed table it can take seconds, and
-// Remaining is exactly the value an admin page (Task 7) is likely to poll
+// Remaining is exactly the value an admin page is likely to poll
 // most often for its ETA. 45s is ample staleness for an ETA display (spec
 // §9.4) while keeping Stats() itself a cheap, effectively in-memory read
-// the rest of the time (fix round 2, finding 3).
+// the rest of the time.
 const DefaultRemainingCountTTL = 45 * time.Second
 
 // throughputEWMAAlpha weights each newly observed batch's rate against
 // the running average: Stats().ThroughputPerSec is an exponentially
 // weighted moving average over batches, not a lifetime average over all
 // active time, so it reflects how fast the lane is running RIGHT NOW —
-// what Task 7's ETA needs — rather than being dragged down for the rest
-// of a 41-hour run by one early, unrepresentative batch (fix round 2,
-// finding 4). 0.3 gives noticeable weight to the most recent batch while
+// what an ETA needs — rather than being dragged down for the rest
+// of a 41-hour run by one early, unrepresentative batch. 0.3 gives noticeable weight to the most recent batch while
 // still smoothing out one-off jitter.
 const throughputEWMAAlpha = 0.3
 
@@ -63,7 +62,7 @@ const throughputEWMAAlpha = 0.3
 // is not hypothetical: P0's scrape-backfill CLI rewrites entries.content
 // for precisely the old entries this excluded, so the sidecar would index
 // them from their RSS excerpts, report Done, and never notice when the
-// real article text landed underneath (whole-branch review, finding 3).
+// real article text landed underneath.
 //
 // 15 minutes is chosen against the cost of the sweep itself, not against
 // any latency requirement: a drained sweep is a single PendingEntryIDs
@@ -174,8 +173,7 @@ type backfillRetryState struct {
 // a fixed pollInterval between sweeps, a single durably broken entry was
 // re-embedded roughly 720 times an hour, forever, against a CPU-bound
 // model, while Stats().Failed climbed by one per sweep for that same
-// entry until the number meant nothing (fix round 2, finding 1 — a
-// regression introduced by fix round 1's Done-semantics fix).
+// entry until the number meant nothing.
 //
 // shouldAttempt gates whether an id is even attempted this round,
 // skipping it — at zero embedding cost, not merely zero counted-as-failed
@@ -268,7 +266,7 @@ func (r *retryTracker) isTracked(id int64) bool {
 // entries that were NOT observed anywhere in the sweep that just
 // completed.
 //
-// This exists to fix a real regression (fix round 3, finding 1): without
+// This exists to fix a real regression: without
 // it, an entry's retry state is cleared only by recordSuccess (it was
 // re-attempted and worked) or a fresh Start (a whole new run). If a
 // tracked entry stops being returned by PendingEntryIDs at all — its row
@@ -293,7 +291,7 @@ func (r *retryTracker) pruneNotIn(seen map[int64]bool) {
 }
 
 // Stats is a snapshot of a Backfill lane's progress, for the admin page
-// (Task 7, spec §9.4): "progress and ETA, current throughput, live
+// (spec §9.4): "progress and ETA, current throughput, live
 // concurrency with the controller's reason for it, error and skip counts
 // by cause, and pause/resume."
 type Stats struct {
@@ -302,7 +300,7 @@ type Stats struct {
 	Failed  int64 // distinct failures: a persistently failing entry counts once per distinct cause, not once per retry attempt
 
 	// Remaining is how many entries currently still need (re-)indexing,
-	// approximately — the denominator Task 7 needs to render "N indexed
+	// approximately — the denominator the admin page needs to render "N indexed
 	// of M" and derive an ETA from ThroughputPerSec. It comes from
 	// store.PendingEntryCountApprox (which does not detoast or hash
 	// anything, and slightly under-counts entries edited since they were
@@ -369,8 +367,8 @@ type Stats struct {
 // everything already done is no longer pending (spec §10: "Backfill crash
 // or window close -> Resumes from the entry_index_state checkpoint").
 //
-// This is also the invariant RunLive's own coordination fix depends on
-// (Task 6 fix round 1, finding 3; see live.go's doc comment) — Backfill
+// This is also the invariant RunLive's own coordination depends on
+// (see live.go's doc comment) — Backfill
 // must always rescan from its starting cursor on every process start, and
 // must never skip a run because an earlier one reported Done, or an entry
 // created during a shutdown window can become invisible to both lanes.
@@ -439,8 +437,7 @@ func NewBackfill(idx *Indexer, controller *Controller, cfg BackfillConfig) *Back
 	}
 	// The approximate count, not the exact one: this is refreshed on a
 	// timer behind an admin page that polls, and the exact predicate has
-	// to detoast and MD5 every candidate row (whole-branch review, finding
-	// 5). See store.PendingEntryCountApprox for exactly how it differs.
+	// to detoast and MD5 every candidate row. See store.PendingEntryCountApprox for exactly how it differs.
 	b.remainingCountFn = idx.store.PendingEntryCountApprox
 	return b
 }
@@ -665,7 +662,7 @@ func (b *Backfill) Start(ctx context.Context) error {
 // last page comes back empty is therefore wrong whenever that sweep left
 // any entry outstanding (still failing, or merely cooling down under its
 // own backoff): the backlog is not actually drained, just not visible from
-// where the cursor happens to be sitting (fix round 1, finding 2). So: if
+// where the cursor happens to be sitting. So: if
 // a sweep that reaches its end still has outstanding entries (per
 // retryTracker.hasOutstanding), the cursor resets to startAfter and
 // another sweep begins after a pollInterval pause; only a sweep that
@@ -673,15 +670,14 @@ func (b *Backfill) Start(ctx context.Context) error {
 //
 // Before checking hasOutstanding, every completed sweep prunes retry
 // state for any tracked id it never once saw returned by
-// PendingEntryIDs (fix round 3, finding 1 — a regression against fix
-// round 1's own 21cd5600). Without this, an entry whose row is deleted
+// PendingEntryIDs. Without this, an entry whose row is deleted
 // entirely — a feed removed, retention cleanup, both ordinary events
 // over this lane's 4-41 hour runtime — is never returned by
 // PendingEntryIDs again, so process is never called for it again, so
 // nothing ever clears its retry state: hasOutstanding stays true and
 // Start never returns, indistinguishable from a lane still genuinely
 // working. Pruning against what the sweep actually saw fixes this
-// without weakening the fix round 1 guarantee: an entry that is STILL
+// without weakening the guarantee above: an entry that is STILL
 // being returned (still genuinely failing, or merely cooling down under
 // its own backoff) is never pruned, only one the database has stopped
 // offering at all.
@@ -693,14 +689,13 @@ func (b *Backfill) Start(ctx context.Context) error {
 //
 // Resetting the cursor every pollInterval does not mean re-embedding
 // every outstanding entry every pollInterval, though: retryTracker gates
-// each entry's own next attempt behind its individual, escalating backoff
-// (fix round 2, finding 1 — fix round 1 introduced exactly the tight-loop
-// regression this replaces). A durably broken entry with nothing else
+// each entry's own next attempt behind its individual, escalating backoff.
+// A durably broken entry with nothing else
 // pending therefore still causes repeated, cheap PendingEntryIDs queries
 // every pollInterval, but its embedder is called on a rapidly widening
 // schedule, and Stats().Failed stops climbing once its cause stops
-// changing. For a corpus containing an entry that fails forever, Stats().Done
-// never becomes
+// changing. For a corpus containing an entry that fails forever,
+// Stats().Done never becomes
 // true — the accurate state of the world, not a bug: the backlog
 // genuinely never reaches zero while something in it is stuck.
 func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int64) error {
@@ -717,7 +712,7 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 
 	// A fresh run's Stats() should reflect only this run's progress, not
 	// accumulate across an earlier Start/cancel/Start cycle on the same
-	// Backfill (fix round 1, finding 10).
+	// Backfill.
 	b.indexed.Store(0)
 	b.skipped.Store(0)
 	b.failed.Store(0)
@@ -743,7 +738,7 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 	// CURRENT sweep, which currently-tracked (retries.isTracked) ids the
 	// database actually returned. Deliberately not "every id fetched" —
 	// that could be the whole table's worth over a long sweep — only
-	// tracked ids are ever relevant to pruning (fix round 3, finding 1),
+	// tracked ids are ever relevant to pruning,
 	// and there should be few of those at once. Reset at the start of
 	// every new sweep, below.
 	seenTrackedIDs := make(map[int64]bool)
@@ -814,7 +809,7 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 					// Per-entry latency, not the whole page's: a short,
 					// upTo-thinned, or mostly-backed-off-and-skipped page
 					// must not read as an artificially fast or slow
-					// batch (fix round 1, finding 6). The worker count
+					// batch. The worker count
 					// actually used is reported alongside it — runBatch
 					// clamps workers down to len(ids), so the controller's
 					// own figure is not always what ran — because the
@@ -848,8 +843,7 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 			// Prune before checking: any tracked id this sweep never
 			// once returned from the database is no longer genuinely
 			// pending (deleted, or otherwise resolved outside this
-			// lane's own retry path) and must stop pinning Done open
-			// (fix round 3, finding 1).
+			// lane's own retry path) and must stop pinning Done open.
 			b.retries.pruneNotIn(seenTrackedIDs)
 
 			wait := b.pollInterval()
@@ -866,8 +860,7 @@ func (b *Backfill) start(ctx context.Context, startAfter int64, upTo *atomic.Int
 				// caller explicitly asked for a one-shot — keep
 				// sweeping, because nothing else ever re-examines
 				// entries below the live lane's cursor (see
-				// DefaultIdleResweepInterval; whole-branch review,
-				// finding 3).
+				// DefaultIdleResweepInterval).
 				b.setDone(true)
 				if b.stopWhenDrained() {
 					return nil
@@ -960,7 +953,7 @@ func (b *Backfill) runBatch(ctx context.Context, ids []int64, workers int) {
 }
 
 // process indexes one entry and updates Stats' counters, classifying the
-// outcome by cause — the admin page (Task 7, spec §9.4) renders exactly
+// outcome by cause — the admin page (spec §9.4) renders exactly
 // this breakdown. IndexEntry itself does not distinguish "indexed" from
 // "skipped" in its return value (both return nil), so process reads back
 // the just-written index state to tell them apart and to recover the skip
@@ -968,14 +961,14 @@ func (b *Backfill) runBatch(ctx context.Context, ids []int64, workers int) {
 //
 // Before calling IndexEntry at all, process checks retryTracker: an id
 // still cooling down under its own backoff is skipped entirely, at zero
-// embedding cost (fix round 2, finding 1).
+// embedding cost.
 //
 // An error caused by ctx being cancelled (a shutdown or interruption, not
 // a real embedding failure — see IndexEntry's own doc comment) is not
 // counted as a failure, nor recorded in retryTracker, either: a cancelled
 // attempt was never actually finished, so treating it as this entry's
 // "latest cause" would be misleading, and counting it would inflate
-// Stats().Failed on every graceful shutdown (fix round 1, finding 8).
+// Stats().Failed on every graceful shutdown.
 func (b *Backfill) process(ctx context.Context, id int64) {
 	now := time.Now()
 	if !b.retries.shouldAttempt(id, now) {
@@ -1005,7 +998,7 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 		// key in failedByReason, a row in spec §9.4's by-cause table, and
 		// the value recordFailure de-duplicates repeat failures against.
 		// The full error, entry id and all, goes to the log line below
-		// where it belongs (whole-branch review, finding 4).
+		// where it belongs.
 		cause := failureCause(err)
 		interval := b.pollInterval()
 		initialBackoff := interval * retryBackoffMultiple
@@ -1046,8 +1039,7 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 }
 
 // cachedRemaining returns Stats().Remaining, refreshing it at most once
-// per remainingCountTTL and serving the memoised value otherwise (fix
-// round 2, finding 3). The query is scoped to this run's own starting
+// per remainingCountTTL and serving the memoised value otherwise. The query is scoped to this run's own starting
 // cursor (boundStartAfter), which lets Postgres skip everything at or
 // below it via the primary key index.
 //
@@ -1056,7 +1048,7 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 // Miniflux itself is serving from: the TTL expiring starts a query that
 // can run for a long time on a large corpus, the admin page reloads every
 // ten seconds, and each of those reloads would start another one on top of
-// the last (whole-branch review, finding 5). A caller arriving while a
+// the last. A caller arriving while a
 // refresh is running gets the previous value — stale by definition, which
 // an ETA can carry — rather than queueing behind it or starting a second
 // scan. With no previous value at all it gets -1, which the admin page

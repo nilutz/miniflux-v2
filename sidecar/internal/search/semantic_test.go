@@ -233,9 +233,9 @@ func TestSemanticEmptyQueryDoesNotReachDatabase(t *testing.T) {
 	}
 }
 
-// TestSemanticEmbeddingFailureSurfacesAsError is the bug class the task
-// brief calls out by name: a broken embedder returning nothing would look
-// exactly like "no matches" unless the failure is surfaced as an error.
+// TestSemanticEmbeddingFailureSurfacesAsError guards a bug class where a
+// broken embedder returning nothing would look exactly like "no matches"
+// unless the failure is surfaced as an error.
 func TestSemanticEmbeddingFailureSurfacesAsError(t *testing.T) {
 	reader := &countingReader{}
 	wantErr := errors.New("embedder is down")
@@ -453,7 +453,7 @@ func TestSemanticFiltersNarrowResultsByFeed(t *testing.T) {
 }
 
 // TestSemanticRaisesEfSearchForTheOverfetchWindow is a regression guard
-// for a real bug found in review: pgvector's default hnsw.ef_search (40)
+// for a real bug: pgvector's default hnsw.ef_search (40)
 // silently truncates the HNSW index scan's result set once a query asks
 // for more candidates than that — not an error, just quietly fewer rows
 // than LIMIT asked for.

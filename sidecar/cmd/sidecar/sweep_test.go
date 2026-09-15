@@ -24,13 +24,11 @@ import (
 	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
-// TestChunkingSweep is the repeatable chunking sweep tool the nomic
-// migration plan's task 3 brief (and the task 13 brief it supersedes)
-// asks for: for a given passage.SplitOptions, re-index a corpus from
-// scratch and report per-mode recall@10 alongside passage count and
-// passages-per-entry, so a sweep across candidate SplitOptions is one
-// command per configuration rather than a one-off measurement redone by
-// hand each time.
+// TestChunkingSweep is a repeatable chunking sweep tool: for a given
+// passage.SplitOptions, it re-indexes a corpus from scratch and reports
+// per-mode recall@10 alongside passage count and passages-per-entry, so a
+// sweep across candidate SplitOptions is one command per configuration
+// rather than a one-off measurement redone by hand each time.
 //
 // It lives here, not in internal/search or internal/passage, for the
 // identical reason TestEvalRecall does (see that file's own doc comment):
@@ -86,7 +84,7 @@ import (
 //
 // # What "refuse to run against a corpus failing the integrity guard" means here
 //
-// The task brief requires refusing to run against a corpus that fails
+// This tool refuses to run against a corpus that fails
 // eval.VerifyCorpusIntegrity. Since this tool always re-indexes fully
 // before scoring anything, checking that guard BEFORE the re-index would
 // only ever observe leftover state from whatever ran here last — on a
@@ -107,8 +105,8 @@ import (
 //
 // Measured once, on the corpus this project's eval harness was built
 // against (436 entries, nine tech/security blogs — see
-// internal/search/eval/README.md), at the CURRENT (pre-task-3, still
-// word-counted) defaults — TargetTokens=320, MaxTokens=512,
+// internal/search/eval/README.md), at the CURRENT (still word-counted)
+// defaults — TargetTokens=320, MaxTokens=512,
 // OverlapTokens=64 — 13 passages/entry:
 //
 //	keyword=0.828  semantic=0.955  hybrid=0.932  passages=0.919

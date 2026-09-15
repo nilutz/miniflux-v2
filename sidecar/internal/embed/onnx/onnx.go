@@ -27,18 +27,18 @@ import (
 )
 
 // dimensions is the fixed output width of the pinned nomic-embed-text-v1.5
-// model (nomic migration plan, task 2 — previously 384, bge-small-en-v1.5).
-// It is not derived at runtime: this package is validated against exactly
-// this model (see TestEmbedSeparatesParaphraseFromUnrelated), and swapping
-// models is a decision that needs re-validating, not a config knob.
+// model (previously 384, for bge-small-en-v1.5). It is not derived at
+// runtime: this package is validated against exactly this model (see
+// TestEmbedSeparatesParaphraseFromUnrelated), and swapping models is a
+// decision that needs re-validating, not a config knob.
 const dimensions = 768
 
 // promptPrefixes are the exact strings a model's publisher requires
 // prepended to each input text before embedding, split by whether the
 // text is a document being indexed or a search query being embedded —
-// nomic-embed-text-v1.5's asymmetric requirement (nomic migration plan,
-// task 1). The zero value (both fields empty) is the correct value for a
-// model that was never trained with any such distinction —
+// nomic-embed-text-v1.5's asymmetric requirement. The zero value (both
+// fields empty) is the correct value for a model that was never trained
+// with any such distinction —
 // bge-small-en-v1.5, still the configured model as of this writing — so
 // EmbedDocuments/EmbedQuery below can always unconditionally prepend
 // prefixes.document / prefixes.query: on a model with no prefixes that
@@ -109,7 +109,8 @@ type ONNXConfig struct {
 // onnxEmbedder is an Embedder backed by a hugot ONNX Runtime session running
 // the pinned nomic-embed-text-v1.5 model. One session and one pipeline are
 // shared across every Embed call, and Embed deliberately does no additional
-// locking of its own — the controller in a later task depends on that.
+// locking of its own — callers that manage their own concurrency depend on
+// that.
 //
 // This is safe, not merely fast: hugot's RunPipeline allocates a fresh
 // PipelineBatch and a fresh set of input/output tensors on every call, so

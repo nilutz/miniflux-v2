@@ -31,10 +31,8 @@ type Passage struct {
 // day-to-day budget, not a hard ceiling. Inject a counter backed by the
 // actual embedding model's real tokenizer wherever MaxTokens has to be a
 // genuine guarantee against a model's real context window rather than an
-// estimate of one — the nomic migration plan's task 3 brief calls this
-// "the two acceptable approaches" choice out by name, and this is
-// approach 1 (count real tokens), made safe to use here without this
-// package importing a tokenizer at all.
+// estimate of one — doing so via an injected function value keeps this
+// package free of any tokenizer import.
 //
 // internal/passage cannot supply a real TokenCounter itself: the actual
 // tokenizer lives behind internal/embed/onnx, which links ~37MB of
@@ -64,13 +62,11 @@ type SplitOptions struct {
 
 // DefaultSplitOptions returns the sizes used for indexing.
 //
-// These are still WORD counts by default (TokenCounter left nil): the
-// nomic migration plan's task 3 fixes the unit-honesty bug in how these
-// numbers are measured and labelled, but does not change their values —
-// that is a measurement the plan's sweep tool exists to make (see
-// cmd/sidecar's TestChunkingSweep), not a guess to make here. Do not read
-// "the units are now honest" as "these numbers were re-tuned for
-// nomic-embed-text-v1.5's 8192-token context"; they were not, yet.
+// These are still WORD counts by default (TokenCounter left nil), not
+// real token counts — see estimateTokens for the ratio and its error
+// bars. Retuning these values for nomic-embed-text-v1.5's 8192-token
+// context is a measurement to make with cmd/sidecar's TestChunkingSweep,
+// not a guess to make here; they have not been retuned yet.
 func DefaultSplitOptions() SplitOptions {
 	return SplitOptions{TargetTokens: 320, MaxTokens: 512, OverlapTokens: 64}
 }
@@ -156,15 +152,13 @@ func Split(text string, opts SplitOptions) []Passage {
 
 // estimateTokens is the default TokenCounter: a plain word count, used as
 // a cheap proxy for what a real subword tokenizer would report. For
-// English prose one word averages roughly 1.3 real BERT/WordPiece tokens
-// (nomic migration plan, task 3 brief; the superseded task 13 brief's own
-// word-versus-token analysis) — so this UNDER-counts real tokens by
-// roughly that factor on ordinary prose, and can under-count far more
-// sharply on text with many rare or non-dictionary "words" (each one
-// costing several WordPiece subword tokens instead of close to one). It
-// is a rough, cheap proxy, never a substitute for actually asking a
-// tokenizer — see TokenCounter's own doc comment for how to inject one
-// that is exact.
+// English prose one word averages roughly 1.3 real BERT/WordPiece
+// tokens, so this UNDER-counts real tokens by roughly that factor on
+// ordinary prose, and can under-count far more sharply on text with many
+// rare or non-dictionary "words" (each one costing several WordPiece
+// subword tokens instead of close to one). It is a rough, cheap proxy,
+// never a substitute for actually asking a tokenizer — see TokenCounter's
+// own doc comment for how to inject one that is exact.
 func estimateTokens(s string) int {
 	return len(strings.Fields(s))
 }

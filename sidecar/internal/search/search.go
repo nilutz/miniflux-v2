@@ -2,11 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package search implements retrieval over search.passages: BM25 lexical
-// ranking (task 2), vector similarity (task 3), and their Reciprocal Rank
-// Fusion plus entry-level aggregation (task 4, spec §6.3-6.4), tied
-// together behind (*Searcher).Search. It reads Miniflux's public.entries
-// read-only, alongside the sidecar-owned search schema, and never writes
-// to either.
+// ranking, vector similarity, and their Reciprocal Rank Fusion plus
+// entry-level aggregation (spec §6.3-6.4), tied together behind
+// (*Searcher).Search. It reads Miniflux's public.entries read-only,
+// alongside the sidecar-owned search schema, and never writes to either.
 package search // import "miniflux.app/v2/sidecar/internal/search"
 
 import (
@@ -19,11 +18,11 @@ import (
 // second round trip.
 //
 // Rank and Score are both returned deliberately: Rank is this retrieval's
-// 1-based position (1 = best), which is what Reciprocal Rank Fusion (task
-// 4, spec §6.3) actually fuses on; Score is the raw ranking signal behind
-// it (paradedb.score() here, cosine distance for semantic retrieval) kept
-// for display and debugging. Returning both here means task 4 never has
-// to re-derive rank from a list it didn't produce.
+// 1-based position (1 = best), which is what Reciprocal Rank Fusion (spec
+// §6.3) actually fuses on; Score is the raw ranking signal behind it
+// (paradedb.score() here, cosine distance for semantic retrieval) kept for
+// display and debugging. Returning both means RRF fusion never has to
+// re-derive rank from a list it didn't produce.
 type PassageHit struct {
 	PassageID int64
 	EntryID   int64
@@ -48,13 +47,11 @@ type PassageHit struct {
 //
 // That join is INSIDE the candidates CTE, above the index scan but below
 // the CTE's own LIMIT, not applied to the CTE's output afterwards. The
-// distinction is the whole point and it was got wrong once: a filter
-// applied after the candidate LIMIT lets non-matching rows consume the
-// candidate budget, so a narrow predicate can return nothing at all while
-// plenty of matching passages exist. Inside the CTE, the LIMIT counts only
-// rows that already passed the filter. Verified on the real corpus:
-// EXPLAIN ANALYZE puts the Limit node above the join for the BM25 path,
-// and the vector path's planner picks an exact filtered scan.
+// distinction matters: a filter applied after the candidate LIMIT lets
+// non-matching rows consume the candidate budget, so a narrow predicate
+// can return nothing at all while plenty of matching passages exist.
+// Inside the CTE, the LIMIT counts only rows that already passed the
+// filter.
 //
 // The over-fetch (candidateMultiplier) is still there and still useful —
 // retrieval is passage-level and results are entry-level — but it is no
@@ -63,23 +60,18 @@ type Filters struct {
 	// UserID restricts results to entries owned by that Miniflux user.
 	// Zero means no restriction — every user's passages are eligible.
 	//
-	// This one is not like the others. The rest of this struct is a
-	// convenience: a reader narrowing their own results to one feed, one
-	// category, a date range. UserID is a correctness requirement on a
-	// multi-user instance, and leaving it unset there is a silent bug
-	// rather than a wider search.
-	//
-	// search.passages is global — one row per passage of every entry of
-	// every user — so an unscoped retrieval fills its top-N from the
-	// whole corpus. A caller that then applies its own ownership filter
-	// downstream (the fork's search page hydrates hits through
-	// NewEntryQueryBuilder(user.ID), so it never *displays* another
-	// user's entry) is still left with a result page that other users'
-	// content already consumed the slots of: the reader silently gets
-	// fewer results than exist for their own query, potentially none.
-	// Setting UserID pushes the ownership predicate down to where the
-	// candidate set is formed, which is the only place it can decide
-	// what the top-N is made of.
+	// Unlike the other fields below, this is a correctness requirement on
+	// a multi-user instance, not just a convenience filter: search.passages
+	// is global (one row per passage of every entry of every user), so an
+	// unscoped retrieval fills its top-N from the whole corpus. A caller
+	// that applies its own ownership filter downstream only after that
+	// (e.g. hydrating hits through NewEntryQueryBuilder(user.ID)) never
+	// *displays* another user's entry, but still gets a result page whose
+	// slots other users' content already consumed — silently fewer
+	// results than exist for their own query, potentially none. Setting
+	// UserID pushes the ownership predicate down to where the candidate
+	// set is formed, the only place that can decide what the top-N is
+	// made of.
 	UserID int64
 
 	// FeedIDs restricts results to entries from these feeds. Empty means
@@ -115,7 +107,7 @@ func (f Filters) empty() bool {
 		!f.StarredOnly
 }
 
-// EntryHit is one entry-level search result (task 4, spec §6.4): an entry
+// EntryHit is one entry-level search result (spec §6.4): an entry
 // ranked by its own best-scoring passage, which is carried both as Score
 // (what Search ranks entries by) and as Best (what a caller renders as the
 // result's snippet). Passages carries every one of that entry's passages
@@ -141,10 +133,6 @@ func (f Filters) empty() bool {
 // is given, whichever direction that list was sorted in — so a caller
 // should treat slice position as the ranking and Score as a display and
 // debugging value only.
-//
-// PassageHit's own comment has carried this warning since task 2;
-// EntryHit's did not, which left the entry-level type — the one an HTTP
-// handler actually serialises — as the easy place to get it wrong.
 type EntryHit struct {
 	EntryID int64
 

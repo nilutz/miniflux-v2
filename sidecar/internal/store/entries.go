@@ -25,8 +25,8 @@ type Entry struct {
 }
 
 // ArticleDetail is one entry's full reader-facing content: everything
-// task 15's GET /api/article needs to let an MCP client read an article
-// it found via search/similar, and nothing more (no feed, no category, no
+// GET /api/article needs to let an MCP client read an article it found
+// via search/similar, and nothing more (no feed, no category, no
 // read/starred status) — this is a read-only content endpoint, not a
 // second copy of Miniflux's own entry API.
 type ArticleDetail struct {
@@ -42,8 +42,8 @@ type ArticleDetail struct {
 // takes a context for the same reason EntryForIndexing does -- this backs
 // an HTTP handler on the synchronous request path, not background work.
 //
-// userID scopes the lookup to entries that user owns (task 17): GET
-// /api/article is now an authenticated endpoint, and without this an
+// userID scopes the lookup to entries that user owns: GET
+// /api/article is an authenticated endpoint, and without this an
 // entry id from one user's search results could be used to read another
 // user's article content by number, regardless of whose API key asked for
 // it. A mismatch (an entry that exists, but belongs to someone else) is
@@ -73,7 +73,7 @@ func (s *Store) EntryArticle(ctx context.Context, entryID, userID int64) (*Artic
 //
 // It exists because content_hash alone is not enough to decide whether a
 // stored passage set is still valid. The offsets index into a plaintext
-// that is never stored anywhere — P1b has to re-derive it by calling
+// that is never stored anywhere — it has to be re-derived by calling
 // ExtractText again — so ANY change to ExtractText or Split silently
 // invalidates every stored offset and passage boundary, with the entry's
 // HTML, and therefore its content hash, completely unchanged. Nothing
@@ -90,10 +90,10 @@ func (s *Store) EntryArticle(ctx context.Context, entryID, userID int64) (*Artic
 // changes for any input.** internal/passage's TestPipelineOutputDigestIsStable
 // exists to fail loudly and remind you.
 //
-//	1 — initial pipeline (task 3).
+//	1 — initial pipeline.
 //	2 — ExtractText collapses Unicode whitespace (U+00A0, the rest of
 //	    \p{Z}, and U+FEFF), not only ASCII \s.
-//	3 — (task 1.5) the entry's title is now indexed as its own passage
+//	3 — the entry's title is now indexed as its own passage
 //	    (source='title', ordinal 0) alongside its body passages
 //	    (source='content'), and contentHash now covers the title as well
 //	    as the content -- so a title-only edit re-offers the entry too,
@@ -126,8 +126,8 @@ var pipelineVersion = PipelineVersion
 // pipelineVersion is one: exactly one value compared on both the Go side
 // and the SQL side, set once via SetModelIdentity by whoever constructs
 // the configured Embedder (indexer.New), and otherwise left alone.
-// Task 9 (spec §13.1) made this mutable well after startup, not just
-// once: the admin page's live embedder switch calls SetModelIdentity
+// This is mutable well after startup, not just once (spec §13.1): the
+// admin page's live embedder switch calls SetModelIdentity
 // while backfill workers may be concurrently calling contentHash via
 // EntryForIndexing/PendingEntryIDs/PendingEntryCount, on other
 // goroutines, RIGHT NOW -- exactly the scenario a plain, unguarded
@@ -152,7 +152,7 @@ var (
 // different width entirely — marks every entry pending on its own,
 // exactly as a PipelineVersion bump already does (spec §13.1). Called
 // once at startup with the configured Embedder's Identity(), and again by
-// Manager.Switch (Task 9) on every live embedder switch thereafter --
+// Manager.Switch on every live embedder switch thereafter --
 // leaving it unset is indistinguishable from every configured model
 // sharing the same (empty) identity, which reintroduces the exact gap
 // this exists to close.
@@ -165,7 +165,7 @@ func SetModelIdentity(identity string) {
 // getModelIdentity is the only place contentHash/PendingEntryIDs/
 // PendingEntryCount may read modelIdentity from -- see modelIdentityMu's
 // own doc comment for why a direct read is a data race, not merely bad
-// style, now that Task 9 can call SetModelIdentity concurrently with a
+// style, now that SetModelIdentity can be called concurrently with a
 // backfill or live lane in full flight.
 func getModelIdentity() string {
 	modelIdentityMu.RLock()
@@ -180,7 +180,7 @@ func getModelIdentity() string {
 // model change, a title edit, or a content edit each invalidate stored
 // passages exactly like one another (see PipelineVersion and
 // modelIdentity) — a title-only edit must re-offer the entry too, since it
-// changes what the (task 1.5) title passage should contain.
+// changes what the title passage should contain.
 //
 // It must agree, byte for byte, with the hash PendingEntryIDs and
 // PendingEntryCount compute in SQL, md5(pipeline version || model identity

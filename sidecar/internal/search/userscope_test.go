@@ -46,8 +46,8 @@ func hogPassages(term string, n int) []store.PassageRow {
 	return rows
 }
 
-// TestLexicalUserFilterKeepsAnotherUsersContentOutOfTheCandidateSet is
-// the whole-branch review's finding 3, as a test.
+// TestLexicalUserFilterKeepsAnotherUsersContentOutOfTheCandidateSet
+// demonstrates the user-scoping bug Filters.UserID guards against.
 //
 // search.passages is global. Before this fix, Filters carried no user, so
 // a retrieval's candidate set was drawn from every user's content and

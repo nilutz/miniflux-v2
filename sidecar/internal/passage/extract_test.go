@@ -43,7 +43,6 @@ func TestExtractTextCollapsesWhitespace(t *testing.T) {
 }
 
 func TestExtractTextReturnsEmptyForChromeOnly(t *testing.T) {
-	// The article-less case P0 already guards against; the sidecar must agree.
 	if got := ExtractText(`<div><p id="app"></p></div>`); got != "" {
 		t.Fatalf("expected empty, got %q", got)
 	}
@@ -52,7 +51,7 @@ func TestExtractTextReturnsEmptyForChromeOnly(t *testing.T) {
 // Go's RE2 \s is ASCII-only, so before the whitespace pattern was widened
 // a decoded &nbsp; (U+00A0) survived collapsing as a literal character and
 // travelled into passage text, the BM25 index, and the offsets derived
-// from it (whole-branch fix wave, finding 7).
+// from it.
 func TestExtractTextCollapsesUnicodeWhitespace(t *testing.T) {
 	cases := []struct {
 		name  string

@@ -66,12 +66,11 @@ var ErrUnavailable = errors.New("embedder unavailable")
 var ErrRequiresRestart = errors.New("embedder requires a sidecar restart to recover")
 
 // Task designates which side of an asymmetric embedding model's
-// query/document distinction a call is on. nomic-embed-text-v1.5 (the
-// nomic migration plan's target model) requires every input text
-// prefixed "search_document: " or "search_query: " depending on which;
-// a symmetric model — bge-small-en-v1.5, still configured as of this
-// writing — has no such distinction and is free to ignore Task
-// entirely.
+// query/document distinction a call is on. nomic-embed-text-v1.5
+// requires every input text prefixed "search_document: " or
+// "search_query: " depending on which; a symmetric model —
+// bge-small-en-v1.5, still configured as of this writing — has no such
+// distinction and is free to ignore Task entirely.
 //
 // Task is not a parameter on Embedder itself — see EmbedDocuments and
 // EmbedQuery's doc comments for why the distinction is two methods, not

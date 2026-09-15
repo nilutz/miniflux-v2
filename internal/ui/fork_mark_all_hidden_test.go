@@ -134,10 +134,9 @@ func TestMarkAllAsHiddenHandlerHidesAcrossFeedsButNotAnotherUser(t *testing.T) {
 }
 
 // TestHideEntriesHandlerHidesOnlyTheRequestedEntries is the backend for
-// "Mark page as hidden". It proves the trap called out for this action
-// specifically: an entry that exists but was not included in the request
-// (as if it were on a different page of the unread list) must stay
-// untouched, and the entries that were requested must carry
+// "Mark page as hidden". An entry that exists but was not included in the
+// request (as if it were on a different page of the unread list) must
+// stay untouched, and the entries that were requested must carry
 // hidden_reason = 'bulk'.
 func TestHideEntriesHandlerHidesOnlyTheRequestedEntries(t *testing.T) {
 	db := uiHiddenTestDB(t)

@@ -48,7 +48,7 @@ const (
 // lane meant to run unattended for 41 hours (spec §9.3), recordFailure's
 // de-duplication could never fire across entries, and the "Failures by
 // cause" table rendered one row per entry, which is not a breakdown by
-// cause (whole-branch review, finding 4).
+// cause.
 //
 // Their message text is the leading clause of the error string they are
 // wrapped into, so wrapping costs no change in what an operator reads in
@@ -163,7 +163,7 @@ func genericCause(err error) string {
 type Indexer struct {
 	store *store.Store
 
-	// embedderMu guards embedder itself (Task 9, spec §13.1: the admin
+	// embedderMu guards embedder itself (spec §13.1: the admin
 	// page's live embedder switch). It is held as a WRITE lock only for
 	// the instant SetEmbedder replaces the pointer, and as a READ lock for
 	// the full duration of every call that actually invokes the embedder
@@ -210,8 +210,8 @@ func New(s *store.Store, e embed.Embedder) *Indexer {
 // passage.Split for body text, taking effect on the next IndexEntry call
 // exactly like SetBatchSize. Every production lane leaves this at
 // passage.DefaultSplitOptions() (New's starting value); it exists so the
-// chunking sweep tool (nomic migration plan, task 3 brief — see
-// cmd/sidecar's TestChunkingSweep) can re-index a corpus under a
+// chunking sweep tool (nomic migration plan — see cmd/sidecar's
+// TestChunkingSweep) can re-index a corpus under a
 // candidate SplitOptions without a second copy of IndexEntry's logic.
 //
 // Unlike SetBatchSize this performs no clamping: an out-of-range or
@@ -320,9 +320,9 @@ func (idx *Indexer) SetEmbedderIfNotAbandoned(e embed.Embedder, abandoned func()
 // Close releases the currently configured embedder's underlying session.
 // cmd/sidecar defers this instead of closing whatever embedder it
 // originally constructed directly, so that shutdown always closes
-// whichever embedder is active NOW -- the one a live switch (Task 9) may
-// have since swapped in -- not a stale reference to the one main()
-// started with.
+// whichever embedder is active NOW -- the one a live switch may have
+// since swapped in -- not a stale reference to the one main() started
+// with.
 func (idx *Indexer) Close() error {
 	return idx.Embedder().Close()
 }
@@ -331,7 +331,7 @@ func (idx *Indexer) Close() error {
 // embedder is CURRENTLY configured, rather than a value fixed once at
 // construction. Pass this, never a raw embed.Embedder pulled from
 // Embedder() above, to anything that must keep working correctly across a
-// live embedder switch (Task 9) -- cmd/sidecar's search.WithEmbedder call
+// live embedder switch -- cmd/sidecar's search.WithEmbedder call
 // is the one production caller: without this indirection, the Searcher
 // would keep calling EmbedQuery on a *closed* embedder after a switch,
 // which is a segfault for the ONNX backend, not an error.
@@ -371,7 +371,7 @@ func (d indexerEmbedder) Close() error { return nil }
 // indexed, returns immediately without doing any work (in particular,
 // without calling the embedder — see spec §10, "entry unchanged"). The
 // entry's title becomes its own passage (ordinal 0, source="title",
-// offsets into the title itself — task 1.5), skipped only if the title is
+// offsets into the title itself), skipped only if the title is
 // empty or all whitespace; text is extracted from the entry's HTML and
 // split into body passages (source="content", offsets into that extracted
 // plaintext, ordinals following the title). An entry with neither a usable
@@ -469,7 +469,7 @@ type sourcedPassage struct {
 // order. It holds embedderMu.RLock for its entire duration (see that
 // field's own doc comment on *Indexer) -- not merely a snapshot read of
 // the embedder pointer -- for two reasons together: it is what lets
-// SetEmbedder (Task 9's live embedder switch) prove no in-flight call
+// SetEmbedder (the live embedder switch) prove no in-flight call
 // remains before the caller closes the replaced embedder, and it
 // guarantees every passage of THIS entry is embedded by the SAME
 // embedder object even if a switch happens to land between two of this
@@ -519,7 +519,7 @@ func (idx *Indexer) embedPassages(ctx context.Context, entryID int64, contentHas
 				// marking this entry "failed" would be wrong (its
 				// content was never the problem), and doing so for
 				// every entry mid-batch during an outage is precisely
-				// the failure mode this task exists to prevent — a
+				// the failure mode this mechanism exists to prevent — a
 				// five-minute network blip must not mark thousands of
 				// entries individually failed, needing retry backoff to
 				// unwind it. The backfill and live lanes call

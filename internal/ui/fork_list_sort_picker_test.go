@@ -15,14 +15,13 @@ import (
 	"miniflux.app/v2/internal/storage"
 )
 
-// Task 10 major 1: the sort picker extended from search to the five
-// remaining named views (unread, starred, history, feed, category). Each
-// view gets: (a) proof the picker overrides the saved preference for
-// that list, with a fixture where published_at and title order disagree
-// so the assertion actually discriminates, and (b) proof the sibling
-// single-entry view's prev/next pagination walks the same effective
-// order, not the reader's global preference (the exact trap already
-// fixed once for entry_search.go).
+// The sort picker extends from search to the five remaining named views
+// (unread, starred, history, feed, category). Each view gets: (a) proof the
+// picker overrides the saved preference for that list, with a fixture
+// where published_at and title order disagree so the assertion actually
+// discriminates, and (b) proof the sibling single-entry view's prev/next
+// pagination walks the same effective order, not the reader's global
+// preference (the exact trap already fixed once for entry_search.go).
 
 // TestUnreadPagePickerOverridesPreference covers the list side for
 // unread. published_at is the reverse of title order, so a title-
@@ -330,8 +329,9 @@ func TestFeedEntriesPagePickerOverridesPreference(t *testing.T) {
 
 // TestUnreadFeedEntryPaginationWalksPickerOrder is the feed single-entry
 // pagination version. showFeedEntriesPage's permalinks route here
-// (showUnreadFeedEntryPage), not to showFeedEntryPage - see the report
-// for why.
+// (showUnreadFeedEntryPage), not to showFeedEntryPage, because the
+// template links to the unread-scoped entry route whenever the list is
+// showing only unread entries.
 func TestUnreadFeedEntryPaginationWalksPickerOrder(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	store := storage.NewStorage(db)
@@ -407,7 +407,8 @@ func TestCategoryEntriesPagePickerOverridesPreference(t *testing.T) {
 
 // TestUnreadCategoryEntryPaginationWalksPickerOrder is the category
 // single-entry pagination version. showCategoryEntriesPage's permalinks
-// route here (showUnreadCategoryEntryPage) by default - see the report.
+// route here (showUnreadCategoryEntryPage) by default, for the same
+// unread-scoped-template reason as the feed variant above.
 func TestUnreadCategoryEntryPaginationWalksPickerOrder(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	store := storage.NewStorage(db)
@@ -445,10 +446,10 @@ func TestUnreadCategoryEntryPaginationWalksPickerOrder(t *testing.T) {
 	}
 }
 
-// TestListPagePermalinkCarriesOrderAndDirection proves the round trip
-// (task brief: "every parameter survives opening a result and coming
-// back") for one representative extended view - unread - via its
-// result-link queryString dict.
+// TestListPagePermalinkCarriesOrderAndDirection proves that order and
+// direction survive opening a result and coming back, for one
+// representative extended view - unread - via its result-link
+// queryString dict.
 func TestListPagePermalinkCarriesOrderAndDirection(t *testing.T) {
 	db := uiHiddenTestDB(t)
 	store := storage.NewStorage(db)
