@@ -1,0 +1,92 @@
+# Development stack: this fork, built from source, with search.
+#
+#   docker compose -f docker-compose.dev.yaml up --build
+#
+# Miniflux is on http://localhost:8080 (admin / REDACTED-DEV-PASSWORD), the sidecar's
+# status page on http://localhost:8081/.
+#
+# One database serves both. That is the architecture, not a shortcut: the
+# sidecar owns the `search` schema and reads `public.entries` read-only, so
+# it must be the same PostgreSQL instance Miniflux writes to.
+#
+# The first `up --build` is slow -- the sidecar image downloads the ONNX
+# Runtime, libtokenizers and ~32MB of model weights. Later builds are cached.
+
+services:
+  db:
+    # ParadeDB, not stock postgres: the sidecar needs pg_search (BM25) and
+    # vector (pgvector/HNSW), and stock PostgreSQL ships neither. A
+    # postgres:18 image lists 59 available extensions and has no vector and
+    # no pg_search among them.
+    image: paradedb/paradedb:latest
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=miniflux
+      - POSTGRES_PASSWORD=REDACTED-DEV-PASSWORD
+      - POSTGRES_DB=miniflux
+    volumes:
+      # Mounted at /var/lib/postgresql, NOT .../data: this image sets
+      # PGDATA=/var/lib/postgresql/18/docker, so /data holds nothing and
+      # mounting there would leave the real data directory unmounted --
+      # discarded on the next `docker compose down -v` or recreate.
+      - miniflux-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "miniflux"]
+      interval: 10s
+      start_period: 30s
+
+  miniflux:
+    build:
+      context: .
+      dockerfile: packaging/docker/alpine/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://miniflux:REDACTED-DEV-PASSWORD@db/miniflux?sslmode=disable
+      - RUN_MIGRATIONS=1
+      - CREATE_ADMIN=1
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=REDACTED-DEV-PASSWORD
+      # Goal 0. Upstream defaults this off and the fork keeps that default
+      # to stay rebaseable, so the dev stack turns it on explicitly --
+      # without it, new feeds store only the RSS excerpt and there is
+      # very little text to search.
+      - CRAWLER_ENABLED_BY_DEFAULT=1
+      # Empty by default, which makes the search page fall back to
+      # Miniflux's own FTS. Pointing it at the sidecar is what enables
+      # keyword/semantic/hybrid/passage modes and "more like this".
+      - SEARCH_SIDECAR_URL=http://sidecar:8081
+
+  sidecar:
+    build:
+      context: ./sidecar
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+      # Ordering only -- the sidecar reads public.entries, so Miniflux's
+      # migrations must have created that table first. Compose cannot wait
+      # on "migrations finished", so the sidecar may still lose the race on
+      # a first-ever boot; it exits, and `restart: unless-stopped` brings
+      # it back once the table exists.
+      miniflux:
+        condition: service_started
+    environment:
+      - SIDECAR_DATABASE_URL=postgres://miniflux:REDACTED-DEV-PASSWORD@db/miniflux?sslmode=disable
+      # local runs the in-process ONNX embedder baked into the image.
+      # Set remote + SIDECAR_REMOTE_EMBEDDER_URL to embed on another
+      # machine instead (spec 13.1); the model identity the remote reports
+      # is folded into the content hash, so switching re-indexes.
+      - SIDECAR_EMBEDDER=local
+
+volumes:
+  miniflux-db:
