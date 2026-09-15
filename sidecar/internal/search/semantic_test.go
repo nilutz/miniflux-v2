@@ -150,16 +150,21 @@ type fixedVectorEmbedder struct {
 	vectors map[string][]float32
 }
 
-func (f *fixedVectorEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	for i, t := range texts {
-		v, ok := f.vectors[t]
-		if !ok {
-			return nil, errors.New("fixedVectorEmbedder: no fixture vector for " + t)
-		}
-		out[i] = v
+func (f *fixedVectorEmbedder) EmbedQuery(_ context.Context, text string) ([]float32, error) {
+	v, ok := f.vectors[text]
+	if !ok {
+		return nil, errors.New("fixedVectorEmbedder: no fixture vector for " + text)
 	}
-	return out, nil
+	return v, nil
+}
+
+// EmbedDocuments is never called by internal/search's query path
+// (embedCached, Semantic's only embedder entry point, calls EmbedQuery
+// exclusively), so this panics rather than faking a result: a genuine
+// discrimination test, not an assertion against whatever a permissive
+// fake happened to be handed.
+func (f *fixedVectorEmbedder) EmbedDocuments(context.Context, []string) ([][]float32, error) {
+	panic("fixedVectorEmbedder: EmbedDocuments should never be called by internal/search's query path")
 }
 
 func (f *fixedVectorEmbedder) Dimensions() int  { return 384 }
@@ -170,9 +175,17 @@ func (f *fixedVectorEmbedder) Close() error     { return nil }
 // down or misconfigured.
 type erroringEmbedder struct{ err error }
 
-func (e *erroringEmbedder) Embed(_ context.Context, _ []string) ([][]float32, error) {
+func (e *erroringEmbedder) EmbedQuery(_ context.Context, _ string) ([]float32, error) {
 	return nil, e.err
 }
+
+// EmbedDocuments is never called by internal/search's query path; see
+// fixedVectorEmbedder's EmbedDocuments for why this panics rather than
+// faking a result.
+func (e *erroringEmbedder) EmbedDocuments(context.Context, []string) ([][]float32, error) {
+	panic("erroringEmbedder: EmbedDocuments should never be called by internal/search's query path")
+}
+
 func (e *erroringEmbedder) Dimensions() int  { return 384 }
 func (e *erroringEmbedder) Identity() string { return "erroring-embedder@test#384" }
 func (e *erroringEmbedder) Close() error     { return nil }

@@ -11,11 +11,27 @@
 //
 // One endpoint, POST {URL}/embed. Request:
 //
-//	{"texts": ["first passage", "second passage"]}
+//	{"texts": ["first passage", "second passage"], "task": "document"}
+//
+// "task" is "document" (embed.TaskDocument) or "query" (embed.TaskQuery),
+// set by which of EmbedDocuments/EmbedQuery the caller invoked. It exists
+// because an asymmetric model — nomic-embed-text-v1.5, the model the
+// nomic migration plan's task 1 added this for — must embed a document
+// differently than it embeds a query for the identical string (it
+// requires "search_document: "/"search_query: " prepended respectively),
+// and only the remote knows what, if anything, the model it is actually
+// running needs done with that distinction: this client deliberately
+// does not hardcode either prefix itself, the same way the local ONNX
+// implementation gates its own prefixing by model rather than by a
+// blanket rule. A server whose configured model needs no such
+// distinction (bge-small-en-v1.5) is free to ignore this field entirely.
 //
 // texts may be empty — used internally by New to probe the remote's
-// identity and dimensions without embedding anything real. A conforming
-// server must still populate "model" in that case. Response, 200 only:
+// identity and dimensions without embedding anything real; task is still
+// sent (as "document", arbitrarily — it has no effect on an empty batch)
+// so every request this client ever sends has the same shape. A
+// conforming server must still populate "model" in that case. Response,
+// 200 only:
 //
 //	{
 //	  "vectors": [[0.01, -0.02, ...], [0.03, 0.04, ...]],
@@ -25,10 +41,10 @@
 // "vectors" has exactly one entry per input text, in the same order,
 // each of "model.dimensions" length. "model" is returned on every
 // response, not only the first, describing whatever model actually
-// produced that batch's vectors — Embed compares it against what New
-// learned at startup on every call, so a remote that swaps models
-// mid-run is caught on the next batch rather than silently mixing two
-// models' vectors in one HNSW graph (spec §13.1).
+// produced that batch's vectors — EmbedDocuments/EmbedQuery compare it
+// against what New learned at startup on every call, so a remote that
+// swaps models mid-run is caught on the next batch rather than silently
+// mixing two models' vectors in one HNSW graph (spec §13.1).
 //
 // Anything other than a 200 status is an error; the response body, if
 // any, is included in the error message on a best-effort basis. There is
@@ -75,7 +91,8 @@ type Config struct {
 
 // embedRequest is this package's wire request. See the package doc.
 type embedRequest struct {
-	Texts []string `json:"texts"`
+	Texts []string   `json:"texts"`
+	Task  embed.Task `json:"task"`
 }
 
 // modelInfo is the model-identity half of the wire response. See the
@@ -94,9 +111,9 @@ type embedResponse struct {
 
 // remoteEmbedder is an Embedder that delegates every call to an HTTP
 // service. identity and dims are fixed at construction (New's probe);
-// Embed re-checks the identity it gets back on every call rather than
-// trusting it stays put for the life of the process — see the package
-// doc's note on model swaps mid-run.
+// embedWithTask re-checks the identity it gets back on every call rather
+// than trusting it stays put for the life of the process — see the
+// package doc's note on model swaps mid-run.
 type remoteEmbedder struct {
 	endpoint string
 	client   *http.Client
@@ -125,7 +142,10 @@ func New(cfg Config) (embed.Embedder, error) {
 		client:   &http.Client{Timeout: timeout},
 	}
 
-	_, model, err := e.doEmbed(context.Background(), nil)
+	// The task sent here is arbitrary — an empty batch embeds nothing —
+	// but must still be a valid one, so every request this client ever
+	// sends (including this one-time startup probe) has the same shape.
+	_, model, err := e.doEmbed(context.Background(), nil, embed.TaskDocument)
 	if err != nil {
 		return nil, fmt.Errorf("embed/remote: probe %s: %w", e.endpoint, err)
 	}
@@ -176,13 +196,36 @@ func validateIdentityComponents(name, revision string) error {
 	return nil
 }
 
-// Embed implements embed.Embedder.
-func (e *remoteEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+// EmbedDocuments implements embed.Embedder.
+func (e *remoteEmbedder) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	return e.embedWithTask(ctx, texts, embed.TaskDocument)
+}
+
+// EmbedQuery implements embed.Embedder.
+func (e *remoteEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	vectors, err := e.embedWithTask(ctx, []string{text}, embed.TaskQuery)
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) != 1 {
+		return nil, fmt.Errorf("embed/remote: expected 1 vector for 1 query text, got %d", len(vectors))
+	}
+	return vectors[0], nil
+}
+
+// embedWithTask is EmbedDocuments and EmbedQuery's shared implementation:
+// every request/response mechanic — the POST itself, the per-call
+// identity re-check below, the vector-count check — lives here exactly
+// once, so the only thing that differs between the two public methods is
+// which embed.Task each hardcodes into its own call, not two
+// independently maintained copies of the mechanics that could drift out
+// of step with each other.
+func (e *remoteEmbedder) embedWithTask(ctx context.Context, texts []string, task embed.Task) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
 
-	vectors, model, err := e.doEmbed(ctx, texts)
+	vectors, model, err := e.doEmbed(ctx, texts, task)
 	if err != nil {
 		return nil, err
 	}
@@ -238,17 +281,19 @@ func (e *remoteEmbedder) Close() error {
 }
 
 // doEmbed performs one request/response round trip against the remote's
-// single endpoint. It backs both the public Embed (non-empty texts) and
+// single endpoint, sending task alongside texts so the remote knows
+// which side of an asymmetric model's distinction this batch is on (see
+// the package doc). It backs both embedWithTask (non-empty texts) and
 // New's startup probe (an empty batch, to learn the remote's identity
-// and dimensions without embedding anything real) — Embed short-circuits
-// before reaching here on an empty input, so this is the only path that
-// ever actually talks to the network.
-func (e *remoteEmbedder) doEmbed(ctx context.Context, texts []string) ([][]float32, modelInfo, error) {
+// and dimensions without embedding anything real) — embedWithTask
+// short-circuits before reaching here on an empty input, so this is the
+// only path that ever actually talks to the network.
+func (e *remoteEmbedder) doEmbed(ctx context.Context, texts []string, task embed.Task) ([][]float32, modelInfo, error) {
 	if texts == nil {
 		texts = []string{}
 	}
 
-	body, err := json.Marshal(embedRequest{Texts: texts})
+	body, err := json.Marshal(embedRequest{Texts: texts, Task: task})
 	if err != nil {
 		return nil, modelInfo{}, fmt.Errorf("embed/remote: encode request: %w", err)
 	}

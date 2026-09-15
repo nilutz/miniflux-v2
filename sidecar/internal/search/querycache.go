@@ -6,7 +6,6 @@ package search // import "miniflux.app/v2/sidecar/internal/search"
 import (
 	"container/list"
 	"context"
-	"fmt"
 	"sync"
 
 	"miniflux.app/v2/sidecar/internal/embed"
@@ -96,28 +95,43 @@ func (c *queryCache) put(query string, vec []float32) {
 }
 
 // embedCached returns query's embedding, consulting cache first and
-// calling embedder.Embed only on a miss — the seam this package's
+// calling embedder.EmbedQuery only on a miss — the seam this package's
 // querycache_test.go exercises hermetically with a counting fake
 // Embedder, and the one Searcher.embedQuery uses for real Semantic
-// retrieval.
+// retrieval. It deliberately calls EmbedQuery, never EmbedDocuments: this
+// is the query side of the asymmetric-embedding split (embed.Embedder's
+// doc comment), and an asymmetric model needs the query prefix applied
+// here, not the document one.
 //
-// An error from embedder.Embed is returned as-is, uncached: a transient
-// failure must not poison the cache with a missing entry that looks
-// identical to "never asked", and must surface to the caller rather than
-// silently falling back to no results (see Semantic's own doc comment).
+// The cache key is the raw query string, unprefixed, and this task does
+// not change that. A prefixed model (nomic-embed-text-v1.5) means two
+// different vectors can now exist for the same text — its document
+// embedding and its query embedding — but that is not a hazard for THIS
+// cache: a queryCache's entire lifetime is bounded to one Searcher, built
+// once in cmd/sidecar/main.go over one embed.Embedder instance for the
+// life of the process (swapping embedders needs a restart — see
+// embed.ErrRequiresRestart), and embedCached only ever calls EmbedQuery,
+// never EmbedDocuments. Every vector a given cache instance ever holds
+// was therefore produced by the same model's query-side prefixing,
+// consistently, for as long as that cache exists — there is no code path
+// by which one cache could hold a vector computed under one prefix
+// alongside one computed under another, or without a prefix at all.
+//
+// An error from embedder.EmbedQuery is returned as-is, uncached: a
+// transient failure must not poison the cache with a missing entry that
+// looks identical to "never asked", and must surface to the caller
+// rather than silently falling back to no results (see Semantic's own
+// doc comment).
 func embedCached(ctx context.Context, cache *queryCache, embedder embed.Embedder, query string) ([]float32, error) {
 	if vec, ok := cache.get(query); ok {
 		return vec, nil
 	}
 
-	vecs, err := embedder.Embed(ctx, []string{query})
+	vec, err := embedder.EmbedQuery(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-	if len(vecs) != 1 {
-		return nil, fmt.Errorf("search: embedder returned %d vectors for 1 input query", len(vecs))
-	}
 
-	cache.put(query, vecs[0])
-	return vecs[0], nil
+	cache.put(query, vec)
+	return vec, nil
 }

@@ -65,13 +65,74 @@ var ErrUnavailable = errors.New("embedder unavailable")
 // leaving that distinction buried in prose an operator has to read.
 var ErrRequiresRestart = errors.New("embedder requires a sidecar restart to recover")
 
+// Task designates which side of an asymmetric embedding model's
+// query/document distinction a call is on. nomic-embed-text-v1.5 (the
+// nomic migration plan's target model) requires every input text
+// prefixed "search_document: " or "search_query: " depending on which;
+// a symmetric model — bge-small-en-v1.5, still configured as of this
+// writing — has no such distinction and is free to ignore Task
+// entirely.
+//
+// Task is not a parameter on Embedder itself — see EmbedDocuments and
+// EmbedQuery's doc comments for why the distinction is two methods, not
+// a Task argument threaded through one. It exists anyway as a small
+// shared vocabulary: internal/embed/remote's wire protocol and any local
+// implementation's internal prefix table both need to spell "document"
+// and "query" identically rather than each inventing its own strings or
+// a bare bool, and a future implementation has one obvious type to
+// switch on if it ever needs the distinction internally.
+type Task string
+
+const (
+	// TaskDocument marks text being embedded to index — what
+	// internal/indexer writes to search.passages via EmbedDocuments.
+	TaskDocument Task = "document"
+
+	// TaskQuery marks text being embedded to search with — what
+	// internal/search/querycache.go embeds via EmbedQuery.
+	TaskQuery Task = "query"
+)
+
 // Embedder turns text into dense vectors. The ONNX implementation is the only
-// one today; the interface exists so a local inference service or a pure-Go
-// backend can be substituted without touching the pipeline (spec §6.6).
+// local one today; the interface exists so a local inference service or a
+// pure-Go backend can be substituted without touching the pipeline (spec
+// §6.6).
 type Embedder interface {
-	// Embed returns one vector per input text, each of Dimensions() length.
+	// EmbedDocuments returns one vector per input text, each of
+	// Dimensions() length, embedding every text as a document being
+	// indexed — the passages internal/indexer writes to search.passages.
 	// An empty input returns no vectors and no error.
-	Embed(ctx context.Context, texts []string) ([][]float32, error)
+	//
+	// For an asymmetric model this must embed text differently than
+	// EmbedQuery does for the identical string: nomic-embed-text-v1.5
+	// requires "search_document: " prepended here and "search_query: "
+	// there, and the two are not interchangeable — a spike measured
+	// cosine(search_document:X, search_query:X) = 0.8855, close but
+	// distinctly not 1.0, so swapping the two prefixes or dropping
+	// either degrades retrieval with no error and no other visible
+	// symptom. Each implementation's own doc comment says how it guards
+	// against silently forgetting to apply its prefix.
+	EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error)
+
+	// EmbedQuery embeds a single search query string, returning its
+	// vector, each of Dimensions() length — the counterpart to
+	// EmbedDocuments for internal/search/querycache.go's query path.
+	//
+	// This is a separate method, not
+	// EmbedDocuments(ctx, []string{text}) with a Task argument threaded
+	// through, because which prefix (if any) applies is a property of
+	// WHICH SIDE OF THE INDEX a text is on — decided once, structurally,
+	// by which production code path is calling (internal/indexer only
+	// ever indexes; internal/search/querycache.go only ever queries) —
+	// never by a runtime value that has to be threaded, correctly and
+	// consistently, through every call site and every future one. Two
+	// methods make each call site's intent visible in a diff and in a
+	// stack trace, make it impossible to send the right texts under the
+	// wrong task by transposing an argument, and let every
+	// implementation apply its own model's prefix, if it has one, in
+	// exactly one place per task instead of in one branch of a shared
+	// conditional either call path could take by mistake.
+	EmbedQuery(ctx context.Context, text string) ([]float32, error)
 
 	// Dimensions is the fixed width of every vector this Embedder returns.
 	Dimensions() int

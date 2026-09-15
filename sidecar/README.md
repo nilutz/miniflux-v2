@@ -212,7 +212,18 @@ first.
 ## The embedder (`internal/embed`, `internal/embed/onnx`)
 
 `internal/embed` holds the small, pure-Go `Embedder` interface
-(`Embed`/`Dimensions`/`Close`) with no CGO and no native dependencies.
+(`EmbedDocuments`/`EmbedQuery`/`Dimensions`/`Identity`/`Close`) with no CGO
+and no native dependencies. Embedding a document (to index) and embedding a
+query (to search with) are separate methods, not one method with a
+document/query flag: an asymmetric model —
+[`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5),
+not the model actually configured as of this writing, but the interface is
+shaped for it — requires a different, incompatible text prefix
+(`"search_document: "`/`"search_query: "`) for each, and a missing prefix
+degrades retrieval with no error and no other symptom. Two methods make
+each call site's intent (internal/indexer only ever indexes;
+internal/search/querycache.go only ever queries) visible in a diff rather
+than depending on a runtime flag threaded correctly through every call.
 `internal/embed/onnx` implements it: it wraps
 [hugot](https://github.com/knights-analytics/hugot) (v0.7.8, build tag
 `ORT`) around [ONNX Runtime](https://onnxruntime.ai/) (native v1.30.0) to
@@ -284,13 +295,14 @@ them — see "Environment variables used by tests" below.
 ### One shared session, safe for concurrent use
 
 `NewONNX` creates one hugot session and one pipeline, both reused for every
-`Embed` call. This is deliberate: the spike's best-measured throughput (33.9
-passages/sec) came from **two goroutines sharing one session with ORT's
-default threading left unconstrained**, not from one session per goroutine
-or from pinning `WithIntraOpNumThreads`/`WithInterOpNumThreads` to 1 per
-hugot's own README advice — that measured **11.7** passages/sec, three times
-slower. `Embed` does no additional locking of its own; a later task's
-controller calls it concurrently from multiple goroutines on purpose.
+`EmbedDocuments`/`EmbedQuery` call. This is deliberate: the spike's
+best-measured throughput (33.9 passages/sec) came from **two goroutines
+sharing one session with ORT's default threading left unconstrained**, not
+from one session per goroutine or from pinning
+`WithIntraOpNumThreads`/`WithInterOpNumThreads` to 1 per hugot's own README
+advice — that measured **11.7** passages/sec, three times slower. Neither
+method does any additional locking of its own; a later task's controller
+calls them concurrently from multiple goroutines on purpose.
 
 ## The `ORT` build tag
 
@@ -351,12 +363,25 @@ instance).
 Request:
 
 ```json
-{"texts": ["first passage", "second passage"]}
+{"texts": ["first passage", "second passage"], "task": "document"}
 ```
 
+`task` is `"document"` or `"query"`, set by which of `EmbedDocuments` /
+`EmbedQuery` the caller invoked. It exists because an asymmetric model
+(`nomic-ai/nomic-embed-text-v1.5`) must embed a document differently than
+it embeds a query for the identical string — it needs
+`"search_document: "`/`"search_query: "` prepended respectively — and only
+the remote knows what, if anything, the model it is actually running
+needs done with that distinction: the client deliberately does not
+hardcode either prefix itself. A server whose configured model needs no
+such distinction (`bge-small-en-v1.5`, the model actually configured as of
+this writing) is free to ignore this field entirely.
+
 `texts` may be empty — the sidecar sends an empty batch once, at startup,
-purely to learn `model` below without embedding anything real. A
-conforming server must still populate `model` in that case.
+purely to learn `model` below without embedding anything real; `task` is
+still sent on that request too (arbitrarily, as `"document"` — it has no
+effect on an empty batch), so every request this client ever sends has the
+same shape. A conforming server must still populate `model` in that case.
 
 Response, `200` only:
 

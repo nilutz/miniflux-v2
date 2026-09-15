@@ -32,6 +32,63 @@ import (
 // swapping models is a decision that needs re-validating, not a config knob.
 const dimensions = 384
 
+// promptPrefixes are the exact strings a model's publisher requires
+// prepended to each input text before embedding, split by whether the
+// text is a document being indexed or a search query being embedded —
+// nomic-embed-text-v1.5's asymmetric requirement (nomic migration plan,
+// task 1). The zero value (both fields empty) is the correct value for a
+// model that was never trained with any such distinction —
+// bge-small-en-v1.5, still the configured model as of this writing — so
+// EmbedDocuments/EmbedQuery below can always unconditionally prepend
+// prefixes.document / prefixes.query: on a model with no prefixes that
+// prepends the empty string, a no-op.
+type promptPrefixes struct {
+	document string
+	query    string
+}
+
+// modelPromptPrefixes maps a model's directory basename — the same
+// string embed.Identity's "name" component is built from, see NewONNX
+// below — to the promptPrefixes it requires. A model absent from this
+// table gets promptPrefixes' zero value (no prefixes), which is correct
+// for every model this package has ever run other than
+// nomic-embed-text-v1.5. Do not add an entry here on a guess: add one
+// only once a model's own card documents a prefix requirement, as
+// nomic's does (https://huggingface.co/nomic-ai/nomic-embed-text-v1.5 —
+// "search_document: " / "search_query: ") — hardcoding a prefix into the
+// generic embed path instead of gating it by model, or guessing a prefix
+// a model was never trained with, both degrade retrieval silently, with
+// no error and no other visible symptom.
+var modelPromptPrefixes = map[string]promptPrefixes{
+	"nomic-embed-text-v1.5": {document: "search_document: ", query: "search_query: "},
+}
+
+// promptPrefixesForModel looks up modelName (a resolved model directory
+// basename) in modelPromptPrefixes, defaulting to the no-prefix zero
+// value for anything not listed. It is a free function, independent of
+// any *onnxEmbedder, precisely so it is unit-testable with a bare string
+// — no ONNX Runtime session, no model file, no CGO at all — see
+// TestPromptPrefixesForModel.
+func promptPrefixesForModel(modelName string) promptPrefixes {
+	return modelPromptPrefixes[modelName]
+}
+
+// withPrefix prepends prefix to every element of texts into a newly
+// allocated slice — texts (a caller's own slice, e.g. the indexer's
+// batch) is never mutated in place out from under its owner. Returns
+// texts unchanged (no allocation) when prefix is empty, the common case
+// for every model other than nomic.
+func withPrefix(prefix string, texts []string) []string {
+	if prefix == "" {
+		return texts
+	}
+	out := make([]string, len(texts))
+	for i, t := range texts {
+		out[i] = prefix + t
+	}
+	return out
+}
+
 // ONNXConfig configures an ONNX-backed Embedder.
 type ONNXConfig struct {
 	// ModelPath is the filesystem path to the quantized ONNX model file
@@ -67,6 +124,7 @@ type onnxEmbedder struct {
 	session  *hugot.Session
 	pipeline *pipelines.FeatureExtractionPipeline
 	identity string
+	prefixes promptPrefixes
 }
 
 // NewONNX creates an Embedder that runs the bge-small-en-v1.5 model through
@@ -85,6 +143,7 @@ func NewONNX(cfg ONNXConfig) (embed.Embedder, error) {
 		return nil, fmt.Errorf("embed: determine model revision: %w", err)
 	}
 	identity := embed.Identity(filepath.Base(modelRoot), revision, dimensions)
+	prefixes := promptPrefixesForModel(filepath.Base(modelRoot))
 
 	var sessionOpts []options.WithOption
 	if cfg.ONNXLibraryDir != "" {
@@ -124,9 +183,10 @@ func NewONNX(cfg ONNXConfig) (embed.Embedder, error) {
 		slog.String("onnx_filename", onnxFilename),
 		slog.Int("dimensions", dimensions),
 		slog.String("identity", identity),
+		slog.Bool("uses_prompt_prefixes", prefixes != promptPrefixes{}),
 	)
 
-	return &onnxEmbedder{session: session, pipeline: pipeline, identity: identity}, nil
+	return &onnxEmbedder{session: session, pipeline: pipeline, identity: identity, prefixes: prefixes}, nil
 }
 
 // modelRevision derives Identity's "revision" component from the actual
@@ -180,8 +240,14 @@ func resolveModelRoot(onnxPath string) (root, onnxFilename string) {
 	return filepath.Dir(onnxPath), onnxFilename
 }
 
-// Embed implements Embedder.
-func (e *onnxEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+// embed is the shared implementation behind EmbedDocuments and
+// EmbedQuery: it runs texts — already prefixed by whichever of the two
+// called it — through the pipeline and returns their vectors. Neither
+// public method reaches RunPipeline any other way, so "did this call
+// apply e.prefixes" only ever has to be answered once, at each method's
+// own single call into this helper, rather than at every call site
+// RunPipeline might grow in the future.
+func (e *onnxEmbedder) embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
@@ -191,6 +257,23 @@ func (e *onnxEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, 
 		return nil, fmt.Errorf("embed: run pipeline: %w", err)
 	}
 	return result.Embeddings, nil
+}
+
+// EmbedDocuments implements embed.Embedder.
+func (e *onnxEmbedder) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	return e.embed(ctx, withPrefix(e.prefixes.document, texts))
+}
+
+// EmbedQuery implements embed.Embedder.
+func (e *onnxEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	vectors, err := e.embed(ctx, withPrefix(e.prefixes.query, []string{text}))
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) != 1 {
+		return nil, fmt.Errorf("embed: expected 1 vector for 1 query text, got %d", len(vectors))
+	}
+	return vectors[0], nil
 }
 
 // Dimensions implements Embedder.

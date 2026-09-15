@@ -48,7 +48,7 @@ type fakeEmbedder struct {
 	err   error
 }
 
-func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (f *fakeEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	f.calls.Add(1)
 	if f.err != nil {
 		return nil, f.err
@@ -60,6 +60,16 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 		out[i] = v
 	}
 	return out, nil
+}
+
+// EmbedQuery is never called on this path: IndexEntry only ever embeds
+// documents (see indexer.go). Panicking rather than returning a fake
+// vector makes the two call paths' separation a property this test
+// suite proves, not merely assumes -- if IndexEntry were ever changed to
+// call EmbedQuery by mistake, this fake would fail loudly instead of
+// silently returning a plausible-looking vector under the wrong task.
+func (f *fakeEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("fakeEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
 func (f *fakeEmbedder) Dimensions() int  { return 384 }
@@ -77,9 +87,15 @@ type unavailableEmbedder struct {
 	calls atomic.Int64
 }
 
-func (u *unavailableEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (u *unavailableEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	u.calls.Add(1)
 	return nil, fmt.Errorf("%w: simulated: remote unreachable", embed.ErrUnavailable)
+}
+
+// EmbedQuery is never called by internal/indexer; see fakeEmbedder's
+// EmbedQuery for why this panics rather than faking a result.
+func (u *unavailableEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("unavailableEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
 func (u *unavailableEmbedder) Dimensions() int  { return 384 }
@@ -94,7 +110,7 @@ type batchRecordingEmbedder struct {
 	batchSizes []int
 }
 
-func (b *batchRecordingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (b *batchRecordingEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	b.mu.Lock()
 	b.batchSizes = append(b.batchSizes, len(texts))
 	b.mu.Unlock()
@@ -104,6 +120,12 @@ func (b *batchRecordingEmbedder) Embed(_ context.Context, texts []string) ([][]f
 		out[i] = make([]float32, 384)
 	}
 	return out, nil
+}
+
+// EmbedQuery is never called by internal/indexer; see fakeEmbedder's
+// EmbedQuery for why this panics rather than faking a result.
+func (b *batchRecordingEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("batchRecordingEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
 func (b *batchRecordingEmbedder) Dimensions() int  { return 384 }
@@ -124,12 +146,18 @@ type distinctIdentityEmbedder struct {
 	identity string
 }
 
-func (d *distinctIdentityEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (d *distinctIdentityEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i := range texts {
 		out[i] = make([]float32, 384)
 	}
 	return out, nil
+}
+
+// EmbedQuery is never called by internal/indexer; see fakeEmbedder's
+// EmbedQuery for why this panics rather than faking a result.
+func (d *distinctIdentityEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("distinctIdentityEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
 func (d *distinctIdentityEmbedder) Dimensions() int  { return 384 }
@@ -335,6 +363,35 @@ func TestIndexEntryIndexesAPlainEntry(t *testing.T) {
 	}
 	if status != "ok" {
 		t.Fatalf("expected status 'ok', got %q", status)
+	}
+}
+
+// TestIndexEntryOnlyEverCallsEmbedDocuments is the nomic migration plan's
+// task 1 call-path proof for internal/indexer: IndexEntry indexes
+// passages, so it must call embed.Embedder.EmbedDocuments and must never
+// call EmbedQuery — an asymmetric model (nomic-embed-text-v1.5) applies a
+// different, incompatible prefix to each, and passages embedded under the
+// query prefix would be silently wrong, with no error anywhere (see
+// embed.Embedder's doc comment).
+//
+// fakeEmbedder's EmbedQuery panics rather than returning a fake vector
+// (see its own doc comment), so this is a genuine discrimination test,
+// not an assertion against what a permissive fake merely recorded:
+// change indexer.go's IndexEntry to call EmbedQuery instead of
+// EmbedDocuments and this test panics.
+func TestIndexEntryOnlyEverCallsEmbedDocuments(t *testing.T) {
+	s, db := testEnv(t)
+	entryID := createTestEntry(t, db, "index-only-embeds-documents",
+		"<p>The quick brown fox jumps over the lazy dog. It was a fine day for testing indexing.</p>")
+
+	fe := &fakeEmbedder{}
+	idx := New(s, fe)
+	if err := idx.IndexEntry(context.Background(), entryID); err != nil {
+		t.Fatalf("IndexEntry failed: %v", err)
+	}
+
+	if calls := fe.calls.Load(); calls == 0 {
+		t.Fatal("expected IndexEntry to have called EmbedDocuments at least once")
 	}
 }
 

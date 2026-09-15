@@ -19,13 +19,18 @@ type countingFakeEmbedder struct {
 	calls atomic.Int64
 }
 
-func (f *countingFakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (f *countingFakeEmbedder) EmbedQuery(_ context.Context, text string) ([]float32, error) {
 	f.calls.Add(1)
-	out := make([][]float32, len(texts))
-	for i, t := range texts {
-		out[i] = []float32{float32(len(t)), 0, 0}
-	}
-	return out, nil
+	return []float32{float32(len(text)), 0, 0}, nil
+}
+
+// EmbedDocuments is never called by internal/search's query path
+// (embedCached calls EmbedQuery exclusively — see its own doc comment),
+// so this panics rather than faking a result: a genuine discrimination
+// test, not an assertion against whatever a permissive fake happened to
+// be handed.
+func (f *countingFakeEmbedder) EmbedDocuments(context.Context, []string) ([][]float32, error) {
+	panic("countingFakeEmbedder: EmbedDocuments should never be called by internal/search's query path")
 }
 
 func (f *countingFakeEmbedder) Dimensions() int  { return 3 }
@@ -54,6 +59,31 @@ func TestEmbedCachedEmbedsRepeatedQueryOnce(t *testing.T) {
 	}
 	if !reflect.DeepEqual(v1, v2) {
 		t.Fatalf("expected the cached vector to be identical across calls, got %v and %v", v1, v2)
+	}
+}
+
+// TestEmbedCachedOnlyEverCallsEmbedQuery is the nomic migration plan's
+// task 1 call-path proof for internal/search: embedCached embeds a
+// search query, so it must call embed.Embedder.EmbedQuery and must never
+// call EmbedDocuments — an asymmetric model (nomic-embed-text-v1.5)
+// applies a different, incompatible prefix to each, and a query embedded
+// under the document prefix would silently rank worse, with no error
+// anywhere (see embed.Embedder's doc comment).
+//
+// countingFakeEmbedder's EmbedDocuments panics rather than returning a
+// fake result (see its own doc comment), so this is a genuine
+// discrimination test: change embedCached to call EmbedDocuments instead
+// of EmbedQuery and this test panics.
+func TestEmbedCachedOnlyEverCallsEmbedQuery(t *testing.T) {
+	fe := &countingFakeEmbedder{}
+	cache := newQueryCache(128)
+
+	if _, err := embedCached(context.Background(), cache, fe, "hello world"); err != nil {
+		t.Fatalf("embedCached: unexpected error: %v", err)
+	}
+
+	if calls := fe.calls.Load(); calls != 1 {
+		t.Fatalf("expected EmbedQuery to have been called exactly once, got %d calls", calls)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,6 +72,154 @@ func newFakeServer(t *testing.T, dimensions int, name, revision string) (*httpte
 	return srv, &requests
 }
 
+// taskRecorder records the "task" field of every request a
+// newTaskRecordingServer handler saw, in arrival order, so a test can
+// assert on exactly what this package's wire protocol sent — the
+// boundary that actually matters (see
+// TestEmbedDocumentsSendsDocumentTaskOverHTTP's own doc comment): not
+// what a fake embedder recorded being handed, but the literal bytes that
+// left the process as an HTTP request body.
+type taskRecorder struct {
+	mu    sync.Mutex
+	tasks []string
+}
+
+func (r *taskRecorder) record(task string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tasks = append(r.tasks, task)
+}
+
+// last returns the most recently recorded task, or "" if none has been
+// recorded yet.
+func (r *taskRecorder) last() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.tasks) == 0 {
+		return ""
+	}
+	return r.tasks[len(r.tasks)-1]
+}
+
+// reset discards every task recorded so far — used after New's
+// construction-time probe, so a test asserting on a specific
+// EmbedDocuments/EmbedQuery call doesn't have to account for the probe's
+// own request too.
+func (r *taskRecorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tasks = nil
+}
+
+// newTaskRecordingServer behaves like newFakeServer, additionally
+// decoding and recording each request's "task" field into the returned
+// taskRecorder.
+func newTaskRecordingServer(t *testing.T, dimensions int, name, revision string) (*httptest.Server, *taskRecorder) {
+	t.Helper()
+	tasks := &taskRecorder{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Texts []string `json:"texts"`
+			Task  string   `json:"task"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		tasks.record(req.Task)
+
+		vectors := make([][]float32, len(req.Texts))
+		for i := range req.Texts {
+			vectors[i] = fakeVector(float32(i + 1))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"vectors": vectors,
+			"model": map[string]any{
+				"name":       name,
+				"revision":   revision,
+				"dimensions": dimensions,
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, tasks
+}
+
+// TestEmbedDocumentsSendsDocumentTaskOverHTTP and
+// TestEmbedQuerySendsQueryTaskOverHTTP are this task's proof for the
+// remote implementation, at the boundary the plan's report contract
+// calls out as the one that matters: not what a fake embedder was
+// handed (a fake can be wired correctly while the real client sends
+// nothing, or the wrong thing, over the wire), but the literal "task"
+// field this package's own doEmbed put into the HTTP request body. A
+// remote server's own prefixing decision (spec: the wire protocol
+// carries the distinction, it does not hardcode a prefix client-side) is
+// only as good as this field actually arriving correctly — these two
+// tests are what would fail, loudly, if EmbedDocuments and EmbedQuery
+// were ever merged back into one path that forgot which embed.Task
+// belongs to which, or if either method's hardcoded embed.Task constant
+// were transposed.
+func TestEmbedDocumentsSendsDocumentTaskOverHTTP(t *testing.T) {
+	srv, tasks := newTaskRecordingServer(t, 384, "bge-small-en-v1.5", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+	tasks.reset() // discard New's own construction-time probe request
+
+	if _, err := e.EmbedDocuments(context.Background(), []string{"hello"}); err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+
+	if got := tasks.last(); got != "document" {
+		t.Fatalf(`EmbedDocuments sent task=%q over HTTP, want "document"`, got)
+	}
+}
+
+func TestEmbedQuerySendsQueryTaskOverHTTP(t *testing.T) {
+	srv, tasks := newTaskRecordingServer(t, 384, "bge-small-en-v1.5", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+	tasks.reset() // discard New's own construction-time probe request
+
+	if _, err := e.EmbedQuery(context.Background(), "hello"); err != nil {
+		t.Fatalf("EmbedQuery: %v", err)
+	}
+
+	if got := tasks.last(); got != "query" {
+		t.Fatalf(`EmbedQuery sent task=%q over HTTP, want "query"`, got)
+	}
+}
+
+// TestNewProbeSendsAValidTaskOverHTTP covers New's own startup probe (an
+// empty batch): the package doc promises every request this client ever
+// sends has the same shape, including that one, so a server that
+// validates "task" strictly must never reject the probe for missing or
+// malformed task.
+func TestNewProbeSendsAValidTaskOverHTTP(t *testing.T) {
+	srv, tasks := newTaskRecordingServer(t, 384, "bge-small-en-v1.5", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+
+	got := tasks.last()
+	if got != "document" && got != "query" {
+		t.Fatalf("New's startup probe sent task=%q over HTTP, want a valid task value", got)
+	}
+}
+
 // newDriftingServer behaves like newFakeServer for its first request (the
 // probe New's construction makes), then reports a different model name on
 // every request after that. It exists to test Embed's per-call identity
@@ -128,7 +277,7 @@ func TestEmbedAcceptsRepeatedCallsWithStableIdentity(t *testing.T) {
 	defer e.Close()
 
 	for i := 0; i < 3; i++ {
-		vectors, err := e.Embed(context.Background(), []string{"hello"})
+		vectors, err := e.EmbedDocuments(context.Background(), []string{"hello"})
 		if err != nil {
 			t.Fatalf("Embed call %d: unexpected error: %v", i, err)
 		}
@@ -153,7 +302,7 @@ func TestEmbedRejectsIdentityChangeMidRun(t *testing.T) {
 	}
 	defer e.Close()
 
-	vectors, err := e.Embed(context.Background(), []string{"hello"})
+	vectors, err := e.EmbedDocuments(context.Background(), []string{"hello"})
 	if err == nil {
 		t.Fatal("expected an error when the remote's identity changes mid-run, got nil")
 	}
@@ -178,7 +327,7 @@ func TestNewProbesRemoteAndBatchRoundTrips(t *testing.T) {
 		t.Fatalf("expected exactly 1 request from New's probe, got %d", atomic.LoadInt32(requests))
 	}
 
-	vectors, err := e.Embed(context.Background(), []string{"first", "second"})
+	vectors, err := e.EmbedDocuments(context.Background(), []string{"first", "second"})
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
@@ -223,7 +372,7 @@ func TestEmbedWithNoTextsDoesNotCallRemote(t *testing.T) {
 	defer e.Close()
 
 	before := atomic.LoadInt32(requests)
-	vectors, err := e.Embed(context.Background(), nil)
+	vectors, err := e.EmbedDocuments(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("Embed with no texts returned an error: %v", err)
 	}
@@ -361,7 +510,7 @@ func TestEmbedConnectionFailureWrapsErrUnavailable(t *testing.T) {
 
 	srv.Close() // the remote is unreachable from here on
 
-	_, err = e.Embed(context.Background(), []string{"hello"})
+	_, err = e.EmbedDocuments(context.Background(), []string{"hello"})
 	if err == nil {
 		t.Fatal("expected an error once the remote is unreachable, got nil")
 	}
@@ -404,7 +553,7 @@ func TestEmbedNonOKStatusWrapsErrUnavailable(t *testing.T) {
 
 	healthy.Store(false) // now the remote starts failing every request
 
-	_, err = e.Embed(context.Background(), []string{"hello"})
+	_, err = e.EmbedDocuments(context.Background(), []string{"hello"})
 	if err == nil {
 		t.Fatal("expected an error for a non-200 response, got nil")
 	}
@@ -431,7 +580,7 @@ func TestEmbedRejectsIdentityChangeMidRunWrapsErrUnavailable(t *testing.T) {
 	}
 	defer e.Close()
 
-	_, err = e.Embed(context.Background(), []string{"hello"})
+	_, err = e.EmbedDocuments(context.Background(), []string{"hello"})
 	if err == nil {
 		t.Fatal("expected an error when the remote's identity changes mid-run, got nil")
 	}
@@ -456,7 +605,7 @@ func TestEmbedRejectsIdentityChangeMidRunWrapsErrRequiresRestart(t *testing.T) {
 	}
 	defer e.Close()
 
-	_, err = e.Embed(context.Background(), []string{"hello"})
+	_, err = e.EmbedDocuments(context.Background(), []string{"hello"})
 	if err == nil {
 		t.Fatal("expected an error when the remote's identity changes mid-run, got nil")
 	}
@@ -481,7 +630,7 @@ func TestEmbedConnectionFailureDoesNotWrapErrRequiresRestart(t *testing.T) {
 
 	srv.Close()
 
-	_, err = e.Embed(context.Background(), []string{"hello"})
+	_, err = e.EmbedDocuments(context.Background(), []string{"hello"})
 	if err == nil {
 		t.Fatal("expected an error once the remote is unreachable, got nil")
 	}

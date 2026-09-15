@@ -72,7 +72,7 @@ type countingEmbedder struct {
 	markers []string
 }
 
-func (e *countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (e *countingEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	e.counts.record(texts, e.markers)
 	out := make([][]float32, len(texts))
 	for i := range texts {
@@ -80,6 +80,14 @@ func (e *countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32
 	}
 	return out, nil
 }
+
+// EmbedQuery is never called by internal/indexer; see indexer_test.go's
+// fakeEmbedder.EmbedQuery for why this panics rather than faking a
+// result.
+func (e *countingEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("countingEmbedder: EmbedQuery should never be called by internal/indexer")
+}
+
 func (e *countingEmbedder) Dimensions() int  { return 384 }
 func (e *countingEmbedder) Identity() string { return testModelIdentity }
 func (e *countingEmbedder) Close() error     { return nil }
@@ -102,7 +110,7 @@ type blockOnMarkerEmbedder struct {
 	blockedOnce sync.Once
 }
 
-func (e *blockOnMarkerEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+func (e *blockOnMarkerEmbedder) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
 	e.counts.record(texts, e.markers)
 
 	marked := false
@@ -123,6 +131,14 @@ func (e *blockOnMarkerEmbedder) Embed(ctx context.Context, texts []string) ([][]
 	}
 	return out, nil
 }
+
+// EmbedQuery is never called by internal/indexer; see indexer_test.go's
+// fakeEmbedder.EmbedQuery for why this panics rather than faking a
+// result.
+func (e *blockOnMarkerEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("blockOnMarkerEmbedder: EmbedQuery should never be called by internal/indexer")
+}
+
 func (e *blockOnMarkerEmbedder) Dimensions() int  { return 384 }
 func (e *blockOnMarkerEmbedder) Identity() string { return testModelIdentity }
 func (e *blockOnMarkerEmbedder) Close() error     { return nil }
@@ -136,7 +152,7 @@ type variableDelayEmbedder struct {
 	delay atomic.Int64 // nanoseconds
 }
 
-func (d *variableDelayEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (d *variableDelayEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	if ns := d.delay.Load(); ns > 0 {
 		time.Sleep(time.Duration(ns))
 	}
@@ -146,6 +162,14 @@ func (d *variableDelayEmbedder) Embed(_ context.Context, texts []string) ([][]fl
 	}
 	return out, nil
 }
+
+// EmbedQuery is never called by internal/indexer; see indexer_test.go's
+// fakeEmbedder.EmbedQuery for why this panics rather than faking a
+// result.
+func (d *variableDelayEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("variableDelayEmbedder: EmbedQuery should never be called by internal/indexer")
+}
+
 func (d *variableDelayEmbedder) Dimensions() int  { return 384 }
 func (d *variableDelayEmbedder) Identity() string { return testModelIdentity }
 func (d *variableDelayEmbedder) Close() error     { return nil }
@@ -161,7 +185,7 @@ type backfillUnavailableEmbedder struct {
 	calls   atomic.Int64
 }
 
-func (u *backfillUnavailableEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (u *backfillUnavailableEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	u.calls.Add(1)
 	if !u.healthy.Load() {
 		return nil, fmt.Errorf("%w: simulated: remote unreachable", embed.ErrUnavailable)
@@ -172,6 +196,14 @@ func (u *backfillUnavailableEmbedder) Embed(_ context.Context, texts []string) (
 	}
 	return out, nil
 }
+
+// EmbedQuery is never called by internal/indexer; see indexer_test.go's
+// fakeEmbedder.EmbedQuery for why this panics rather than faking a
+// result.
+func (u *backfillUnavailableEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("backfillUnavailableEmbedder: EmbedQuery should never be called by internal/indexer")
+}
+
 func (u *backfillUnavailableEmbedder) Dimensions() int  { return 384 }
 func (u *backfillUnavailableEmbedder) Identity() string { return testModelIdentity }
 func (u *backfillUnavailableEmbedder) Close() error     { return nil }
@@ -185,10 +217,18 @@ type backfillIdentityChangedEmbedder struct {
 	calls atomic.Int64
 }
 
-func (i *backfillIdentityChangedEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+func (i *backfillIdentityChangedEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	i.calls.Add(1)
 	return nil, fmt.Errorf("%w: %w: simulated: remote identity changed mid-run", embed.ErrUnavailable, embed.ErrRequiresRestart)
 }
+
+// EmbedQuery is never called by internal/indexer; see indexer_test.go's
+// fakeEmbedder.EmbedQuery for why this panics rather than faking a
+// result.
+func (i *backfillIdentityChangedEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
+	panic("backfillIdentityChangedEmbedder: EmbedQuery should never be called by internal/indexer")
+}
+
 func (i *backfillIdentityChangedEmbedder) Dimensions() int  { return 384 }
 func (i *backfillIdentityChangedEmbedder) Identity() string { return testModelIdentity }
 func (i *backfillIdentityChangedEmbedder) Close() error     { return nil }

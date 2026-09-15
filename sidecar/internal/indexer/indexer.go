@@ -302,7 +302,7 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 			texts[i-batchStart] = combined[i].text
 		}
 
-		vectors, err := idx.embedder.Embed(ctx, texts)
+		vectors, err := idx.embedder.EmbedDocuments(ctx, texts)
 		if err != nil {
 			if ctx.Err() != nil {
 				// ctx was cancelled (shutdown, or a backfill/live lane
