@@ -130,7 +130,7 @@ func createFixtureEntry(t *testing.T, db *sql.DB, tag, title, content string) fi
 // embedding — Lexical never reads the embedding column, so its exact
 // value is irrelevant to every test in this file, only its presence
 // (search.passages.embedding is nullable, but ReplacePassages always
-// writes a full 384-dim vector, matching every other fixture in this
+// writes a full 768-dim vector, matching every other fixture in this
 // codebase, e.g. store/passages_test.go).
 func writePassages(t *testing.T, s *store.Store, entryID int64, rows []store.PassageRow) {
 	t.Helper()
@@ -139,7 +139,7 @@ func writePassages(t *testing.T, s *store.Store, entryID int64, rows []store.Pas
 	}
 }
 
-func zeroEmbedding() []float32 { return make([]float32, 384) }
+func zeroEmbedding() []float32 { return make([]float32, 768) }
 
 func hasEntryID(hits []PassageHit, entryID int64) bool {
 	for _, h := range hits {

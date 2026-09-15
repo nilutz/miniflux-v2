@@ -18,10 +18,10 @@ import (
 	"miniflux.app/v2/sidecar/internal/embed"
 )
 
-// fakeVector returns a deterministic 384-dimension vector so tests can
+// fakeVector returns a deterministic 768-dimension vector so tests can
 // assert on its contents without caring about real embedding math.
 func fakeVector(fill float32) []float32 {
-	v := make([]float32, 384)
+	v := make([]float32, 768)
 	for i := range v {
 		v[i] = fill
 	}
@@ -163,7 +163,7 @@ func newTaskRecordingServer(t *testing.T, dimensions int, name, revision string)
 // belongs to which, or if either method's hardcoded embed.Task constant
 // were transposed.
 func TestEmbedDocumentsSendsDocumentTaskOverHTTP(t *testing.T) {
-	srv, tasks := newTaskRecordingServer(t, 384, "bge-small-en-v1.5", "abc123")
+	srv, tasks := newTaskRecordingServer(t, 768, "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -182,7 +182,7 @@ func TestEmbedDocumentsSendsDocumentTaskOverHTTP(t *testing.T) {
 }
 
 func TestEmbedQuerySendsQueryTaskOverHTTP(t *testing.T) {
-	srv, tasks := newTaskRecordingServer(t, 384, "bge-small-en-v1.5", "abc123")
+	srv, tasks := newTaskRecordingServer(t, 768, "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -206,7 +206,7 @@ func TestEmbedQuerySendsQueryTaskOverHTTP(t *testing.T) {
 // validates "task" strictly must never reject the probe for missing or
 // malformed task.
 func TestNewProbeSendsAValidTaskOverHTTP(t *testing.T) {
-	srv, tasks := newTaskRecordingServer(t, 384, "bge-small-en-v1.5", "abc123")
+	srv, tasks := newTaskRecordingServer(t, 768, "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -268,7 +268,7 @@ func newDriftingServer(t *testing.T, dimensions int, initialName, laterName, rev
 // the mid-run identity check: as long as the remote keeps reporting the
 // same model, repeated Embed calls succeed.
 func TestEmbedAcceptsRepeatedCallsWithStableIdentity(t *testing.T) {
-	srv := newDriftingServer(t, 384, "bge-small-en-v1.5", "bge-small-en-v1.5", "abc123")
+	srv := newDriftingServer(t, 768, "bge-small-en-v1.5", "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -294,7 +294,7 @@ func TestEmbedAcceptsRepeatedCallsWithStableIdentity(t *testing.T) {
 // behind the same URL would have its vectors silently mixed into an
 // index built under the old identity.
 func TestEmbedRejectsIdentityChangeMidRun(t *testing.T) {
-	srv := newDriftingServer(t, 384, "bge-small-en-v1.5", "some-other-model", "abc123")
+	srv := newDriftingServer(t, 768, "bge-small-en-v1.5", "some-other-model", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -315,7 +315,7 @@ func TestEmbedRejectsIdentityChangeMidRun(t *testing.T) {
 }
 
 func TestNewProbesRemoteAndBatchRoundTrips(t *testing.T) {
-	srv, requests := newFakeServer(t, 384, "bge-small-en-v1.5", "abc123")
+	srv, requests := newFakeServer(t, 768, "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -342,13 +342,13 @@ func TestNewProbesRemoteAndBatchRoundTrips(t *testing.T) {
 	if vectors[0][0] != 1 || vectors[1][0] != 2 {
 		t.Fatalf("vectors not in request order: got %v / %v", vectors[0][:1], vectors[1][:1])
 	}
-	if e.Dimensions() != 384 {
-		t.Fatalf("Dimensions() = %d, want 384", e.Dimensions())
+	if e.Dimensions() != 768 {
+		t.Fatalf("Dimensions() = %d, want 768", e.Dimensions())
 	}
 }
 
 func TestIdentitySurfacesRemoteModel(t *testing.T) {
-	srv, _ := newFakeServer(t, 384, "bge-small-en-v1.5", "abc123")
+	srv, _ := newFakeServer(t, 768, "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -356,14 +356,14 @@ func TestIdentitySurfacesRemoteModel(t *testing.T) {
 	}
 	defer e.Close()
 
-	want := embed.Identity("bge-small-en-v1.5", "abc123", 384)
+	want := embed.Identity("bge-small-en-v1.5", "abc123", 768)
 	if got := e.Identity(); got != want {
 		t.Fatalf("Identity() = %q, want %q", got, want)
 	}
 }
 
 func TestEmbedWithNoTextsDoesNotCallRemote(t *testing.T) {
-	srv, requests := newFakeServer(t, 384, "bge-small-en-v1.5", "abc123")
+	srv, requests := newFakeServer(t, 768, "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -385,7 +385,10 @@ func TestEmbedWithNoTextsDoesNotCallRemote(t *testing.T) {
 }
 
 func TestDimensionMismatchFailsAtConstruction(t *testing.T) {
-	srv, _ := newFakeServer(t, 768, "some-other-model", "xyz")
+	// 384 (bge-small-en-v1.5's width, pre-nomic-migration) is the wrong
+	// dimension now that WantDimensions is 768 -- the exact mismatch this
+	// test exists to prove is refused at construction.
+	srv, _ := newFakeServer(t, 384, "some-other-model", "xyz")
 
 	_, err := New(Config{URL: srv.URL})
 	if err == nil {
@@ -415,7 +418,7 @@ func TestIdentityWithAmbiguousSeparatorIsRejected(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name+"/"+tc.revision, func(t *testing.T) {
-			srv, _ := newFakeServer(t, 384, tc.name, tc.revision)
+			srv, _ := newFakeServer(t, 768, tc.name, tc.revision)
 
 			_, err := New(Config{URL: srv.URL})
 			if err == nil {
@@ -470,7 +473,7 @@ func TestTimeoutIsHonoured(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"vectors": [][]float32{},
-			"model":   map[string]any{"name": "m", "revision": "r", "dimensions": 384},
+			"model":   map[string]any{"name": "m", "revision": "r", "dimensions": 768},
 		})
 	}))
 	t.Cleanup(srv.Close)
@@ -500,7 +503,7 @@ func TestNewRequiresURL(t *testing.T) {
 // package's Embed (not just New's one-time startup probe) must actually
 // wrap that sentinel, or the indexer has nothing to classify against.
 func TestEmbedConnectionFailureWrapsErrUnavailable(t *testing.T) {
-	srv, _ := newFakeServer(t, 384, "bge-small-en-v1.5", "abc123")
+	srv, _ := newFakeServer(t, 768, "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -539,7 +542,7 @@ func TestEmbedNonOKStatusWrapsErrUnavailable(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"vectors": vectors,
-			"model":   map[string]any{"name": "bge-small-en-v1.5", "revision": "abc123", "dimensions": 384},
+			"model":   map[string]any{"name": "bge-small-en-v1.5", "revision": "abc123", "dimensions": 768},
 		})
 	}))
 	t.Cleanup(srv.Close)
@@ -572,7 +575,7 @@ func TestEmbedNonOKStatusWrapsErrUnavailable(t *testing.T) {
 // the same lane-level category as a network outage rather than a bespoke
 // third one.
 func TestEmbedRejectsIdentityChangeMidRunWrapsErrUnavailable(t *testing.T) {
-	srv := newDriftingServer(t, 384, "bge-small-en-v1.5", "some-other-model", "abc123")
+	srv := newDriftingServer(t, 768, "bge-small-en-v1.5", "some-other-model", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -597,7 +600,7 @@ func TestEmbedRejectsIdentityChangeMidRunWrapsErrUnavailable(t *testing.T) {
 // tell an operator "go restart the sidecar" rather than "wait" (spec
 // §13.1, task 3 review round 2).
 func TestEmbedRejectsIdentityChangeMidRunWrapsErrRequiresRestart(t *testing.T) {
-	srv := newDriftingServer(t, 384, "bge-small-en-v1.5", "some-other-model", "abc123")
+	srv := newDriftingServer(t, 768, "bge-small-en-v1.5", "some-other-model", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {
@@ -620,7 +623,7 @@ func TestEmbedRejectsIdentityChangeMidRunWrapsErrRequiresRestart(t *testing.T) {
 // recover, and must not be confused with the permanent, identity-change
 // case above.
 func TestEmbedConnectionFailureDoesNotWrapErrRequiresRestart(t *testing.T) {
-	srv, _ := newFakeServer(t, 384, "bge-small-en-v1.5", "abc123")
+	srv, _ := newFakeServer(t, 768, "bge-small-en-v1.5", "abc123")
 
 	e, err := New(Config{URL: srv.URL})
 	if err != nil {

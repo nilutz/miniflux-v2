@@ -61,7 +61,7 @@ func (f *failMarkerEmbedder) EmbedDocuments(_ context.Context, texts []string) (
 	f.okCalls.Add(1)
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		v := make([]float32, 384)
+		v := make([]float32, 768)
 		v[0] = float32(len(texts[i]))
 		out[i] = v
 	}
@@ -75,7 +75,7 @@ func (f *failMarkerEmbedder) EmbedQuery(context.Context, string) ([]float32, err
 	panic("failMarkerEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (f *failMarkerEmbedder) Dimensions() int  { return 384 }
+func (f *failMarkerEmbedder) Dimensions() int  { return 768 }
 func (f *failMarkerEmbedder) Identity() string { return testModelIdentity }
 func (f *failMarkerEmbedder) Close() error     { return nil }
 
@@ -104,7 +104,7 @@ func (f *flippableEmbedder) EmbedDocuments(_ context.Context, texts []string) ([
 	}
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -116,7 +116,7 @@ func (f *flippableEmbedder) EmbedQuery(context.Context, string) ([]float32, erro
 	panic("flippableEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (f *flippableEmbedder) Dimensions() int  { return 384 }
+func (f *flippableEmbedder) Dimensions() int  { return 768 }
 func (f *flippableEmbedder) Identity() string { return testModelIdentity }
 func (f *flippableEmbedder) Close() error     { return nil }
 
@@ -139,7 +139,7 @@ func (u *liveUnavailableEmbedder) EmbedDocuments(_ context.Context, texts []stri
 	}
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -151,7 +151,7 @@ func (u *liveUnavailableEmbedder) EmbedQuery(context.Context, string) ([]float32
 	panic("liveUnavailableEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (u *liveUnavailableEmbedder) Dimensions() int  { return 384 }
+func (u *liveUnavailableEmbedder) Dimensions() int  { return 768 }
 func (u *liveUnavailableEmbedder) Identity() string { return testModelIdentity }
 func (u *liveUnavailableEmbedder) Close() error     { return nil }
 
@@ -177,7 +177,7 @@ func (i *liveIdentityChangedEmbedder) EmbedQuery(context.Context, string) ([]flo
 	panic("liveIdentityChangedEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (i *liveIdentityChangedEmbedder) Dimensions() int  { return 384 }
+func (i *liveIdentityChangedEmbedder) Dimensions() int  { return 768 }
 func (i *liveIdentityChangedEmbedder) Identity() string { return testModelIdentity }
 func (i *liveIdentityChangedEmbedder) Close() error     { return nil }
 
@@ -202,7 +202,7 @@ func (b *blockingEmbedder) EmbedDocuments(_ context.Context, texts []string) ([]
 	b.callsDone.Add(1)
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -214,7 +214,7 @@ func (b *blockingEmbedder) EmbedQuery(context.Context, string) ([]float32, error
 	panic("blockingEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (b *blockingEmbedder) Dimensions() int  { return 384 }
+func (b *blockingEmbedder) Dimensions() int  { return 768 }
 func (b *blockingEmbedder) Identity() string { return testModelIdentity }
 func (b *blockingEmbedder) Close() error     { return nil }
 

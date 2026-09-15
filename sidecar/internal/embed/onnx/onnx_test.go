@@ -50,7 +50,7 @@ func cosine(a, b []float32) float64 {
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }
 
-func TestEmbedReturns384Dimensions(t *testing.T) {
+func TestEmbedReturns768Dimensions(t *testing.T) {
 	e := testEmbedder(t)
 
 	vectors, err := e.EmbedDocuments(context.Background(), []string{"hello world"})
@@ -60,11 +60,11 @@ func TestEmbedReturns384Dimensions(t *testing.T) {
 	if len(vectors) != 1 {
 		t.Fatalf("expected 1 vector, got %d", len(vectors))
 	}
-	if len(vectors[0]) != 384 {
-		t.Fatalf("expected 384 dimensions, got %d", len(vectors[0]))
+	if len(vectors[0]) != 768 {
+		t.Fatalf("expected 768 dimensions, got %d", len(vectors[0]))
 	}
-	if e.Dimensions() != 384 {
-		t.Fatalf("expected Dimensions() == 384, got %d", e.Dimensions())
+	if e.Dimensions() != 768 {
+		t.Fatalf("expected Dimensions() == 768, got %d", e.Dimensions())
 	}
 }
 
@@ -281,19 +281,51 @@ func vectorsAlmostEqual(a, b []float32) bool {
 	return true
 }
 
+// noPrefixModelPath returns SIDECAR_NOPREFIX_MODEL_PATH, skipping the test
+// if unset. This is deliberately a third, separate variable from both
+// SIDECAR_MODEL_PATH and SIDECAR_NOMIC_MODEL_PATH: the nomic migration plan
+// (task 2) made nomic-embed-text-v1.5 — a model modelPromptPrefixes DOES
+// list — the model SIDECAR_MODEL_PATH points at in production and in this
+// package's own gated tests, so it can no longer stand in for "a model with
+// no prefix requirement" the way it could before that task (when the
+// production model was bge-small-en-v1.5, absent from the table).
+// TestEmbedDocumentsAndEmbedQueryAgreeWithoutPrefixes needs a real model
+// that genuinely has no entry in modelPromptPrefixes to prove
+// withPrefix's empty-prefix branch is a true no-op at the tokenizer
+// boundary, so it gets its own model path rather than reusing
+// SIDECAR_MODEL_PATH's now-prefixed model.
+func noPrefixModelPath(t *testing.T) string {
+	t.Helper()
+	path := os.Getenv("SIDECAR_NOPREFIX_MODEL_PATH")
+	if path == "" {
+		t.Skip("SIDECAR_NOPREFIX_MODEL_PATH is not set, skipping no-prefix prompt-prefix test")
+	}
+	return path
+}
+
 // TestEmbedDocumentsAndEmbedQueryAgreeWithoutPrefixes is
-// TestEmbedAppliesDistinctPromptPrefixesForNomic's counterpart for
-// bge-small-en-v1.5 (the model actually configured as of this task): a
-// model absent from modelPromptPrefixes must produce IDENTICAL vectors
-// from EmbedDocuments and EmbedQuery for the same text, proving
-// withPrefix's empty-prefix branch is a true no-op at the real tokenizer
-// boundary, not just in TestPromptPrefixesForModel's pure-function
-// check. If a future change hardcoded a prefix into the generic path
-// instead of gating it by model — the mistake this task's brief
-// explicitly warns against — this is the test that would catch it for
-// the one model that must never see one.
+// TestEmbedAppliesDistinctPromptPrefixesForNomic's counterpart for a model
+// absent from modelPromptPrefixes (bge-small-en-v1.5 was that model prior
+// to the nomic migration plan's task 2; see noPrefixModelPath's own doc
+// comment for why this test no longer reuses SIDECAR_MODEL_PATH for it):
+// such a model must produce IDENTICAL vectors from EmbedDocuments and
+// EmbedQuery for the same text, proving withPrefix's empty-prefix branch
+// is a true no-op at the real tokenizer boundary, not just in
+// TestPromptPrefixesForModel's pure-function check. If a future change
+// hardcoded a prefix into the generic path instead of gating it by model
+// — the mistake this task's brief explicitly warns against — this is the
+// test that would catch it for a model that must never see one.
 func TestEmbedDocumentsAndEmbedQueryAgreeWithoutPrefixes(t *testing.T) {
-	e := testEmbedder(t) // SIDECAR_MODEL_PATH: bge-small-en-v1.5, no prefixes
+	modelPath := noPrefixModelPath(t)
+
+	e, err := NewONNX(ONNXConfig{
+		ModelPath:      modelPath,
+		ONNXLibraryDir: os.Getenv("SIDECAR_ONNX_LIB_DIR"),
+	})
+	if err != nil {
+		t.Fatalf("unable to create embedder: %v", err)
+	}
+	t.Cleanup(func() { e.Close() })
 
 	const text = "A cat was resting peacefully on the sunny windowsill that afternoon."
 

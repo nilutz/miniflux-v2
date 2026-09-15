@@ -167,8 +167,8 @@ func (f *fixedVectorEmbedder) EmbedDocuments(context.Context, []string) ([][]flo
 	panic("fixedVectorEmbedder: EmbedDocuments should never be called by internal/search's query path")
 }
 
-func (f *fixedVectorEmbedder) Dimensions() int  { return 384 }
-func (f *fixedVectorEmbedder) Identity() string { return "fixed-vector-embedder@test#384" }
+func (f *fixedVectorEmbedder) Dimensions() int  { return 768 }
+func (f *fixedVectorEmbedder) Identity() string { return "fixed-vector-embedder@test#768" }
 func (f *fixedVectorEmbedder) Close() error     { return nil }
 
 // erroringEmbedder always fails, simulating an inference backend that is
@@ -186,8 +186,8 @@ func (e *erroringEmbedder) EmbedDocuments(context.Context, []string) ([][]float3
 	panic("erroringEmbedder: EmbedDocuments should never be called by internal/search's query path")
 }
 
-func (e *erroringEmbedder) Dimensions() int  { return 384 }
-func (e *erroringEmbedder) Identity() string { return "erroring-embedder@test#384" }
+func (e *erroringEmbedder) Dimensions() int  { return 768 }
+func (e *erroringEmbedder) Identity() string { return "erroring-embedder@test#768" }
 func (e *erroringEmbedder) Close() error     { return nil }
 
 // countingReader is a store.Reader whose QueryContext/QueryRowContext

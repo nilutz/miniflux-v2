@@ -11,6 +11,37 @@ import (
 	"miniflux.app/v2/sidecar/internal/testdb"
 )
 
+// fixedVector returns a dims-length embedding filled with fill, formatted
+// as a pgvector text literal via passages.go's own vectorLiteral -- for
+// seeding a real vector(N) column directly via SQL in tests that need
+// actual, non-empty embedding data rather than a fresh, empty table.
+func fixedVector(dims int, fill float32) string {
+	v := make([]float32, dims)
+	for i := range v {
+		v[i] = fill
+	}
+	return vectorLiteral(v)
+}
+
+// embeddingColumnType reads search.passages.embedding's actual formatted
+// type ("vector(768)", say) straight from the catalog -- vector(N)'s width
+// isn't visible through information_schema.columns the way a varchar(N)'s
+// is, so this is the one reliable way to assert on it.
+func embeddingColumnType(t *testing.T, s *Store) string {
+	t.Helper()
+
+	var formatted string
+	err := s.db.QueryRow(`
+		SELECT format_type(atttypid, atttypmod)
+		FROM pg_attribute
+		WHERE attrelid = 'search.passages'::regclass AND attname = 'embedding'
+	`).Scan(&formatted)
+	if err != nil {
+		t.Fatalf("unable to inspect search.passages.embedding's type: %v", err)
+	}
+	return formatted
+}
+
 func testStore(t *testing.T) *Store {
 	t.Helper()
 
@@ -367,8 +398,174 @@ func TestMigrateFromCrashLoopedVersionFourIsANoOp(t *testing.T) {
 // Update this literal deliberately, in the same commit, whenever a
 // migration is appended or (never) removed.
 func TestSchemaVersionIsPinned(t *testing.T) {
-	const want = 5
+	const want = 6
 	if schemaVersion != want {
 		t.Fatalf("schemaVersion = %d, want %d -- a migration was added or removed without updating this pinned assertion", schemaVersion, want)
+	}
+}
+
+// TestMigrateWidensEmbeddingColumnTo768 pins migration 5 (nomic migration
+// plan, task 2): a from-scratch database ends with search.passages.embedding
+// at vector(768), not the vector(384) migration 0 originally created --
+// this package's fixed-shape query pattern would otherwise silently keep
+// writing at the wrong width with no compile-time signal.
+func TestMigrateWidensEmbeddingColumnTo768(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	if got, want := embeddingColumnType(t, s), "vector(768)"; got != want {
+		t.Fatalf("search.passages.embedding = %q, want %q", got, want)
+	}
+}
+
+// TestMigrateWidensExistingPopulatedColumn is this task's specific trap,
+// named in its own brief: a test asserting the column is vector(768) passes
+// on a fresh database whether or not the *widening* path actually works,
+// because CREATE TABLE never has to reconcile incompatible existing data.
+// This seeds a database at schema_version 5 -- every already-deployed
+// sidecar's shape before this task, mirroring
+// TestMigrateAppliesTuningToExistingDatabase's own technique -- with a
+// real, populated vector(384) row, then migrates it: the path that
+// actually exercises ALTER COLUMN ... TYPE against non-empty data.
+func TestMigrateWidensExistingPopulatedColumn(t *testing.T) {
+	s := testStore(t)
+
+	if _, err := s.db.Exec(`DROP SCHEMA IF EXISTS search CASCADE`); err != nil {
+		t.Fatalf("drop schema: %v", err)
+	}
+	if _, err := s.db.Exec(`CREATE SCHEMA IF NOT EXISTS search`); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS search.schema_version (version int not null)`); err != nil {
+		t.Fatalf("create schema_version: %v", err)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for i := range 5 {
+		if err := migrations[i](tx); err != nil {
+			tx.Rollback()
+			t.Fatalf("pre-migration %d: %v", i, err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO search.schema_version (version) VALUES (5)`); err != nil {
+		tx.Rollback()
+		t.Fatalf("seed schema_version: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// A real, populated vector(384) row -- the data this migration must
+	// not choke on, unlike a fresh empty table.
+	if _, err := s.db.Exec(`
+		INSERT INTO search.passages (entry_id, ordinal, text, char_start, char_end, embedding)
+		VALUES (1, 0, 'pre-nomic passage', 0, 18, $1::vector)
+	`, fixedVector(384, 0.25)); err != nil {
+		t.Fatalf("seed a populated vector(384) row: %v", err)
+	}
+
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate against an existing populated vector(384) column failed: %v", err)
+	}
+
+	var version int
+	if err := s.db.QueryRow(`SELECT version FROM search.schema_version`).Scan(&version); err != nil {
+		t.Fatalf("unable to read schema version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema_version = %d, want %d", version, schemaVersion)
+	}
+
+	if got, want := embeddingColumnType(t, s), "vector(768)"; got != want {
+		t.Fatalf("search.passages.embedding = %q, want %q", got, want)
+	}
+
+	// The pre-existing row must have survived the migration -- widening a
+	// column is not a delete, even though its 384-d embedding could not be
+	// reinterpreted as 768-d and was necessarily discarded.
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM search.passages`).Scan(&count); err != nil {
+		t.Fatalf("count passages: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected the pre-existing row to survive the migration, got %d rows", count)
+	}
+
+	// A genuinely 768-d vector must write cleanly post-migration -- proof
+	// the column actually accepts the new width, not merely reports it.
+	if _, err := s.db.Exec(`
+		UPDATE search.passages SET embedding = $1::vector WHERE entry_id = 1 AND ordinal = 0
+	`, fixedVector(768, 0.25)); err != nil {
+		t.Fatalf("write a 768-d vector into the widened column: %v", err)
+	}
+
+	// The index must have been rebuilt against the new width, not left
+	// dangling/invalid from the DROP that preceded it.
+	var indexValid bool
+	if err := s.db.QueryRow(`
+		SELECT indisvalid FROM pg_index
+		WHERE indexrelid = 'search.passages_embedding_idx'::regclass
+	`).Scan(&indexValid); err != nil {
+		t.Fatalf("unable to inspect passages_embedding_idx: %v", err)
+	}
+	if !indexValid {
+		t.Fatal("expected passages_embedding_idx to be valid after the rebuild")
+	}
+
+	// Idempotency: migrating an already-migrated database again (the
+	// sidecar does this on every start) must not error and must leave the
+	// column at the same width.
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("second migrate failed: %v", err)
+	}
+	if got, want := embeddingColumnType(t, s), "vector(768)"; got != want {
+		t.Fatalf("after second migrate: search.passages.embedding = %q, want %q", got, want)
+	}
+}
+
+// TestMigrationDoesNotLeakMaintenanceSettings is migration 5's SET LOCAL
+// guarantee: max_parallel_maintenance_workers and maintenance_work_mem are
+// both changed for the migration's own transaction only. A prior version of
+// this exact migration set max_parallel_maintenance_workers globally (via
+// SET rather than SET LOCAL) and crash-looped the sidecar's HNSW build
+// against a 64 MiB /dev/shm -- this pins the fix, on the same physical
+// connection the migration itself ran on (SetMaxOpenConns(1)), the same
+// technique task 12's own brief calls out as the one that actually proves
+// the setting didn't leak.
+func TestMigrationDoesNotLeakMaintenanceSettings(t *testing.T) {
+	s := testStore(t)
+	s.db.SetMaxOpenConns(1)
+
+	var memBefore, workersBefore string
+	if err := s.db.QueryRow(`SHOW maintenance_work_mem`).Scan(&memBefore); err != nil {
+		t.Fatalf("read maintenance_work_mem before migrate: %v", err)
+	}
+	if err := s.db.QueryRow(`SHOW max_parallel_maintenance_workers`).Scan(&workersBefore); err != nil {
+		t.Fatalf("read max_parallel_maintenance_workers before migrate: %v", err)
+	}
+
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	var memAfter, workersAfter string
+	if err := s.db.QueryRow(`SHOW maintenance_work_mem`).Scan(&memAfter); err != nil {
+		t.Fatalf("read maintenance_work_mem after migrate: %v", err)
+	}
+	if err := s.db.QueryRow(`SHOW max_parallel_maintenance_workers`).Scan(&workersAfter); err != nil {
+		t.Fatalf("read max_parallel_maintenance_workers after migrate: %v", err)
+	}
+
+	if memAfter != memBefore {
+		t.Fatalf("maintenance_work_mem leaked past the migration transaction: before=%q after=%q", memBefore, memAfter)
+	}
+	if workersAfter != workersBefore {
+		t.Fatalf("max_parallel_maintenance_workers leaked past the migration transaction: before=%q after=%q", workersBefore, workersAfter)
 	}
 }

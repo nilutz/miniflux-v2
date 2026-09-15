@@ -39,7 +39,7 @@ func (e *switchBlockingEmbedder) EmbedDocuments(ctx context.Context, texts []str
 	}
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -48,7 +48,7 @@ func (e *switchBlockingEmbedder) EmbedQuery(context.Context, string) ([]float32,
 	panic("switchBlockingEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (e *switchBlockingEmbedder) Dimensions() int  { return 384 }
+func (e *switchBlockingEmbedder) Dimensions() int  { return 768 }
 func (e *switchBlockingEmbedder) Identity() string { return e.identity }
 func (e *switchBlockingEmbedder) Close() error     { e.closed.Store(true); return nil }
 

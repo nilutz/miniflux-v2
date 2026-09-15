@@ -76,7 +76,7 @@ func (e *countingEmbedder) EmbedDocuments(_ context.Context, texts []string) ([]
 	e.counts.record(texts, e.markers)
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -88,7 +88,7 @@ func (e *countingEmbedder) EmbedQuery(context.Context, string) ([]float32, error
 	panic("countingEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (e *countingEmbedder) Dimensions() int  { return 384 }
+func (e *countingEmbedder) Dimensions() int  { return 768 }
 func (e *countingEmbedder) Identity() string { return testModelIdentity }
 func (e *countingEmbedder) Close() error     { return nil }
 
@@ -127,7 +127,7 @@ func (e *blockOnMarkerEmbedder) EmbedDocuments(ctx context.Context, texts []stri
 
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -139,7 +139,7 @@ func (e *blockOnMarkerEmbedder) EmbedQuery(context.Context, string) ([]float32, 
 	panic("blockOnMarkerEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (e *blockOnMarkerEmbedder) Dimensions() int  { return 384 }
+func (e *blockOnMarkerEmbedder) Dimensions() int  { return 768 }
 func (e *blockOnMarkerEmbedder) Identity() string { return testModelIdentity }
 func (e *blockOnMarkerEmbedder) Close() error     { return nil }
 
@@ -158,7 +158,7 @@ func (d *variableDelayEmbedder) EmbedDocuments(_ context.Context, texts []string
 	}
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -170,7 +170,7 @@ func (d *variableDelayEmbedder) EmbedQuery(context.Context, string) ([]float32, 
 	panic("variableDelayEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (d *variableDelayEmbedder) Dimensions() int  { return 384 }
+func (d *variableDelayEmbedder) Dimensions() int  { return 768 }
 func (d *variableDelayEmbedder) Identity() string { return testModelIdentity }
 func (d *variableDelayEmbedder) Close() error     { return nil }
 
@@ -192,7 +192,7 @@ func (u *backfillUnavailableEmbedder) EmbedDocuments(_ context.Context, texts []
 	}
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -204,7 +204,7 @@ func (u *backfillUnavailableEmbedder) EmbedQuery(context.Context, string) ([]flo
 	panic("backfillUnavailableEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (u *backfillUnavailableEmbedder) Dimensions() int  { return 384 }
+func (u *backfillUnavailableEmbedder) Dimensions() int  { return 768 }
 func (u *backfillUnavailableEmbedder) Identity() string { return testModelIdentity }
 func (u *backfillUnavailableEmbedder) Close() error     { return nil }
 
@@ -229,7 +229,7 @@ func (i *backfillIdentityChangedEmbedder) EmbedQuery(context.Context, string) ([
 	panic("backfillIdentityChangedEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (i *backfillIdentityChangedEmbedder) Dimensions() int  { return 384 }
+func (i *backfillIdentityChangedEmbedder) Dimensions() int  { return 768 }
 func (i *backfillIdentityChangedEmbedder) Identity() string { return testModelIdentity }
 func (i *backfillIdentityChangedEmbedder) Close() error     { return nil }
 

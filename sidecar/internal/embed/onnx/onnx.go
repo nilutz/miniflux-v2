@@ -26,11 +26,12 @@ import (
 	"miniflux.app/v2/sidecar/internal/embed"
 )
 
-// dimensions is the fixed output width of the pinned bge-small-en-v1.5
-// model. It is not derived at runtime: this package is validated against
-// exactly this model (see TestEmbedSeparatesParaphraseFromUnrelated), and
-// swapping models is a decision that needs re-validating, not a config knob.
-const dimensions = 384
+// dimensions is the fixed output width of the pinned nomic-embed-text-v1.5
+// model (nomic migration plan, task 2 — previously 384, bge-small-en-v1.5).
+// It is not derived at runtime: this package is validated against exactly
+// this model (see TestEmbedSeparatesParaphraseFromUnrelated), and swapping
+// models is a decision that needs re-validating, not a config knob.
+const dimensions = 768
 
 // promptPrefixes are the exact strings a model's publisher requires
 // prepended to each input text before embedding, split by whether the
@@ -106,7 +107,7 @@ type ONNXConfig struct {
 }
 
 // onnxEmbedder is an Embedder backed by a hugot ONNX Runtime session running
-// the pinned bge-small-en-v1.5 model. One session and one pipeline are
+// the pinned nomic-embed-text-v1.5 model. One session and one pipeline are
 // shared across every Embed call, and Embed deliberately does no additional
 // locking of its own — the controller in a later task depends on that.
 //
@@ -127,8 +128,8 @@ type onnxEmbedder struct {
 	prefixes promptPrefixes
 }
 
-// NewONNX creates an Embedder that runs the bge-small-en-v1.5 model through
-// ONNX Runtime via hugot.
+// NewONNX creates an Embedder that runs the nomic-embed-text-v1.5 model
+// through ONNX Runtime via hugot.
 //
 // This requires a binary built with -tags ORT. Without that tag,
 // hugot.NewORTSession itself returns an error rather than silently

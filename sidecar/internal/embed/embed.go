@@ -167,7 +167,7 @@ type Embedder interface {
 // Dimensions is folded in explicitly, not left to be implied by name and
 // revision, because two models of different width that happened to share a
 // name would otherwise hash identically here — and pgvector's fixed-width
-// vector(384) column would then reject one of them at insert time with a
+// vector(768) column would then reject one of them at insert time with a
 // confusing type error, rather than this being caught as the model change
 // it is.
 //

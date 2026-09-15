@@ -38,7 +38,7 @@ Migrations (`internal/store/migrations.go`) create the `search` schema and
 run `CREATE EXTENSION IF NOT EXISTS vector SCHEMA public` / `pg_search`.
 
 pgvector is installed into `public` explicitly, and every reference to it is
-schema-qualified — the column type is `public.vector(384)` and the HNSW
+schema-qualified — the column type is `public.vector(768)` and the HNSW
 operator class is `public.vector_cosine_ops` — so the migrations do not
 depend on the connection's `search_path` at all. That matters on hardened
 installs whose default `search_path` excludes `public`. `pg_search` needs no
@@ -119,10 +119,15 @@ been *looser* than the status quo, not tighter.
 
 ### Rebuilding `passages_embedding_idx`: what `maintenance_work_mem` actually buys, and its own footgun
 
-There is **no migration** that rebuilds `passages_embedding_idx` under a
-raised `maintenance_work_mem`, and that is deliberate, not an oversight —
-one was tried and reverted. Two things were measured directly, not
-assumed:
+There is **no migration that rebuilds `passages_embedding_idx` merely to
+gain from a raised `maintenance_work_mem`**, and that is deliberate, not an
+oversight — one was tried and reverted. (The nomic migration plan's task 2
+*does* rebuild this index in a migration, but for an unrelated, unavoidable
+reason — widening `embedding` from `vector(384)` to `vector(768)` requires
+a new HNSW index regardless of `maintenance_work_mem`, since an HNSW
+index's operator class is bound to its column's width; see that migration's
+own comment in `internal/store/migrations.go` for how it avoids the
+`/dev/shm` crash below.) Two things were measured directly, not assumed:
 
 1. **`maintenance_work_mem` controls HNSW build *speed* only, not the
    resulting graph.** pgvector's on-disk build path (used when the graph
@@ -203,11 +208,15 @@ size (`df -h /dev/shm` inside it) before setting
 either raise the container's `shm_size` first or leave
 `max_parallel_maintenance_workers` alone (serial builds don't touch
 `/dev/shm` at all) rather than discovering the ceiling the way this task
-did. The planned 768-dimension migration
-(`docs/superpowers/plans/2026-09-15-nomic-migration.md`) rebuilds this
-same index at roughly twice its current size and will hit this identical
-ceiling if it attempts a parallel build without addressing `shm_size`
-first.
+did. The 768-dimension migration
+(`docs/superpowers/plans/2026-09-15-nomic-migration.md`, task 2) rebuilds
+this same index at roughly twice its previous size and explicitly pins
+`SET LOCAL max_parallel_maintenance_workers = 0` for exactly this reason,
+rather than leaving it at the cluster's default (2 on this project's dev
+stack — already enough to trigger a parallel build and hit this ceiling).
+Follow the same rule for any later operator-driven `REINDEX INDEX
+CONCURRENTLY` against the widened index: check `/dev/shm` before raising
+`max_parallel_maintenance_workers` above its default.
 
 ## The embedder (`internal/embed`, `internal/embed/onnx`)
 
@@ -215,25 +224,25 @@ first.
 (`EmbedDocuments`/`EmbedQuery`/`Dimensions`/`Identity`/`Close`) with no CGO
 and no native dependencies. Embedding a document (to index) and embedding a
 query (to search with) are separate methods, not one method with a
-document/query flag: an asymmetric model —
-[`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5),
-not the model actually configured as of this writing, but the interface is
-shaped for it — requires a different, incompatible text prefix
-(`"search_document: "`/`"search_query: "`) for each, and a missing prefix
-degrades retrieval with no error and no other symptom. Two methods make
-each call site's intent (internal/indexer only ever indexes;
+document/query flag: the configured model —
+[`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5)
+(nomic migration plan, task 2; previously `bge-small-en-v1.5`, which used
+no prefixes) — is asymmetric and requires a different, incompatible text
+prefix (`"search_document: "`/`"search_query: "`) for each, and a missing
+prefix degrades retrieval with no error and no other symptom. Two methods
+make each call site's intent (internal/indexer only ever indexes;
 internal/search/querycache.go only ever queries) visible in a diff rather
 than depending on a runtime flag threaded correctly through every call.
 `internal/embed/onnx` implements it: it wraps
 [hugot](https://github.com/knights-analytics/hugot) (v0.7.8, build tag
 `ORT`) around [ONNX Runtime](https://onnxruntime.ai/) (native v1.30.0) to
 embed text with a pinned model,
-[`Xenova/bge-small-en-v1.5`](https://huggingface.co/Xenova/bge-small-en-v1.5)
-(int8-quantized ONNX export, 384 dimensions). This is the exact stack a spike
-measured end to end — see `NewONNX` in `internal/embed/onnx/onnx.go` for the
-call sequence and the reasoning behind it. The split keeps consumers that
-only need the interface (such as `internal/indexer`'s tests) from linking
-the native `libtokenizers.a`.
+[`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5)
+(int8-quantized ONNX export, 768 dimensions, 8192-token context). This is
+the exact stack a spike measured end to end — see `NewONNX` in
+`internal/embed/onnx/onnx.go` for the call sequence and the reasoning
+behind it. The split keeps consumers that only need the interface (such as
+`internal/indexer`'s tests) from linking the native `libtokenizers.a`.
 
 Building or running the sidecar with this package requires three native
 dependencies that are **not** Go modules and are **not** vendored into this
@@ -259,12 +268,17 @@ repository:
    `CGO_LDFLAGS="-L<dir-with-libtokenizers.a>"`.
 
 3. **The model itself**, `onnx/model_quantized.onnx` from
-   `Xenova/bge-small-en-v1.5` on Hugging Face (~32MB, int8-quantized — do
-   *not* use the ~127MB fp32 `model.onnx`, which the spike measured at
+   `nomic-ai/nomic-embed-text-v1.5` on Hugging Face (~131MB, int8-quantized
+   — do *not* use the fp32 `model.onnx`, which the spike measured at
    roughly half the throughput for no accuracy benefit evaluated here),
    alongside the rest of that repo's files (`tokenizer.json`, `vocab.txt`,
    `config.json`, `tokenizer_config.json`, `special_tokens_map.json`), which
    hugot expects to find next to (one directory up from) the `.onnx` file.
+   **Do not cap input length on `config.json`'s `max_position_embeddings`
+   (2048)** — it disagrees with the tokenizer's own `model_max_length`
+   (8192) and the model card, and the spike empirically embedded an
+   8,120-token passage successfully; capping at 2048 would silently discard
+   three quarters of the context this model exists to provide.
 
 `ONNXConfig` (in `internal/embed/onnx/onnx.go`) takes two fields:
 
@@ -348,7 +362,7 @@ model-identity hash means to protect: a locally-configured guess at the
 remote's model name would let an operator repoint the URL at a differently
 configured box without changing a single hash, silently mixing two models'
 vectors in one HNSW graph. A dimension mismatch against the fixed
-`vector(384)` schema column is a startup error here, not a runtime insert
+`vector(768)` schema column is a startup error here, not a runtime insert
 failure, and the sidecar refuses to start rather than guess.
 
 ### Wire protocol
@@ -374,8 +388,9 @@ it embeds a query for the identical string — it needs
 the remote knows what, if anything, the model it is actually running
 needs done with that distinction: the client deliberately does not
 hardcode either prefix itself. A server whose configured model needs no
-such distinction (`bge-small-en-v1.5`, the model actually configured as of
-this writing) is free to ignore this field entirely.
+such distinction (`bge-small-en-v1.5`, the model configured prior to the
+nomic migration plan's task 2, is one example) is free to ignore this
+field entirely.
 
 `texts` may be empty — the sidecar sends an empty batch once, at startup,
 purely to learn `model` below without embedding anything real; `task` is
@@ -387,8 +402,8 @@ Response, `200` only:
 
 ```json
 {
-  "vectors": [[0.01, -0.02, "... 384 floats ..."], [0.03, 0.04, "..."]],
-  "model": {"name": "bge-small-en-v1.5", "revision": "abc123", "dimensions": 384}
+  "vectors": [[0.01, -0.02, "... 768 floats ..."], [0.03, 0.04, "..."]],
+  "model": {"name": "nomic-embed-text-v1.5", "revision": "abc123", "dimensions": 768}
 }
 ```
 
@@ -436,7 +451,21 @@ need in order to link at all (see "Running the tests" below).
   if the two variables name the same place.
 - `SIDECAR_MODEL_PATH` — filesystem path to the quantized embedding model
   (`model_quantized.onnx`), used by `internal/embed/onnx`. Unset: those
-  tests `t.Skip`.
+  tests `t.Skip`. In production and in this package's own gated tests this
+  points at the configured model — `nomic-embed-text-v1.5` as of the nomic
+  migration plan's task 2.
+- `SIDECAR_NOMIC_MODEL_PATH` — a second, separate model path, also used by
+  `internal/embed/onnx`, specifically for
+  `TestEmbedAppliesDistinctPromptPrefixesForNomic`: that test needs an
+  actual `nomic-embed-text-v1.5` model file to prove its prompt prefixes
+  reach the real tokenizer. Kept distinct from `SIDECAR_MODEL_PATH` so the
+  two can be pointed at different models when needed.
+- `SIDECAR_NOPREFIX_MODEL_PATH` — a third model path, used only by
+  `TestEmbedDocumentsAndEmbedQueryAgreeWithoutPrefixes`, which needs a real
+  model genuinely absent from `modelPromptPrefixes` (`bge-small-en-v1.5`,
+  say) to prove the no-prefix code path is a true no-op at the tokenizer
+  boundary — a proof `SIDECAR_MODEL_PATH` can no longer supply on its own
+  now that it points at an asymmetric model.
 
 `internal/passage`, `internal/web` and the controller tests in
 `internal/indexer` are hermetic and need neither.

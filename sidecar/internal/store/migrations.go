@@ -169,6 +169,64 @@ var migrations = [...]func(tx *sql.Tx) error{
 	// belongs: an operator-driven REINDEX INDEX CONCURRENTLY, which does
 	// not hold that lock and does not need to run inside a migration's
 	// transaction at all.
+	func(tx *sql.Tx) error {
+		// Nomic migration, task 2 (docs/superpowers/plans/2026-09-15-nomic-migration.md):
+		// swapping bge-small-en-v1.5 (384-d) for nomic-embed-text-v1.5
+		// (768-d) requires widening this column, and an HNSW index's
+		// operator class is bound to its column's vector width, so the
+		// index has to be dropped and rebuilt alongside it -- there is no
+		// ALTER INDEX that simply widens one in place.
+		//
+		// USING NULL rather than any attempt to cast the existing
+		// vector(384) values: a 384-d embedding is not a 768-d embedding
+		// with values missing, it is a vector from a model that no longer
+		// runs in this deployment, and there is no meaningful conversion
+		// between the two. Discarding it here is safe and not this
+		// migration's job to work around: swapping the embedder changes
+		// embed.Identity, which changes store.contentHash for every
+		// entry, so the existing pending/backfill machinery (spec §13.1)
+		// re-embeds the entire corpus from scratch on its own, driven by
+		// that hash mismatch -- independent of what this migration does
+		// to the column's contents. A fresh database (embedding already
+		// NULL/empty) takes the same USING NULL path trivially.
+		//
+		// The rebuilt index is roughly twice the previous one's size (768
+		// vs. 384 dimensions per vector). An earlier version of exactly
+		// this migration set max_parallel_maintenance_workers = 4 here
+		// (task 12's guidance, written for the smaller 384-d index) and
+		// crash-looped the sidecar on every restart: pgvector's parallel
+		// HNSW build requested a shared-memory segment sized against
+		// maintenance_work_mem (~1.02 GB at '1GB'), backed by the
+		// container's /dev/shm, whose Docker default is 64 MiB --
+		// "could not resize shared memory segment ... No space left on
+		// device (53100)", not a transient condition, unrecoverable short
+		// of an operator dropping the index by hand outside migration. A
+		// twice-as-big index makes that worse, not better, so this
+		// explicitly pins max_parallel_maintenance_workers = 0 rather
+		// than leaving it at whatever the cluster happens to default to
+		// (2 on this project's dev stack -- already enough to trigger a
+		// parallel build). maintenance_work_mem is still raised, but only
+		// for in-memory-vs-disk build *speed*: measured directly
+		// (README.md's "Rebuilding passages_embedding_idx" section) to
+		// produce a byte-identical index either way, so this is not
+		// expected to change the resulting graph, only how long building
+		// it takes. Both are SET LOCAL, scoped to this transaction only,
+		// so neither leaks onto the pooled connection once it commits --
+		// see TestMigrationDoesNotLeakMaintenanceSettings.
+		_, err := tx.Exec(`
+			SET LOCAL max_parallel_maintenance_workers = 0;
+			SET LOCAL maintenance_work_mem = '1GB';
+
+			ALTER TABLE search.passages
+				ALTER COLUMN embedding TYPE public.vector(768) USING NULL;
+
+			DROP INDEX search.passages_embedding_idx;
+
+			CREATE INDEX passages_embedding_idx
+				ON search.passages USING hnsw (embedding public.vector_cosine_ops);
+		`)
+		return err
+	},
 }
 
 var schemaVersion = len(migrations)

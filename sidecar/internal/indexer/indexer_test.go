@@ -33,7 +33,7 @@ import (
 // the mechanism these tests are not exercising. Model-change behavior
 // itself is covered at the store level, where the test controls modelIdentity
 // directly (see internal/store's TestModelIdentityChangeMakesIndexedEntriesPendingAgain).
-const testModelIdentity = "fake-embedder@test#384"
+const testModelIdentity = "fake-embedder@test#768"
 
 // fakeEmbedder is a deterministic, call-counting stand-in for the real ONNX
 // Embedder (Task 2). This task tests pipeline wiring, not inference: the
@@ -55,7 +55,7 @@ func (f *fakeEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]fl
 	}
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		v := make([]float32, 384)
+		v := make([]float32, 768)
 		v[0] = float32(len(texts[i])) // deterministic, and distinguishes passages
 		out[i] = v
 	}
@@ -72,7 +72,7 @@ func (f *fakeEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
 	panic("fakeEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (f *fakeEmbedder) Dimensions() int  { return 384 }
+func (f *fakeEmbedder) Dimensions() int  { return 768 }
 func (f *fakeEmbedder) Identity() string { return testModelIdentity }
 func (f *fakeEmbedder) Close() error     { return nil }
 
@@ -98,7 +98,7 @@ func (u *unavailableEmbedder) EmbedQuery(context.Context, string) ([]float32, er
 	panic("unavailableEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (u *unavailableEmbedder) Dimensions() int  { return 384 }
+func (u *unavailableEmbedder) Dimensions() int  { return 768 }
 func (u *unavailableEmbedder) Identity() string { return testModelIdentity }
 func (u *unavailableEmbedder) Close() error     { return nil }
 
@@ -117,7 +117,7 @@ func (b *batchRecordingEmbedder) EmbedDocuments(_ context.Context, texts []strin
 
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -128,7 +128,7 @@ func (b *batchRecordingEmbedder) EmbedQuery(context.Context, string) ([]float32,
 	panic("batchRecordingEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (b *batchRecordingEmbedder) Dimensions() int  { return 384 }
+func (b *batchRecordingEmbedder) Dimensions() int  { return 768 }
 func (b *batchRecordingEmbedder) Identity() string { return testModelIdentity }
 func (b *batchRecordingEmbedder) Close() error     { return nil }
 
@@ -149,7 +149,7 @@ type distinctIdentityEmbedder struct {
 func (d *distinctIdentityEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = make([]float32, 384)
+		out[i] = make([]float32, 768)
 	}
 	return out, nil
 }
@@ -160,7 +160,7 @@ func (d *distinctIdentityEmbedder) EmbedQuery(context.Context, string) ([]float3
 	panic("distinctIdentityEmbedder: EmbedQuery should never be called by internal/indexer")
 }
 
-func (d *distinctIdentityEmbedder) Dimensions() int  { return 384 }
+func (d *distinctIdentityEmbedder) Dimensions() int  { return 768 }
 func (d *distinctIdentityEmbedder) Identity() string { return d.identity }
 func (d *distinctIdentityEmbedder) Close() error     { return nil }
 
@@ -320,7 +320,7 @@ func passagesFor(t *testing.T, db *sql.DB, entryID int64) []passageRow {
 }
 
 // 1. A plain entry indexes: passages are written, each with a non-null
-// 384-dim embedding, and entry_index_state.status = 'ok'.
+// 768-dim embedding, and entry_index_state.status = 'ok'.
 func TestIndexEntryIndexesAPlainEntry(t *testing.T) {
 	s, db := testEnv(t)
 	entryID := createTestEntry(t, db, "index-plain",
@@ -346,8 +346,8 @@ func TestIndexEntryIndexesAPlainEntry(t *testing.T) {
 		if err := rows.Scan(&ordinal, &dims); err != nil {
 			t.Fatalf("unable to scan passage: %v", err)
 		}
-		if dims != 384 {
-			t.Fatalf("passage %d: expected a 384-dim embedding, got %d", ordinal, dims)
+		if dims != 768 {
+			t.Fatalf("passage %d: expected a 768-dim embedding, got %d", ordinal, dims)
 		}
 		count++
 	}
@@ -430,8 +430,8 @@ func TestIndexEntryCreatesATitlePassageAndContentPassages(t *testing.T) {
 	if titlePassage.CharStart != 0 || titlePassage.CharEnd != len(title) {
 		t.Fatalf("expected title offsets [0,%d), got [%d,%d)", len(title), titlePassage.CharStart, titlePassage.CharEnd)
 	}
-	if titlePassage.Dims != 384 {
-		t.Fatalf("expected the title passage to be embedded (384 dims), got %d", titlePassage.Dims)
+	if titlePassage.Dims != 768 {
+		t.Fatalf("expected the title passage to be embedded (768 dims), got %d", titlePassage.Dims)
 	}
 
 	for _, p := range passages[1:] {
@@ -786,7 +786,7 @@ func TestNewWiresEmbedderIdentityIntoContentHash(t *testing.T) {
 		"<p>Content for the New-wires-identity test, held fixed throughout.</p>")
 	afterID := entryID - 1
 
-	idxA := New(s, &distinctIdentityEmbedder{identity: "model-a@rev1#384"})
+	idxA := New(s, &distinctIdentityEmbedder{identity: "model-a@rev1#768"})
 	if err := idxA.IndexEntry(context.Background(), entryID); err != nil {
 		t.Fatalf("IndexEntry under model A failed: %v", err)
 	}
@@ -809,7 +809,7 @@ func TestNewWiresEmbedderIdentityIntoContentHash(t *testing.T) {
 	// the entry pending again. Nothing here calls IndexEntry a second
 	// time, and nothing here touches store.modelIdentity directly: if
 	// this passes, New's wiring did the work.
-	New(s, &distinctIdentityEmbedder{identity: "model-b@rev1#384"})
+	New(s, &distinctIdentityEmbedder{identity: "model-b@rev1#768"})
 
 	idsAfter, err := s.PendingEntryIDs(afterID, 100)
 	if err != nil {

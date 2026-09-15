@@ -10,7 +10,7 @@
 
 ARG ONNXRUNTIME_VERSION=1.30.0
 ARG TOKENIZERS_VERSION=v1.27.0
-ARG MODEL_REPO=Xenova/bge-small-en-v1.5
+ARG MODEL_REPO=nomic-ai/nomic-embed-text-v1.5
 
 FROM docker.io/library/golang:1.27-trixie AS build
 
@@ -57,10 +57,10 @@ RUN set -eux; \
 #    its identity from the model directory's basename, and that identity is
 #    folded into the content hash that decides which entries need
 #    re-embedding (spec 13.1). A directory called "model" yields the
-#    identity "model@<digest>#384" -- correct, but unreadable in logs and
+#    identity "model@<digest>#768" -- correct, but unreadable in logs and
 #    on the admin page next to a host-run sidecar reporting
-#    "bge-small-en-v1.5@...". Renaming this later would change every hash
-#    and re-index the whole corpus, so it is named properly up front.
+#    "nomic-embed-text-v1.5@...". Renaming this later would change every
+#    hash and re-index the whole corpus, so it is named properly up front.
 RUN set -eux; \
     model_dir="/opt/models/$(basename "${MODEL_REPO}")"; \
     mkdir -p "${model_dir}/onnx"; \
@@ -94,7 +94,7 @@ COPY --from=build /opt/models/ /opt/models/
 
 # Defaults matching the layout above. Both are overridable; the database
 # URL is not, and the sidecar refuses to start without it.
-ENV SIDECAR_MODEL_PATH=/opt/models/bge-small-en-v1.5/onnx/model_quantized.onnx \
+ENV SIDECAR_MODEL_PATH=/opt/models/nomic-embed-text-v1.5/onnx/model_quantized.onnx \
     SIDECAR_ONNX_LIB_DIR=/usr/local/lib/onnxruntime
 
 # The admin/search server binds 127.0.0.1:8081 by default, which is

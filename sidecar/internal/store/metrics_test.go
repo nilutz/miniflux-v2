@@ -54,7 +54,7 @@ func TestDatabaseMetricsTracksInsertedPassagesAndEntries(t *testing.T) {
 	}
 
 	entryID := createTestEntry(t, s, "metrics-tracks-inserts", "<p>Some content.</p>")
-	embedding := make([]float32, 384)
+	embedding := make([]float32, 768)
 	if err := s.ReplacePassages(entryID, "hash-metrics-1", []PassageRow{
 		{Ordinal: 0, Text: "passage one", CharStart: 0, CharEnd: 11, Source: "content", Embedding: embedding},
 		{Ordinal: 1, Text: "passage two", CharStart: 11, CharEnd: 22, Source: "content", Embedding: embedding},
@@ -182,7 +182,7 @@ func TestDatabaseMetricsDeadTuplesTracksActualChurn(t *testing.T) {
 	}
 
 	entryID := createTestEntry(t, s, "metrics-dead-tuples", "<p>Original.</p>")
-	embedding := make([]float32, 384)
+	embedding := make([]float32, 768)
 	if err := s.ReplacePassages(entryID, "hash-dead-1", []PassageRow{
 		{Ordinal: 0, Text: "original passage", CharStart: 0, CharEnd: 17, Source: "content", Embedding: embedding},
 	}); err != nil {

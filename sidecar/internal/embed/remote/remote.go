@@ -35,7 +35,7 @@
 //
 //	{
 //	  "vectors": [[0.01, -0.02, ...], [0.03, 0.04, ...]],
-//	  "model": {"name": "bge-small-en-v1.5", "revision": "abc123", "dimensions": 384}
+//	  "model": {"name": "nomic-embed-text-v1.5", "revision": "abc123", "dimensions": 768}
 //	}
 //
 // "vectors" has exactly one entry per input text, in the same order,
@@ -67,7 +67,7 @@ import (
 )
 
 // WantDimensions is the fixed width search.passages.embedding requires
-// (public.vector(384); spec §13.1). A remote reporting anything else is
+// (public.vector(768); spec §13.1). A remote reporting anything else is
 // a schema mismatch and must fail construction, not the first insert —
 // pgvector's fixed-width column would otherwise reject it there with a
 // confusing type error instead of this being caught as the model change
@@ -76,11 +76,12 @@ import (
 // Exported (Task 9) so internal/indexer's Manager can show the admin
 // page's Model section what the schema actually requires, and so a
 // probe/switch's dimension-mismatch refusal is traceable to one constant
-// rather than a second, independently maintained 384 literal -- the
-// nomic migration plan raises this to 768 in a schema migration, at
-// which point every reader of this constant changes with it instead of
-// silently disagreeing with the new column width.
-const WantDimensions = 384
+// rather than a second, independently maintained literal -- the nomic
+// migration plan (task 2) raised this from 384 to 768 in lockstep with
+// the schema migration that widened search.passages.embedding, and every
+// reader of this constant moved with it instead of silently disagreeing
+// with the new column width.
+const WantDimensions = 768
 
 // DefaultTimeout is used for every request, including New's own startup
 // probe, when Config.Timeout is zero.

@@ -232,7 +232,7 @@ func TestPendingEntryIDsExcludesUpToDateOKEntry(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "Already indexed.", CharStart: 0, CharEnd: 17, Source: "content", Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "Already indexed.", CharStart: 0, CharEnd: 17, Source: "content", Embedding: make([]float32, 768)},
 	}); err != nil {
 		t.Fatalf("unable to replace passages: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestPendingEntryIDsIncludesChangedEntry(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "Before edit.", CharStart: 0, CharEnd: 12, Source: "content", Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "Before edit.", CharStart: 0, CharEnd: 12, Source: "content", Embedding: make([]float32, 768)},
 	}); err != nil {
 		t.Fatalf("unable to replace passages: %v", err)
 	}
@@ -303,8 +303,8 @@ func TestPendingEntryIDsIncludesEntryWhoseTitleChanged(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "Before Title", CharStart: 0, CharEnd: 12, Source: "title", Embedding: make([]float32, 384)},
-		{Ordinal: 1, Text: "Stable body.", CharStart: 0, CharEnd: 12, Source: "content", Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "Before Title", CharStart: 0, CharEnd: 12, Source: "title", Embedding: make([]float32, 768)},
+		{Ordinal: 1, Text: "Stable body.", CharStart: 0, CharEnd: 12, Source: "content", Embedding: make([]float32, 768)},
 	}); err != nil {
 		t.Fatalf("unable to replace passages: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestPendingEntryCountMatchesPendingEntryIDs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "a", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "a", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 768)},
 	}); err != nil {
 		t.Fatalf("unable to replace passages: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestPipelineVersionBumpMakesIndexedEntriesPendingAgain(t *testing.T) {
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
 		Ordinal: 0, Text: "Content that never changes at all.", CharStart: 0, CharEnd: 34,
-		Source: "content", Embedding: make([]float32, 384),
+		Source: "content", Embedding: make([]float32, 768),
 	}}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}
@@ -614,7 +614,7 @@ func TestModelIdentityChangeMakesIndexedEntriesPendingAgain(t *testing.T) {
 
 	original := modelIdentity
 	t.Cleanup(func() { modelIdentity = original })
-	modelIdentity = "model-a@rev1#384"
+	modelIdentity = "model-a@rev1#768"
 
 	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
@@ -622,7 +622,7 @@ func TestModelIdentityChangeMakesIndexedEntriesPendingAgain(t *testing.T) {
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
 		Ordinal: 0, Text: "Content that never changes at all.", CharStart: 0, CharEnd: 34,
-		Source: "content", Embedding: make([]float32, 384),
+		Source: "content", Embedding: make([]float32, 768),
 	}}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}
@@ -633,7 +633,7 @@ func TestModelIdentityChangeMakesIndexedEntriesPendingAgain(t *testing.T) {
 
 	// Switch to model B: same pipeline version, same entry content, only
 	// the configured model's identity changes.
-	modelIdentity = "model-b@rev1#384"
+	modelIdentity = "model-b@rev1#768"
 
 	if !containsID(pendingIDsFrom(t, s, entryID-1), entryID) {
 		t.Fatalf("entry #%d should be pending again after the configured model changed, but PendingEntryIDs did not return it", entryID)
@@ -678,7 +678,7 @@ func TestModelIdentityUnchangedLeavesIndexedEntryNotPending(t *testing.T) {
 
 	original := modelIdentity
 	t.Cleanup(func() { modelIdentity = original })
-	modelIdentity = "model-a@rev1#384"
+	modelIdentity = "model-a@rev1#768"
 
 	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
@@ -686,7 +686,7 @@ func TestModelIdentityUnchangedLeavesIndexedEntryNotPending(t *testing.T) {
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
 		Ordinal: 0, Text: "Stable content, stable model.", CharStart: 0, CharEnd: 30,
-		Source: "content", Embedding: make([]float32, 384),
+		Source: "content", Embedding: make([]float32, 768),
 	}}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestPendingEntryIDsAndPendingEntryCountAgreeAfterModelIdentityChange(t *tes
 
 	original := modelIdentity
 	t.Cleanup(func() { modelIdentity = original })
-	modelIdentity = "model-a@rev1#384"
+	modelIdentity = "model-a@rev1#768"
 
 	entry, err := s.EntryForIndexing(context.Background(), entryID)
 	if err != nil {
@@ -746,7 +746,7 @@ func TestPendingEntryIDsAndPendingEntryCountAgreeAfterModelIdentityChange(t *tes
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{{
 		Ordinal: 0, Text: "Content for the agreement check.", CharStart: 0, CharEnd: 33,
-		Source: "content", Embedding: make([]float32, 384),
+		Source: "content", Embedding: make([]float32, 768),
 	}}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}
@@ -766,7 +766,7 @@ func TestPendingEntryIDsAndPendingEntryCountAgreeAfterModelIdentityChange(t *tes
 	}
 
 	// After a model change: both methods must agree the entry IS pending.
-	modelIdentity = "model-b@rev1#384"
+	modelIdentity = "model-b@rev1#768"
 
 	ids, err = s.PendingEntryIDs(afterID, 100)
 	if err != nil {
@@ -833,7 +833,7 @@ func TestPendingEntryCountApproxTracksTheExactCount(t *testing.T) {
 		t.Fatalf("EntryForIndexing failed: %v", err)
 	}
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 768)},
 	}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}
@@ -868,7 +868,7 @@ func TestPendingEntryCountApproxTracksTheExactCount(t *testing.T) {
 
 	// The documented divergence: content edited after a successful index.
 	if err := s.ReplacePassages(entryID, entry.ContentHash, []PassageRow{
-		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 384)},
+		{Ordinal: 0, Text: "x", CharStart: 0, CharEnd: 1, Source: "content", Embedding: make([]float32, 768)},
 	}); err != nil {
 		t.Fatalf("ReplacePassages failed: %v", err)
 	}
