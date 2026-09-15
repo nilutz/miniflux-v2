@@ -37,6 +37,7 @@ func Serve(store *storage.Storage, pool *worker.Pool) http.Handler {
 	// New subscription pages.
 	mux.HandleFunc("GET /subscribe", handler.showAddSubscriptionPage)
 	mux.HandleFunc("POST /subscribe", handler.submitSubscription)
+	mux.HandleFunc("POST /save-page", handler.submitSavedPage)
 	mux.HandleFunc("POST /subscriptions", handler.showChooseSubscriptionPage)
 	mux.HandleFunc("GET /bookmarklet", handler.bookmarklet)
 

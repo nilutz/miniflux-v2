@@ -145,6 +145,26 @@
             <button type="submit" class="button button-primary" data-label-loading="{{ t "form.submit.loading" }}">{{ t "page.add_feed.submit" }}</button>
         </div>
     </form>
+
+    <hr>
+
+    <h2>{{ t "page.add_feed.save_page.title" }}</h2>
+    <p>{{ t "page.add_feed.save_page.help" }}</p>
+
+    <form action="{{ routePath "/save-page" }}" method="post" autocomplete="off">
+        <input type="hidden" name="csrf" value="{{ .csrf }}">
+
+        {{ if .savedPageErrorMessage }}
+            <div role="alert" class="alert alert-error">{{ .savedPageErrorMessage }}</div>
+        {{ end }}
+
+        <label for="form-save-page-url">{{ t "page.add_feed.label.url" }}</label>
+        <input type="url" name="url" id="form-save-page-url" placeholder="https://domain.tld/article" value="{{ if .savedPageForm }}{{ .savedPageForm.URL }}{{ end }}" spellcheck="false" required>
+
+        <div class="buttons">
+            <button type="submit" class="button button-primary" data-label-loading="{{ t "form.submit.loading" }}">{{ t "page.add_feed.save_page.submit" }}</button>
+        </div>
+    </form>
 {{ end }}
 
 {{ end }}
