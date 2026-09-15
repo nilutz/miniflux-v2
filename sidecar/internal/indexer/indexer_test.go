@@ -906,6 +906,30 @@ func TestFailureCauseClassifiesEmbedderUnavailableDefensively(t *testing.T) {
 	}
 }
 
+// (Task 3 review round 2, spec §13.1.) requiresEmbedderRestart must
+// distinguish a plain outage (self-heals) from a mid-run identity change
+// (never self-heals) purely via errors.Is against embed.ErrRequiresRestart
+// -- both wrap embed.ErrUnavailable, so isEmbedderUnavailable alone cannot
+// tell them apart; this is the second, independent classification the
+// admin page's requires-restart signal depends on.
+func TestRequiresEmbedderRestartDistinguishesIdentityChangeFromPlainOutage(t *testing.T) {
+	plainOutage := fmt.Errorf("%w: simulated: connection refused", embed.ErrUnavailable)
+	if requiresEmbedderRestart(plainOutage) {
+		t.Fatalf("expected requiresEmbedderRestart=false for a plain outage, got true (err=%v)", plainOutage)
+	}
+	if !isEmbedderUnavailable(fmt.Errorf("%w #1: %w", errEmbedderUnavailable, plainOutage)) {
+		t.Fatal("test setup invalid: plainOutage must still classify as embedder-unavailable")
+	}
+
+	identityChanged := fmt.Errorf("%w: %w: simulated: remote identity changed mid-run", embed.ErrUnavailable, embed.ErrRequiresRestart)
+	if !requiresEmbedderRestart(identityChanged) {
+		t.Fatalf("expected requiresEmbedderRestart=true for a mid-run identity change, got false (err=%v)", identityChanged)
+	}
+	if !isEmbedderUnavailable(fmt.Errorf("%w #1: %w", errEmbedderUnavailable, identityChanged)) {
+		t.Fatal("test setup invalid: identityChanged must still classify as embedder-unavailable too")
+	}
+}
+
 // 6. (Fix round 2, finding 2.) SetBatchSize is the runtime-editable knob
 // spec §9.2 actually names ("batch size — passages per forward pass; the
 // main lever on CPU efficiency"), distinct from Backfill.SetPageSize

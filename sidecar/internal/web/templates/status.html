@@ -19,6 +19,7 @@
   label input { display: block; margin-top: 0.2rem; padding: 0.3rem; width: 12rem; }
   .hint { color: #555; font-size: 0.8em; }
   .stale { color: #a00; }
+  .restart-badge { color: #a00; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -37,9 +38,13 @@
   <tr><th>Workers</th><td>{{.Workers}}<div class="reason">{{.ControllerReason}}</div></td></tr>
   <tr><th>Skipped</th><td>{{comma .Skipped}}</td></tr>
   <tr><th>Failed</th><td>{{comma .Failed}}</td></tr>
-  <tr><th>Paused</th><td>
+  <tr><th>Backfill lane paused</th><td>
     {{if .Paused}}yes (paused by operator)
-    {{else if .EmbedderPaused}}yes (paused: embedder unreachable)<div class="reason">{{.EmbedderPauseReason}}</div>
+    {{else if .EmbedderPaused}}yes (paused: embedder unreachable{{if .EmbedderPauseRequiresRestart}} <span class="restart-badge">— requires restart</span>{{end}})<div class="reason">{{.EmbedderPauseReason}}</div>
+    {{else}}no{{end}}
+  </td></tr>
+  <tr><th>Live lane paused</th><td>
+    {{if .LiveEmbedderPaused}}yes (paused: embedder unreachable{{if .LiveEmbedderPauseRequiresRestart}} <span class="restart-badge">— requires restart</span>{{end}})<div class="reason">{{.LiveEmbedderPauseReason}}</div>
     {{else}}no{{end}}
   </td></tr>
   <tr><th>Done</th><td>{{if .Done}}yes{{else}}no{{end}}</td></tr>

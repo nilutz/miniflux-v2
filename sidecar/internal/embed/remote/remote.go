@@ -199,17 +199,20 @@ func (e *remoteEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	// this batch's entry that is at fault, and mixing vectors from two
 	// models into one HNSW graph is corruption, not a recoverable
 	// per-entry error the existing retry/backoff path is built to
-	// contain. It happens not to be transient the way a network blip is
-	// — nothing on this side will make the remote change back — but the
-	// indexer's classification and the lane's pause/resume machinery
-	// treat both the same way: pause, leave entries pending, and let the
-	// operator's own restart (named in the message below) be what
-	// clears it, exactly like a health check clearing once connectivity
-	// returns.
+	// contain. It ALSO wraps embed.ErrRequiresRestart, which
+	// ErrUnavailable does not: nothing on this side will make the remote
+	// change back, so unlike a network outage this can never clear
+	// itself no matter how long the lane keeps retrying — an operator
+	// has to restart the sidecar (see the message below) with matching
+	// configuration before it clears. The indexer's classification and
+	// the lane's pause/resume machinery still treat this exactly like a
+	// network outage for the pause/retry mechanics themselves (pause,
+	// leave entries pending, keep retrying); ErrRequiresRestart only
+	// changes what the admin page tells an operator to DO about it.
 	if got := embed.Identity(model.Name, model.Revision, model.Dimensions); got != e.identity {
 		return nil, fmt.Errorf(
-			"%w: embed/remote: remote identity changed mid-run, from %q to %q — refusing to mix vectors from two models; restart the sidecar to pick up the new model (spec §13.1)",
-			embed.ErrUnavailable, e.identity, got,
+			"%w: %w: embed/remote: remote identity changed mid-run, from %q to %q — refusing to mix vectors from two models; restart the sidecar to pick up the new model (spec §13.1)",
+			embed.ErrUnavailable, embed.ErrRequiresRestart, e.identity, got,
 		)
 	}
 	if len(vectors) != len(texts) {

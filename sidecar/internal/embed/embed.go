@@ -44,6 +44,27 @@ import (
 // fail that way.
 var ErrUnavailable = errors.New("embedder unavailable")
 
+// ErrRequiresRestart further qualifies an ErrUnavailable-wrapping error:
+// wrap BOTH together (fmt.Errorf supports multiple %w) when the condition
+// cannot clear itself no matter how long a caller keeps retrying — the
+// only case today is internal/embed/remote's mid-run model-identity
+// change, where the remote will keep reporting the new identity until an
+// operator restarts the sidecar with matching configuration.
+//
+// This is deliberately a second, independent sentinel rather than a third
+// value in some enum, and deliberately NOT a replacement for
+// ErrUnavailable: every ErrRequiresRestart-wrapping error is still, and
+// must still be classified as, ErrUnavailable — pause the lane, leave the
+// entry pending, keep retrying automatically — because it is just as much
+// "not this entry's fault" as a plain network outage is. What differs is
+// only what an operator watching the admin page should DO about it: a
+// plain ErrUnavailable resolves itself the moment the network/remote come
+// back, so "wait" is a reasonable response; an ErrRequiresRestart-wrapping
+// one never will, no matter how long the lane keeps trying, so "wait" is
+// the wrong answer and the page must say so distinctly rather than
+// leaving that distinction buried in prose an operator has to read.
+var ErrRequiresRestart = errors.New("embedder requires a sidecar restart to recover")
+
 // Embedder turns text into dense vectors. The ONNX implementation is the only
 // one today; the interface exists so a local inference service or a pure-Go
 // backend can be substituted without touching the pipeline (spec §6.6).

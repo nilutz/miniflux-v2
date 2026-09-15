@@ -337,6 +337,17 @@ type Stats struct {
 	// and empty otherwise — the admin page's answer to "why".
 	EmbedderPauseReason string
 
+	// EmbedderPauseRequiresRestart is true when the current embedder
+	// pause can never clear itself no matter how long the lane keeps
+	// retrying — the remote reported a different model mid-run
+	// (embed.ErrRequiresRestart; spec §13.1) — as opposed to an ordinary
+	// transient outage, which resolves the moment the network/remote
+	// recovers with no operator action at all. Kept as a distinct signal
+	// from EmbedderPauseReason's prose so the admin page can render "wait"
+	// vs. "go restart the sidecar" as a glance-able fact, not something an
+	// operator has to read a sentence to determine.
+	EmbedderPauseRequiresRestart bool
+
 	// Done reports that the backlog is currently drained: the most recent
 	// full sweep found nothing pending and left nothing outstanding. It
 	// is not a terminal state — the lane keeps sweeping every
@@ -381,12 +392,13 @@ type Backfill struct {
 	// admin page ("paused by operator" vs "paused: embedder
 	// unreachable"), and only the operator's own Resume() may clear
 	// paused, while only a successful attempt may clear embedderPaused.
-	embedderPaused      bool
-	embedderPauseReason string
-	done                bool
-	running             bool
-	startedAt           time.Time
-	startAfterCursor    int64 // the id this run's pagination began after; scopes Remaining's PendingEntryCount query
+	embedderPaused               bool
+	embedderPauseReason          string
+	embedderPauseRequiresRestart bool
+	done                         bool
+	running                      bool
+	startedAt                    time.Time
+	startAfterCursor             int64 // the id this run's pagination began after; scopes Remaining's PendingEntryCount query
 
 	indexed         atomic.Int64
 	skipped         atomic.Int64
@@ -523,17 +535,22 @@ func (b *Backfill) Resume() {
 // pauseForEmbedder marks the lane paused because the embedder reported
 // itself unavailable (isEmbedderUnavailable; spec §13.1) — automatic, not
 // an operator action, and distinguishable from Pause() on the admin page
-// via Stats().EmbedderPaused/EmbedderPauseReason. It is idempotent: every
-// worker that hits the same outage concurrently just refreshes the
-// recorded reason, rather than stacking state.
-func (b *Backfill) pauseForEmbedder(reason string) {
+// via Stats().EmbedderPaused/EmbedderPauseReason. requiresRestart records
+// whether this specific pause can ever clear on its own (see
+// requiresEmbedderRestart) — surfaced separately so the admin page can
+// tell "wait" from "go restart the sidecar" without parsing reason. It is
+// idempotent: every worker that hits the same outage concurrently just
+// refreshes the recorded reason, rather than stacking state.
+func (b *Backfill) pauseForEmbedder(reason string, requiresRestart bool) {
 	b.mu.Lock()
 	already := b.embedderPaused
 	b.embedderPaused = true
 	b.embedderPauseReason = reason
+	b.embedderPauseRequiresRestart = requiresRestart
 	b.mu.Unlock()
 	if !already {
-		slog.Warn("backfill lane: pausing -- embedder unavailable", slog.String("reason", reason))
+		slog.Warn("backfill lane: pausing -- embedder unavailable",
+			slog.String("reason", reason), slog.Bool("requires_restart", requiresRestart))
 	}
 }
 
@@ -546,6 +563,7 @@ func (b *Backfill) clearEmbedderPause() {
 	was := b.embedderPaused
 	b.embedderPaused = false
 	b.embedderPauseReason = ""
+	b.embedderPauseRequiresRestart = false
 	b.mu.Unlock()
 	if was {
 		slog.Info("backfill lane: resuming -- embedder available again")
@@ -977,9 +995,10 @@ func (b *Backfill) process(ctx context.Context, id int64) {
 			// entry's index state was left untouched by IndexEntry too,
 			// so it stays genuinely pending and is retried in full once
 			// the lane resumes, with no backoff to unwind.
-			b.pauseForEmbedder(err.Error())
+			restart := requiresEmbedderRestart(err)
+			b.pauseForEmbedder(err.Error(), restart)
 			slog.Warn("backfill lane: entry not attempted -- embedder unavailable",
-				slog.Int64("entry_id", id), slog.Any("error", err))
+				slog.Int64("entry_id", id), slog.Any("error", err), slog.Bool("requires_restart", restart))
 			return
 		}
 		// The CLASSIFIED cause, never err.Error(): this string is a map
@@ -1088,23 +1107,25 @@ func (b *Backfill) Stats() Stats {
 	paused := b.paused
 	embedderPaused := b.embedderPaused
 	embedderPauseReason := b.embedderPauseReason
+	embedderPauseRequiresRestart := b.embedderPauseRequiresRestart
 	done := b.done
 	b.mu.Unlock()
 
 	return Stats{
-		Indexed:             b.indexed.Load(),
-		Skipped:             b.skipped.Load(),
-		Failed:              b.failed.Load(),
-		Remaining:           b.cachedRemaining(),
-		SkippedByReason:     b.skippedByReason.snapshot(),
-		FailedByReason:      b.failedByReason.snapshot(),
-		Workers:             b.controller.Workers(),
-		ControllerReason:    b.controller.Reason(),
-		ThroughputPerSec:    b.currentThroughput(),
-		Paused:              paused,
-		EmbedderPaused:      embedderPaused,
-		EmbedderPauseReason: embedderPauseReason,
-		Done:                done,
+		Indexed:                      b.indexed.Load(),
+		Skipped:                      b.skipped.Load(),
+		Failed:                       b.failed.Load(),
+		Remaining:                    b.cachedRemaining(),
+		SkippedByReason:              b.skippedByReason.snapshot(),
+		FailedByReason:               b.failedByReason.snapshot(),
+		Workers:                      b.controller.Workers(),
+		ControllerReason:             b.controller.Reason(),
+		ThroughputPerSec:             b.currentThroughput(),
+		Paused:                       paused,
+		EmbedderPaused:               embedderPaused,
+		EmbedderPauseReason:          embedderPauseReason,
+		EmbedderPauseRequiresRestart: embedderPauseRequiresRestart,
+		Done:                         done,
 	}
 }
 

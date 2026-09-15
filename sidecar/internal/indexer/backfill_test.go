@@ -176,6 +176,23 @@ func (u *backfillUnavailableEmbedder) Dimensions() int  { return 384 }
 func (u *backfillUnavailableEmbedder) Identity() string { return testModelIdentity }
 func (u *backfillUnavailableEmbedder) Close() error     { return nil }
 
+// backfillIdentityChangedEmbedder always fails exactly the way
+// internal/embed/remote's Embed does for a mid-run model-identity change:
+// it wraps BOTH embed.ErrUnavailable and embed.ErrRequiresRestart, and --
+// being a permanent condition from this process's own perspective --
+// never recovers on its own; there is no healthy flag to flip.
+type backfillIdentityChangedEmbedder struct {
+	calls atomic.Int64
+}
+
+func (i *backfillIdentityChangedEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	i.calls.Add(1)
+	return nil, fmt.Errorf("%w: %w: simulated: remote identity changed mid-run", embed.ErrUnavailable, embed.ErrRequiresRestart)
+}
+func (i *backfillIdentityChangedEmbedder) Dimensions() int  { return 384 }
+func (i *backfillIdentityChangedEmbedder) Identity() string { return testModelIdentity }
+func (i *backfillIdentityChangedEmbedder) Close() error     { return nil }
+
 // runStartAsync runs a Backfill's start in a goroutine and returns a
 // channel that receives its error when it returns.
 func runStartAsync(b *Backfill, ctx context.Context, startAfter int64, upTo *atomic.Int64) chan error {
@@ -445,6 +462,10 @@ func TestBackfillPausesForEmbedderUnavailableAndResumesAutomatically(t *testing.
 	if st.EmbedderPauseReason == "" {
 		t.Fatal("expected a non-empty EmbedderPauseReason so the admin page can say why the lane stopped")
 	}
+	if st.EmbedderPauseRequiresRestart {
+		t.Fatal("expected EmbedderPauseRequiresRestart=false for a plain outage (no identity change) -- " +
+			"this pause resolves itself once the network/remote recover")
+	}
 	if st.Failed != 0 {
 		t.Fatalf("expected Failed=0 during an embedder outage (entries must not be marked failed), got %d", st.Failed)
 	}
@@ -478,6 +499,46 @@ func TestBackfillPausesForEmbedderUnavailableAndResumesAutomatically(t *testing.
 	})
 	if b.Stats().EmbedderPaused {
 		t.Fatal("expected Stats().EmbedderPaused to clear once indexing succeeds again")
+	}
+
+	cancel()
+	waitDone(t, done, 2*time.Second, "Backfill.start")
+}
+
+// 3b. (Task 3 review round 2, spec §13.1.) A mid-run model-identity
+// change is a DIFFERENT pause from a plain outage in one specific way an
+// operator needs without reading prose: it never clears on its own, no
+// matter how long the lane keeps retrying, because nothing on this side
+// makes the remote change back. Stats().EmbedderPauseRequiresRestart must
+// be true here and false in the plain-outage test above -- the two must
+// not collapse into one indistinguishable "paused" state.
+func TestBackfillIdentityChangeReportsRequiresRestart(t *testing.T) {
+	s, db := testEnv(t)
+
+	entryID := createTestEntry(t, db, "backfill-identity-change",
+		"<p>Entry that cannot be embedded because the remote changed identity mid-run.</p>")
+
+	ie := &backfillIdentityChangedEmbedder{}
+	idx := New(s, ie)
+	ctrlCfg, bfCfg := backfillTestConfig()
+	controller := newController(ctrlCfg, time.Now, fixedLoad(0.1))
+	b := NewBackfill(idx, controller, bfCfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runStartAsync(b, ctx, entryID-1, boundedUpTo(entryID))
+
+	waitFor(t, 2*time.Second, "the lane to report the pause", func() bool {
+		return b.Stats().EmbedderPaused
+	})
+
+	st := b.Stats()
+	if !st.EmbedderPauseRequiresRestart {
+		t.Fatal("expected EmbedderPauseRequiresRestart=true for a mid-run identity change -- " +
+			"this pause cannot clear itself, and the page must say so distinctly from a plain outage")
+	}
+	if got := entryStatus(t, db, entryID); got == "failed" {
+		t.Fatalf("entry #%d was marked 'failed' during an identity-change pause; it must stay pending, got status %q", entryID, got)
 	}
 
 	cancel()

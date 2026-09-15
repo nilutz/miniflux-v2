@@ -133,6 +133,24 @@ func (u *liveUnavailableEmbedder) Dimensions() int  { return 384 }
 func (u *liveUnavailableEmbedder) Identity() string { return testModelIdentity }
 func (u *liveUnavailableEmbedder) Close() error     { return nil }
 
+// liveIdentityChangedEmbedder always fails exactly the way
+// internal/embed/remote's Embed does when the remote started serving a
+// different model mid-run: it wraps BOTH embed.ErrUnavailable and
+// embed.ErrRequiresRestart (see embed.ErrRequiresRestart's doc comment),
+// and -- being a permanent condition from this process's perspective --
+// never recovers on its own; there is no healthy flag to flip.
+type liveIdentityChangedEmbedder struct {
+	calls atomic.Int64
+}
+
+func (i *liveIdentityChangedEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	i.calls.Add(1)
+	return nil, fmt.Errorf("%w: %w: simulated: remote identity changed mid-run", embed.ErrUnavailable, embed.ErrRequiresRestart)
+}
+func (i *liveIdentityChangedEmbedder) Dimensions() int  { return 384 }
+func (i *liveIdentityChangedEmbedder) Identity() string { return testModelIdentity }
+func (i *liveIdentityChangedEmbedder) Close() error     { return nil }
+
 // blockingEmbedder deliberately ignores ctx — it just sleeps for delay,
 // unconditionally, before returning success. This is what a slow but
 // cooperative-cancellation-unaware embedder would do. It is deliberately
@@ -206,7 +224,7 @@ func TestRunLiveIndexesNewEntry(t *testing.T) {
 	done := make(chan error, 1)
 	// startAfter=entryID-1 and upTo=entryID scope this run exactly to the
 	// one id this test created (see runLive's doc comment and boundedUpTo).
-	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID)) }()
+	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID), nil) }()
 
 	waitFor(t, 2*time.Second, "entry indexed", func() bool {
 		return entryStatus(t, db, entryID) == "ok"
@@ -242,7 +260,7 @@ func TestRunLiveSurvivesOneEntryFailing(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- runLive(ctx, idx, pollInterval, failingID-1, boundedUpTo(okID)) }()
+	go func() { done <- runLive(ctx, idx, pollInterval, failingID-1, boundedUpTo(okID), nil) }()
 
 	waitFor(t, 2*time.Second, "ok entry indexed", func() bool {
 		return entryStatus(t, db, okID) == "ok"
@@ -287,7 +305,7 @@ func TestRunLiveExitsOnContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
-	go func() { done <- RunLive(ctx, idx, pollInterval) }()
+	go func() { done <- RunLive(ctx, idx, pollInterval, nil) }()
 
 	// Let it run at least one tick before cancelling.
 	time.Sleep(pollInterval)
@@ -336,7 +354,7 @@ func TestRunLiveCancelsMidPassBetweenEntries(t *testing.T) {
 	// single pass, which is the scenario this test needs: several entries
 	// fetched together, so a mid-pass cancellation genuinely has entries
 	// left to skip past.
-	go func() { done <- runLive(ctx, idx, 10*time.Millisecond, firstID-1, boundedUpTo(lastID)) }()
+	go func() { done <- runLive(ctx, idx, 10*time.Millisecond, firstID-1, boundedUpTo(lastID), nil) }()
 
 	// Wait until at least one entry has started embedding, proving the
 	// pass is under way, then cancel while several entries remain.
@@ -394,7 +412,7 @@ func TestRunLiveRetriesFailedEntryWithBackoff(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID)) }()
+	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID), nil) }()
 
 	waitFor(t, 2*time.Second, "entry marked failed", func() bool {
 		return entryStatus(t, db, entryID) == "failed"
@@ -462,12 +480,13 @@ func TestRunLiveSurvivesEmbedderOutageWithoutMarkingEntriesFailed(t *testing.T) 
 
 	ue := &liveUnavailableEmbedder{} // healthy defaults to false: down from the start
 	idx := New(s, ue)
+	monitor := NewLiveMonitor()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID)) }()
+	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID), monitor) }()
 
 	// Observe a fixed window of ticks while the embedder stays down.
 	const observedTicks = 10
@@ -475,6 +494,14 @@ func TestRunLiveSurvivesEmbedderOutageWithoutMarkingEntriesFailed(t *testing.T) 
 
 	if got := entryStatus(t, db, entryID); got == "failed" {
 		t.Fatalf("entry #%d was marked 'failed' during an embedder outage; it must stay pending, got status %q", entryID, got)
+	}
+
+	if st := monitor.Stats(); !st.EmbedderPaused {
+		t.Fatal("expected the LiveMonitor to report EmbedderPaused=true while the embedder is down")
+	} else if st.EmbedderPauseReason == "" {
+		t.Fatal("expected a non-empty EmbedderPauseReason")
+	} else if st.EmbedderPauseRequiresRestart {
+		t.Fatal("expected EmbedderPauseRequiresRestart=false for a plain outage (no identity change)")
 	}
 
 	calls := ue.calls.Load()
@@ -496,6 +523,62 @@ func TestRunLiveSurvivesEmbedderOutageWithoutMarkingEntriesFailed(t *testing.T) 
 	waitFor(t, 2*time.Second, "entry indexed once the embedder recovers", func() bool {
 		return entryStatus(t, db, entryID) == "ok"
 	})
+	// A separate wait, not an immediate check: IndexEntry's DB write
+	// commits (making entryStatus observable as "ok") a moment before
+	// attempt() goes on to call monitor.clearEmbedderPause(), so an
+	// immediate check here races that ordering rather than testing
+	// anything meaningful.
+	waitFor(t, 1*time.Second, "the LiveMonitor to clear EmbedderPaused once indexing succeeds again", func() bool {
+		return !monitor.Stats().EmbedderPaused
+	})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runLive returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLive did not return after cancellation")
+	}
+}
+
+// 5b. (Task 3 review round 2, spec §13.1.) A mid-run model-identity change
+// is a DIFFERENT pause from a plain outage in one specific way an operator
+// needs to know without reading prose: it never clears on its own, no
+// matter how long the lane keeps retrying, because nothing on this side
+// makes the remote change back. LiveMonitor.Stats().EmbedderPauseRequires-
+// Restart must be true for this case and false for the plain-outage case
+// above -- the two must not collapse into one indistinguishable "paused"
+// state.
+func TestRunLiveIdentityChangeReportsRequiresRestart(t *testing.T) {
+	s, db := testEnv(t)
+
+	entryID := createTestEntry(t, db, "live-embedder-identity-change",
+		"<p>Entry that cannot be embedded because the remote changed identity mid-run.</p>")
+
+	ie := &liveIdentityChangedEmbedder{}
+	idx := New(s, ie)
+	monitor := NewLiveMonitor()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID), monitor) }()
+
+	waitFor(t, 2*time.Second, "the LiveMonitor to report the pause", func() bool {
+		return monitor.Stats().EmbedderPaused
+	})
+
+	st := monitor.Stats()
+	if !st.EmbedderPauseRequiresRestart {
+		t.Fatal("expected EmbedderPauseRequiresRestart=true for a mid-run identity change -- " +
+			"this pause cannot clear itself, and the page must say so distinctly from a plain outage")
+	}
+	if got := entryStatus(t, db, entryID); got == "failed" {
+		t.Fatalf("entry #%d was marked 'failed' during an identity-change pause; it must stay pending, got status %q", entryID, got)
+	}
 
 	cancel()
 	select {
@@ -528,7 +611,7 @@ func TestRunLiveDoesNotBlockNewerEntriesOnPersistentFailure(t *testing.T) {
 	upTo := boundedUpTo(failingID)
 
 	done := make(chan error, 1)
-	go func() { done <- runLive(ctx, idx, pollInterval, failingID-1, upTo) }()
+	go func() { done <- runLive(ctx, idx, pollInterval, failingID-1, upTo, nil) }()
 
 	waitFor(t, 2*time.Second, "failing entry marked failed", func() bool {
 		return entryStatus(t, db, failingID) == "failed"
@@ -614,7 +697,7 @@ func TestRunLiveSkipsPreexistingEntries(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runLive(ctx, idx, pollInterval, startAfter, boundedUpTo(newID)) }()
+	go func() { done <- runLive(ctx, idx, pollInterval, startAfter, boundedUpTo(newID), nil) }()
 
 	waitFor(t, 2*time.Second, "the newly arrived entry indexed", func() bool {
 		return entryStatus(t, db, newID) == "ok"

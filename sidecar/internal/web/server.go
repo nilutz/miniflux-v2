@@ -3,15 +3,17 @@
 
 // Package web serves the sidecar's status and admin page (spec §9.4): a
 // progress/ETA/throughput view over the backfill lane's Stats(), plus
-// pause/resume control. Plain net/http and html/template, matching
-// Miniflux's own no-framework style — no JS framework, no CSS toolkit.
+// pause/resume control, plus (spec §13.1) the live lane's own embedder-
+// pause status. Plain net/http and html/template, matching Miniflux's own
+// no-framework style — no JS framework, no CSS toolkit.
 //
 // This package must never import internal/embed/onnx: it is exercised by
 // `go test ./internal/...` without -tags ORT and without libtokenizers.a
 // linked, and only cmd/sidecar is allowed to pull the native ONNX Runtime
-// dependency in. It depends only on internal/indexer's Stats type and the
-// small BackfillController interface below, which *indexer.Backfill
-// satisfies without this package ever constructing one.
+// dependency in. It depends only on internal/indexer's Stats/LiveStats
+// types and the small BackfillController/LiveLane interfaces below, which
+// *indexer.Backfill and *indexer.LiveMonitor satisfy without this package
+// ever constructing either.
 package web // import "miniflux.app/v2/sidecar/internal/web"
 
 import (
@@ -60,26 +62,41 @@ type BackfillController interface {
 	ApplyConfig(indexer.ConfigPatch) (indexer.RuntimeConfig, error)
 }
 
+// LiveLane is the subset of the live lane's status the admin page needs
+// (spec §13.1's requirement 3: the page must say which lane is paused and
+// why). Unlike BackfillController, there is no Pause()/Resume() here — the
+// live lane has no operator pause concept of its own, only the automatic
+// embedder-outage one — and no progress/throughput snapshot, since the
+// live lane has no backlog to page through. *indexer.LiveMonitor satisfies
+// this without internal/web ever constructing one, the same pattern
+// BackfillController already uses for *indexer.Backfill.
+type LiveLane interface {
+	Stats() indexer.LiveStats
+}
+
 // Server is the sidecar's status and admin HTTP server (spec §9.4), and,
 // since task 7, its read-only search HTTP API (spec §6.3-6.4, §7).
 type Server struct {
 	backfill BackfillController
+	live     LiveLane
 	searcher SearchService
 	entries  EntryLookup
 	tmpl     *template.Template
 	mux      *http.ServeMux
 }
 
-// New builds a Server over backfill (control endpoints), searcher
-// (GET /api/search and /api/similar) and entries (loaded per result to
-// build a highlighted search.BuildSnippet — see search_handlers.go). It
-// parses the embedded status page template eagerly so a malformed
-// template fails at startup, not on the first request.
+// New builds a Server over backfill (control endpoints), live (the live
+// lane's own pause status — spec §13.1), searcher (GET /api/search and
+// /api/similar) and entries (loaded per result to build a highlighted
+// search.BuildSnippet — see search_handlers.go). It parses the embedded
+// status page template eagerly so a malformed template fails at startup,
+// not on the first request.
 //
-// searcher and entries may be nil in tests that never exercise the search
-// routes (see server_test.go, which only cares about the backfill control
-// endpoints); cmd/sidecar always supplies both.
-func New(backfill BackfillController, searcher SearchService, entries EntryLookup) (*Server, error) {
+// live, searcher and entries may all be nil in tests that don't care
+// about what they cover (see server_test.go); cmd/sidecar always supplies
+// all three. A nil live renders as "not paused" — the zero value of
+// indexer.LiveStats — rather than panicking.
+func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup) (*Server, error) {
 	tmpl, err := template.New("status.html").Funcs(template.FuncMap{
 		"comma": commaInt,
 	}).ParseFS(templateFS, "templates/status.html")
@@ -87,7 +104,7 @@ func New(backfill BackfillController, searcher SearchService, entries EntryLooku
 		return nil, fmt.Errorf("web: unable to parse status template: %w", err)
 	}
 
-	s := &Server{backfill: backfill, searcher: searcher, entries: entries, tmpl: tmpl}
+	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, tmpl: tmpl}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -165,9 +182,34 @@ type statusView struct {
 	// EmbedderPaused/EmbedderPauseReason distinguish "paused: embedder
 	// unreachable" from an operator's own "paused by operator" (spec
 	// §13.1) — an operator whose backfill stopped needs to know whether
-	// to look at the network or the data.
+	// to look at the network or the data. These three all describe the
+	// BACKFILL lane specifically — see LiveEmbedderPaused etc. below for
+	// the live lane's own, entirely separate, state.
 	EmbedderPaused      bool   `json:"embedder_paused"`
 	EmbedderPauseReason string `json:"embedder_pause_reason"`
+
+	// EmbedderPauseRequiresRestart is true when the backfill lane's
+	// current embedder pause can never clear on its own (the remote
+	// changed identity mid-run; spec §13.1) — as opposed to an ordinary
+	// transient outage, which resolves once the network/remote recovers
+	// with no operator action. Distinct from the reason PROSE so the page
+	// can render "wait" vs. "go restart the sidecar" as a fact to scan,
+	// not a sentence to parse.
+	EmbedderPauseRequiresRestart bool `json:"embedder_pause_requires_restart"`
+
+	// LiveEmbedderPaused/LiveEmbedderPauseReason/
+	// LiveEmbedderPauseRequiresRestart mirror the three fields above, but
+	// for the LIVE lane (indexer.RunLive) rather than the backfill lane.
+	// They are deliberately named and rendered separately, never folded
+	// into the backfill fields above or into one shared boolean: the two
+	// lanes can be paused independently, for independent reasons, at
+	// independent times, and an operator reading this page must be able
+	// to tell which lane stopped without reading logs (spec §13.1,
+	// requirement 3 — "the live lane behaves the same way [...] the page
+	// must say why").
+	LiveEmbedderPaused               bool   `json:"live_embedder_paused"`
+	LiveEmbedderPauseReason          string `json:"live_embedder_pause_reason"`
+	LiveEmbedderPauseRequiresRestart bool   `json:"live_embedder_pause_requires_restart"`
 
 	Done            bool      `json:"done"`
 	ETA             string    `json:"eta"`              // human-readable, "unknown" or "done"
@@ -180,30 +222,38 @@ type statusView struct {
 	IdleResweep  string                `json:"idle_resweep"`
 }
 
-// buildView derives a statusView from a Stats snapshot and the lane's
-// current live-editable configuration.
-func buildView(st indexer.Stats, cfg indexer.RuntimeConfig) statusView {
+// buildView derives a statusView from the backfill lane's Stats snapshot,
+// the live lane's own LiveStats snapshot, and the backfill lane's current
+// live-editable configuration (the live lane has no configuration of its
+// own to show).
+func buildView(st indexer.Stats, liveSt indexer.LiveStats, cfg indexer.RuntimeConfig) statusView {
 	v := statusView{
-		Indexed:             st.Indexed,
-		Skipped:             st.Skipped,
-		Failed:              st.Failed,
-		Remaining:           st.Remaining,
-		SkippedByReason:     st.SkippedByReason,
-		FailedByReason:      st.FailedByReason,
-		Workers:             st.Workers,
-		ControllerReason:    st.ControllerReason,
-		ThroughputPerSec:    st.ThroughputPerSec,
-		Paused:              st.Paused,
-		EmbedderPaused:      st.EmbedderPaused,
-		EmbedderPauseReason: st.EmbedderPauseReason,
-		Done:                st.Done,
-		GeneratedAt:         time.Now(),
-		Total:               -1,
-		PercentComplete:     -1,
-		Config:              cfg,
-		WindowLabel:         cfg.WindowDescription(),
-		PollInterval:        formatSeconds(cfg.PollIntervalSeconds),
-		IdleResweep:         formatSeconds(cfg.IdleResweepIntervalSecs),
+		Indexed:                      st.Indexed,
+		Skipped:                      st.Skipped,
+		Failed:                       st.Failed,
+		Remaining:                    st.Remaining,
+		SkippedByReason:              st.SkippedByReason,
+		FailedByReason:               st.FailedByReason,
+		Workers:                      st.Workers,
+		ControllerReason:             st.ControllerReason,
+		ThroughputPerSec:             st.ThroughputPerSec,
+		Paused:                       st.Paused,
+		EmbedderPaused:               st.EmbedderPaused,
+		EmbedderPauseReason:          st.EmbedderPauseReason,
+		EmbedderPauseRequiresRestart: st.EmbedderPauseRequiresRestart,
+
+		LiveEmbedderPaused:               liveSt.EmbedderPaused,
+		LiveEmbedderPauseReason:          liveSt.EmbedderPauseReason,
+		LiveEmbedderPauseRequiresRestart: liveSt.EmbedderPauseRequiresRestart,
+
+		Done:            st.Done,
+		GeneratedAt:     time.Now(),
+		Total:           -1,
+		PercentComplete: -1,
+		Config:          cfg,
+		WindowLabel:     cfg.WindowDescription(),
+		PollInterval:    formatSeconds(cfg.PollIntervalSeconds),
+		IdleResweep:     formatSeconds(cfg.IdleResweepIntervalSecs),
 	}
 	if v.SkippedByReason == nil {
 		v.SkippedByReason = map[string]int64{}
@@ -277,12 +327,17 @@ func commaInt(n int64) string {
 	return string(out)
 }
 
-// view builds the current status view. Stats() and RuntimeConfig() are
-// read one after the other rather than under a shared lock; they are
-// independent snapshots of a lane that is changing anyway, and nothing
-// rendered from them is a consistency claim about a single instant.
+// view builds the current status view. Stats(), the live lane's Stats()
+// and RuntimeConfig() are read one after the other rather than under a
+// shared lock; they are independent snapshots of lanes that are changing
+// anyway, and nothing rendered from them is a consistency claim about a
+// single instant.
 func (s *Server) view() statusView {
-	return buildView(s.backfill.Stats(), s.backfill.RuntimeConfig())
+	var liveSt indexer.LiveStats
+	if s.live != nil {
+		liveSt = s.live.Stats()
+	}
+	return buildView(s.backfill.Stats(), liveSt, s.backfill.RuntimeConfig())
 }
 
 // formatSeconds renders a duration expressed in seconds the short way an

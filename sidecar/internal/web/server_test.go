@@ -98,12 +98,36 @@ func (f *fakeBackfill) appliedPatches() []indexer.ConfigPatch {
 	return out
 }
 
+// fakeLive is a hermetic stand-in for *indexer.LiveMonitor: it satisfies
+// LiveLane by returning a fixed LiveStats snapshot, so tests can render
+// the live lane's own pause state on the status page without a real
+// runLive anywhere nearby.
+type fakeLive struct {
+	stats indexer.LiveStats
+}
+
+func (f *fakeLive) Stats() indexer.LiveStats { return f.stats }
+
 func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	t.Helper()
-	// nil, nil: these tests exercise only the backfill control endpoints,
-	// never GET /api/search or /api/similar (see search_handlers_test.go
-	// for those, with their own fakeSearcher/fakeEntries).
-	srv, err := New(fb, nil, nil)
+	// nil for live: these tests exercise only the backfill control
+	// endpoints and don't care what the live lane's own pause state
+	// renders as (see TestStatusDistinguishesLiveLanePauseFromBackfill
+	// for that, via newTestServerWithLive). nil, nil: no search
+	// service/entries either -- see search_handlers_test.go for those.
+	srv, err := New(fb, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return srv.Handler()
+}
+
+// newTestServerWithLive is newTestServer plus a real, non-nil LiveLane, for
+// the tests that specifically check the live lane's own pause state
+// renders distinctly from the backfill lane's.
+func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.Handler {
+	t.Helper()
+	srv, err := New(fb, live, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -300,6 +324,123 @@ func TestStatusPageRendersOperatorPauseDistinctly(t *testing.T) {
 	}
 }
 
+// (Task 3 review round 2, spec §13.1 requirement 3.) The live lane's pause
+// must be visible on the admin page at all -- and distinct from the
+// backfill lane's, since the two can be paused independently, for
+// independent reasons, at independent times. This asserts on the actual
+// wiring (Server.view() reading s.live.Stats()), not merely that the
+// template CAN render the field if handed it -- a regression that dropped
+// s.live from the New()/view() plumbing entirely would still compile (a
+// nil LiveLane renders as "not paused") and would be caught only by
+// exercising a REAL, non-nil fakeLive through the full HTTP path, which is
+// exactly what this does.
+func TestStatusDistinguishesLiveLanePauseFromBackfillLane(t *testing.T) {
+	const backfillReason = "embed/remote: request failed: dial tcp: connection refused"
+	const liveReason = "embed/remote: request failed: read tcp: connection reset by peer"
+
+	fb := &fakeBackfill{stats: indexer.Stats{
+		EmbedderPaused:      true,
+		EmbedderPauseReason: backfillReason,
+	}}
+	live := &fakeLive{stats: indexer.LiveStats{
+		EmbedderPaused:      true,
+		EmbedderPauseReason: liveReason,
+	}}
+	handler := newTestServerWithLive(t, fb, live)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var got struct {
+		EmbedderPaused      bool   `json:"embedder_paused"`
+		EmbedderPauseReason string `json:"embedder_pause_reason"`
+
+		LiveEmbedderPaused      bool   `json:"live_embedder_paused"`
+		LiveEmbedderPauseReason string `json:"live_embedder_pause_reason"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v, body = %s", err, rec.Body.String())
+	}
+	if !got.EmbedderPaused || got.EmbedderPauseReason != backfillReason {
+		t.Errorf("expected the backfill lane's own pause/reason to come through unchanged, got paused=%v reason=%q",
+			got.EmbedderPaused, got.EmbedderPauseReason)
+	}
+	if !got.LiveEmbedderPaused {
+		t.Error("expected LiveEmbedderPaused = true -- the live lane's own pause state, wired in separately")
+	}
+	if got.LiveEmbedderPauseReason != liveReason {
+		t.Errorf("LiveEmbedderPauseReason = %q, want %q -- the live lane's reason must not be conflated with the backfill lane's",
+			got.LiveEmbedderPauseReason, liveReason)
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlRec := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, htmlReq)
+	body := htmlRec.Body.String()
+	if !strings.Contains(body, "Backfill lane paused") || !strings.Contains(body, "Live lane paused") {
+		t.Errorf("expected the status page to label the two lanes' pause rows separately, got:\n%s", body)
+	}
+	if !strings.Contains(body, backfillReason) {
+		t.Errorf("expected the backfill lane's reason on the page, got:\n%s", body)
+	}
+	if !strings.Contains(body, liveReason) {
+		t.Errorf("expected the live lane's OWN reason on the page (not just the backfill lane's), got:\n%s", body)
+	}
+}
+
+// A pause that can never clear on its own (a mid-run model-identity
+// change; spec §13.1) must be visibly distinct from an ordinary
+// transient outage on the page, not just in the reason prose an operator
+// would have to read to notice.
+func TestStatusPageShowsRequiresRestartDistinctly(t *testing.T) {
+	fb := &fakeBackfill{stats: indexer.Stats{
+		EmbedderPaused:               true,
+		EmbedderPauseReason:          "embed/remote: remote identity changed mid-run",
+		EmbedderPauseRequiresRestart: true,
+	}}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	var got struct {
+		EmbedderPauseRequiresRestart bool `json:"embedder_pause_requires_restart"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v, body = %s", err, rec.Body.String())
+	}
+	if !got.EmbedderPauseRequiresRestart {
+		t.Error("expected embedder_pause_requires_restart = true in the JSON")
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlRec := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, htmlReq)
+	if body := htmlRec.Body.String(); !strings.Contains(body, "requires restart") {
+		t.Errorf("expected the status page to visibly flag that this pause requires a restart, got:\n%s", body)
+	}
+}
+
+// The counterpart: an ordinary transient outage (no identity change) must
+// NOT show the requires-restart flag -- the two pause causes must not
+// collapse into looking the same.
+func TestStatusPageDoesNotShowRequiresRestartForPlainOutage(t *testing.T) {
+	fb := &fakeBackfill{stats: indexer.Stats{
+		EmbedderPaused:               true,
+		EmbedderPauseReason:          "embed/remote: request failed: connection refused",
+		EmbedderPauseRequiresRestart: false,
+	}}
+	handler := newTestServer(t, fb)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if body := rec.Body.String(); strings.Contains(body, "requires restart") {
+		t.Errorf("expected no requires-restart flag for a plain transient outage, got:\n%s", body)
+	}
+}
+
 func TestStatusPageRendersProgressFigure(t *testing.T) {
 	fb := &fakeBackfill{stats: indexer.Stats{
 		Indexed:          123,
@@ -400,7 +541,7 @@ func TestBuildViewETAEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := buildView(tt.stats, indexer.RuntimeConfig{})
+			v := buildView(tt.stats, indexer.LiveStats{}, indexer.RuntimeConfig{})
 			if v.ETA != tt.wantETA {
 				t.Errorf("ETA = %q, want %q", v.ETA, tt.wantETA)
 			}

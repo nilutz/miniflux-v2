@@ -439,3 +439,53 @@ func TestEmbedRejectsIdentityChangeMidRunWrapsErrUnavailable(t *testing.T) {
 		t.Fatalf("expected the identity-change error to wrap embed.ErrUnavailable, got: %v", err)
 	}
 }
+
+// TestEmbedRejectsIdentityChangeMidRunWrapsErrRequiresRestart is the other
+// half: unlike a plain network outage (which does NOT wrap this), a
+// mid-run identity change can never clear on its own -- nothing on this
+// side makes the remote change back -- so it must additionally wrap
+// embed.ErrRequiresRestart, the signal internal/web's admin page uses to
+// tell an operator "go restart the sidecar" rather than "wait" (spec
+// §13.1, task 3 review round 2).
+func TestEmbedRejectsIdentityChangeMidRunWrapsErrRequiresRestart(t *testing.T) {
+	srv := newDriftingServer(t, 384, "bge-small-en-v1.5", "some-other-model", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+
+	_, err = e.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected an error when the remote's identity changes mid-run, got nil")
+	}
+	if !errors.Is(err, embed.ErrRequiresRestart) {
+		t.Fatalf("expected the identity-change error to wrap embed.ErrRequiresRestart, got: %v", err)
+	}
+}
+
+// TestEmbedConnectionFailureDoesNotWrapErrRequiresRestart is the
+// counterpart proof: a plain, ordinary connectivity failure must NOT wrap
+// embed.ErrRequiresRestart -- it resolves itself once the network/remote
+// recover, and must not be confused with the permanent, identity-change
+// case above.
+func TestEmbedConnectionFailureDoesNotWrapErrRequiresRestart(t *testing.T) {
+	srv, _ := newFakeServer(t, 384, "bge-small-en-v1.5", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+
+	srv.Close()
+
+	_, err = e.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected an error once the remote is unreachable, got nil")
+	}
+	if errors.Is(err, embed.ErrRequiresRestart) {
+		t.Fatalf("expected a plain connectivity failure NOT to wrap embed.ErrRequiresRestart, got: %v", err)
+	}
+}

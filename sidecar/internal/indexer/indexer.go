@@ -85,6 +85,19 @@ func isEmbedderUnavailable(err error) bool {
 	return errors.Is(err, errEmbedderUnavailable)
 }
 
+// requiresEmbedderRestart reports whether an embedder-unavailable error
+// (isEmbedderUnavailable must already be true, or this is meaningless) can
+// never clear on its own — the remote reported a different model mid-run
+// (embed.ErrRequiresRestart; spec §13.1) — as opposed to an ordinary
+// transient outage, which resolves the moment the network or remote
+// recovers with no operator action. Both lanes surface this alongside
+// EmbedderPaused/EmbedderPauseReason so the admin page can tell "wait,
+// this clears itself" from "go restart the sidecar" without an operator
+// having to parse the full reason text to find out.
+func requiresEmbedderRestart(err error) bool {
+	return errors.Is(err, embed.ErrRequiresRestart)
+}
+
 // maxCauseLength truncates an unclassified cause label, so that even a
 // pathological error string cannot make one map key, one JSON field or one
 // admin-page table cell arbitrarily large.

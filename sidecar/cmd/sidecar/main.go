@@ -283,6 +283,13 @@ func run() error {
 
 	ix := indexer.New(s, embedder)
 
+	// liveMonitor tracks the live lane's own embedder-pause state,
+	// entirely separate from the backfill lane's (spec §13.1, requirement
+	// 3): the two lanes can be paused independently, for independent
+	// reasons, and the admin page (web.New below) needs its own place to
+	// read each from.
+	liveMonitor := indexer.NewLiveMonitor()
+
 	controller := indexer.NewController(indexer.DefaultControllerConfig())
 	backfill := indexer.NewBackfill(ix, controller, indexer.BackfillConfig{})
 
@@ -314,7 +321,7 @@ func run() error {
 	// no adaptation, so it is passed to web.New a second time for that.
 	searcher := search.NewSearcher(s, search.WithEmbedder(embedder))
 
-	adminServer, err := web.New(backfill, searcher, s)
+	adminServer, err := web.New(backfill, liveMonitor, searcher, s)
 	if err != nil {
 		return fmt.Errorf("sidecar: unable to build admin server: %w", err)
 	}
@@ -353,7 +360,7 @@ func run() error {
 		slog.Info("sidecar: starting live indexing lane",
 			slog.Duration("poll_interval", liveLanePollInterval),
 		)
-		if err := indexer.RunLive(ctx, ix, liveLanePollInterval); err != nil {
+		if err := indexer.RunLive(ctx, ix, liveLanePollInterval, liveMonitor); err != nil {
 			errs <- fmt.Errorf("sidecar: live lane exited with error: %w", err)
 			stop()
 		}

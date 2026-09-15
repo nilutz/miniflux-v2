@@ -6,6 +6,7 @@ package indexer // import "miniflux.app/v2/sidecar/internal/indexer"
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -37,6 +38,97 @@ const (
 	retryBackoffMultiple    = 4
 	retryBackoffCapMultiple = 32
 )
+
+// LiveStats is the live lane's status snapshot for the admin page (spec
+// §13.1's requirement 3: the page must say which lane is paused and why).
+// The live lane has no operator Pause()/Resume() of its own and no
+// backlog/throughput concept like Backfill.Stats() -- it only ever
+// auto-pauses for the one reason Backfill can also auto-pause for, so
+// this carries just that.
+type LiveStats struct {
+	// EmbedderPaused is true while the live lane is not attempting new
+	// ids because the embedder reported itself unavailable
+	// (isEmbedderUnavailable; spec §13.1) -- kept as the live lane's OWN
+	// state, entirely separate from Backfill.Stats().EmbedderPaused, so
+	// the two lanes' pause states never collapse into one indistinct
+	// "something is paused" on the admin page.
+	EmbedderPaused bool
+
+	// EmbedderPauseReason is the classified error's own message while
+	// EmbedderPaused is true, and empty otherwise.
+	EmbedderPauseReason string
+
+	// EmbedderPauseRequiresRestart is true when the current pause cannot
+	// clear itself no matter how long the lane keeps retrying -- the
+	// remote reported a different model mid-run (embed.ErrRequiresRestart;
+	// spec §13.1) -- as opposed to an ordinary transient outage, which
+	// resolves on its own the moment the network/remote recovers. Without
+	// this distinction, an operator watching a boolean has no way to tell
+	// "wait, this clears itself" from "go restart the sidecar", and would
+	// have to read the full reason text every time to find out.
+	EmbedderPauseRequiresRestart bool
+}
+
+// LiveMonitor holds the live lane's current embedder-pause state, read by
+// internal/web to render it on the admin page. It is deliberately its own
+// type, not a field folded into *Indexer (which both lanes share) or into
+// *Backfill (which is backfill's own): the live and backfill lanes must be
+// able to show DIFFERENT pause states at the same time, so each needs its
+// own place to keep one.
+//
+// A nil *LiveMonitor is valid and simply does nothing -- runLive/RunLive
+// never require one, so tests that don't care about pause visibility
+// don't need to construct one.
+type LiveMonitor struct {
+	mu                  sync.Mutex
+	embedderPaused      bool
+	embedderPauseReason string
+	requiresRestart     bool
+}
+
+// NewLiveMonitor builds a LiveMonitor with no pause recorded yet.
+func NewLiveMonitor() *LiveMonitor { return &LiveMonitor{} }
+
+// pauseForEmbedder records the live lane pausing for the embedder,
+// mirroring Backfill.pauseForEmbedder -- idempotent, safe to call from the
+// single goroutine runLive runs on every tick it detects the outage.
+func (m *LiveMonitor) pauseForEmbedder(reason string, requiresRestart bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.embedderPaused = true
+	m.embedderPauseReason = reason
+	m.requiresRestart = requiresRestart
+}
+
+// clearEmbedderPause resumes the live lane's own pause state, mirroring
+// Backfill.clearEmbedderPause -- called whenever an attempt succeeds.
+func (m *LiveMonitor) clearEmbedderPause() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.embedderPaused = false
+	m.embedderPauseReason = ""
+	m.requiresRestart = false
+}
+
+// Stats returns a snapshot of the live lane's current pause state.
+func (m *LiveMonitor) Stats() LiveStats {
+	if m == nil {
+		return LiveStats{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return LiveStats{
+		EmbedderPaused:               m.embedderPaused,
+		EmbedderPauseReason:          m.embedderPauseReason,
+		EmbedderPauseRequiresRestart: m.requiresRestart,
+	}
+}
 
 // retryState tracks one failed entry's next eligible retry time and
 // current backoff, purely in memory for the lifetime of one RunLive call —
@@ -112,14 +204,14 @@ type retryState struct {
 // either. Nothing enforces this today beyond the two lanes' current
 // implementations agreeing on it; whoever changes either side needs to
 // keep it true.
-func RunLive(ctx context.Context, ix *Indexer, interval time.Duration) error {
+func RunLive(ctx context.Context, ix *Indexer, interval time.Duration, monitor *LiveMonitor) error {
 	startAfter, err := ix.store.MaxEntryID()
 	if err != nil {
 		slog.Error("live lane: unable to determine starting cursor, starting from the beginning of the table instead",
 			slog.Any("error", err))
 		startAfter = 0
 	}
-	return runLive(ctx, ix, interval, startAfter, nil)
+	return runLive(ctx, ix, interval, startAfter, nil, monitor)
 }
 
 // runLive is RunLive's implementation, parameterised by the starting
@@ -147,7 +239,14 @@ func RunLive(ctx context.Context, ix *Indexer, interval time.Duration) error {
 // learns the id it needs to admit after the lane is already running).
 // nil disables the bound entirely, which is what production RunLive
 // wants — it has no fixed set of ids to scope itself to.
-func runLive(ctx context.Context, ix *Indexer, interval time.Duration, startAfter int64, upTo *atomic.Int64) error {
+//
+// monitor, if non-nil, is kept in step with this tick loop's own
+// embedder-pause detection (see LiveMonitor) so internal/web can render
+// the live lane's pause state on the admin page distinctly from the
+// backfill lane's own. nil is accepted and simply does nothing, which
+// every test in this file that doesn't care about pause visibility
+// passes.
+func runLive(ctx context.Context, ix *Indexer, interval time.Duration, startAfter int64, upTo *atomic.Int64, monitor *LiveMonitor) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -215,12 +314,17 @@ func runLive(ctx context.Context, ix *Indexer, interval time.Duration, startAfte
 			if err == nil {
 				indexed++
 				delete(retries, id)
+				monitor.clearEmbedderPause()
 				return false, false
 			}
 
 			if isEmbedderUnavailable(err) {
+				restart := requiresEmbedderRestart(err)
+				monitor.pauseForEmbedder(err.Error(), restart)
 				slog.Warn("live lane: entry not attempted -- embedder unavailable, pausing",
-					slog.Int64("entry_id", id), slog.Any("error", err))
+					slog.Int64("entry_id", id), slog.Any("error", err),
+					slog.Bool("requires_restart", restart),
+				)
 				return false, true
 			}
 
