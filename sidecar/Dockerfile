@@ -1,12 +1,11 @@
 # Builds the search sidecar with the ONNX embedder compiled in.
 #
-# The sidecar needs three things that are NOT Go modules and are NOT
-# vendored (see README.md "Native dependencies"): the ONNX Runtime shared
-# library, libtokenizers.a, and the model weights themselves. All three are
-# fetched here at build time, pinned to the exact versions the repo pins.
+# Three things are fetched here at build time, pinned to the exact
+# versions the repo pins: the ONNX Runtime shared library, libtokenizers.a,
+# and the model weights (see README.md "Native dependencies").
 #
 # Debian, not Alpine: the prebuilt ONNX Runtime and libtokenizers releases
-# are linked against glibc, and musl cannot load them.
+# are glibc-linked, and musl cannot load them.
 
 ARG ONNXRUNTIME_VERSION=1.30.0
 ARG TOKENIZERS_VERSION=v1.27.0
@@ -38,9 +37,8 @@ RUN set -eux; \
     rm /tmp/ort.tgz; \
     test -f /opt/onnxruntime/lib/libonnxruntime.so
 
-# 2. libtokenizers.a, which daulet/tokenizers links statically. The version
-#    MUST match the module version in go.mod -- the Rust ABI is not stable
-#    across releases.
+# 2. libtokenizers.a. Version MUST match go.mod's daulet/tokenizers
+#    requirement -- the Rust ABI is not stable across releases.
 RUN set -eux; \
     curl -fsSL -o /tmp/tokenizers.tgz \
       "https://github.com/daulet/tokenizers/releases/download/${TOKENIZERS_VERSION}/libtokenizers.linux-${TARGETARCH}.tar.gz"; \
@@ -51,16 +49,11 @@ RUN set -eux; \
 
 # 3. The model. hugot expects tokenizer.json and friends one directory up
 #    from the .onnx file, so the layout here is load-bearing. Use the
-#    int8-quantized export, not the fp32 model.onnx: the spike measured the
-#    fp32 weights at roughly half the throughput for no accuracy benefit.
-#    The directory NAME matters and is not cosmetic: the embedder derives
-#    its identity from the model directory's basename, and that identity is
-#    folded into the content hash that decides which entries need
-#    re-embedding (spec 13.1). A directory called "model" yields the
-#    identity "model@<digest>#768" -- correct, but unreadable in logs and
-#    on the admin page next to a host-run sidecar reporting
-#    "nomic-embed-text-v1.5@...". Renaming this later would change every
-#    hash and re-index the whole corpus, so it is named properly up front.
+#    int8-quantized export, not fp32 (roughly half the throughput for no
+#    accuracy benefit). The directory NAME matters: the embedder derives
+#    its identity from the model directory's basename, which is folded
+#    into the content hash deciding which entries need re-embedding --
+#    renaming it later would re-index the whole corpus.
 RUN set -eux; \
     model_dir="/opt/models/$(basename "${MODEL_REPO}")"; \
     mkdir -p "${model_dir}/onnx"; \
@@ -76,9 +69,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-# -tags ORT is what selects the real ONNX backend. Without it the build
-# silently succeeds against a pure-Go backend that is roughly 10x slower --
-# no error, no warning, just a sidecar that takes all night to index.
+# -tags ORT selects the real ONNX backend. Without it the build silently
+# succeeds against a pure-Go backend that is roughly 10x slower.
 RUN CGO_ENABLED=1 CGO_LDFLAGS="-L/opt/tokenizers" \
     go build -tags ORT -o /out/sidecar ./cmd/sidecar
 
@@ -97,9 +89,9 @@ COPY --from=build /opt/models/ /opt/models/
 ENV SIDECAR_MODEL_PATH=/opt/models/nomic-embed-text-v1.5/onnx/model_quantized.onnx \
     SIDECAR_ONNX_LIB_DIR=/usr/local/lib/onnxruntime
 
-# The admin/search server binds 127.0.0.1:8081 by default, which is
-# unreachable from outside a container. Bind all interfaces instead --
-# safe here because the port is only published to the compose network.
+# 127.0.0.1 (the default) is unreachable from outside the container; bind
+# all interfaces instead. Safe here since the port is only published to
+# the compose network.
 ENV SIDECAR_ADMIN_ADDR=0.0.0.0:8081
 
 EXPOSE 8081

@@ -1,17 +1,15 @@
 # The search sidecar (sidecar/) is a separate Go module with its own
 # toolchain requirements, so it gets its own workflow rather than a step
-# inside tests.yml or linters.yml: the root module's jobs run `go test
-# ./...` from the repository root, which never descends into a nested
-# module.
+# inside tests.yml or linters.yml, whose `go test ./...` runs from the
+# repository root and never descends into a nested module.
 #
-# This job runs only the packages that are hermetic — no build tags, no
-# native ONNX Runtime or libtokenizers, no database. Two exclusions are
+# This job runs only the hermetic packages -- no build tags, no native
+# ONNX Runtime or libtokenizers, no database. Two exclusions are
 # deliberate:
 #
 #   - internal/embed/onnx and cmd/sidecar need libtokenizers.a and
-#     libonnxruntime, neither of which is a Go module or vendored here;
-#     they fail at the LINK step on a machine without them, not at an
-#     assertion.
+#     libonnxruntime, neither vendored here; they fail at the LINK step
+#     on a machine without them, not at an assertion.
 #   - internal/indexer's suite sweeps the entire entries table and
 #     rewrites search.passages. It belongs on a throwaway database chosen
 #     deliberately, never in CI. See sidecar/internal/testdb.

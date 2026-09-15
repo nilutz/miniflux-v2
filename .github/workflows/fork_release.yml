@@ -1,21 +1,17 @@
-# Fork-owned release pipeline, triggered by pushing a `v*` tag (a
-# different namespace from upstream's own release tags, which match
-# `[0-9]+.[0-9]+.[0-9]+` with no `v` prefix in build_binaries.yml and
-# docker.yml -- see those files. Deliberately distinct so this workflow
-# and upstream's release workflows can never both fire off the same tag).
+# Fork-owned release pipeline, triggered by pushing a `v*` tag -- a
+# different namespace from upstream's own release tags (`[0-9]+.[0-9]+.[0-9]+`,
+# no `v` prefix, in build_binaries.yml and docker.yml), so this workflow and
+# upstream's can never both fire on the same tag.
 #
-# Upstream has no equivalent of this file: build_binaries.yml only builds
-# the plain Miniflux binary, and docker.yml only builds the Miniflux
-# container image -- neither knows the sidecar module exists. Both of
-# those upstream files also carry `if: github.repository_owner ==
-# 'miniflux'`, so on this fork they do not run at all (see this task's
-# report for what was checked). This file is new, fork-owned, and does
-# not edit either of them.
+# Upstream has no equivalent: build_binaries.yml only builds the plain
+# Miniflux binary and docker.yml only builds the Miniflux image; neither
+# knows the sidecar module exists. Both also carry `if:
+# github.repository_owner == 'miniflux'`, so they do not run on this fork
+# at all. This file is new, fork-owned, and edits neither of them.
 #
 # Registry: ghcr.io only, authenticated with the built-in GITHUB_TOKEN.
 # Upstream's docker.yml also pushes to Docker Hub and Quay, which need
-# DOCKERHUB_USERNAME/TOKEN and QUAY_USERNAME/TOKEN secrets this fork does
-# not have configured -- deliberately not copied here.
+# secrets this fork does not have configured.
 name: Fork Release
 
 on:
@@ -33,11 +29,8 @@ env:
   TOKENIZERS_VERSION: "v1.27.0"
 
 jobs:
-  # Mirrors build_binaries.yml's own job: that workflow has no matrix,
-  # it's one job compiling every platform Makefile's `build` target lists
-  # (linux amd64/arm64/armv7/armv6/armv5/riscv64, darwin amd64/arm64,
-  # freebsd amd64, openbsd amd64) with CGO_ENABLED=0. Reused as-is rather
-  # than inventing a different platform list.
+  # Mirrors build_binaries.yml's own job: one job compiling every platform
+  # Makefile's `build` target lists, with CGO_ENABLED=0.
   binaries:
     name: Build Miniflux binaries
     runs-on: ubuntu-latest
@@ -65,15 +58,13 @@ jobs:
           if-no-files-found: error
           retention-days: 5
 
-  # Upstream's release pipeline has no equivalent job: this binary needs
-  # -tags ORT and the native tokenizers library, neither of which any
-  # upstream workflow knows about (see sidecar.yml's own header comment).
+  # Upstream has no equivalent job: this binary needs -tags ORT and the
+  # native tokenizers library.
   #
-  # Only libtokenizers.a is needed here, not the ONNX Runtime shared
-  # library or the model: sidecar/Dockerfile's build stage links
-  # libtokenizers.a in statically (CGO_LDFLAGS="-L/opt/tokenizers") but
-  # does not reference ONNX Runtime at build time at all -- ONNXLibraryDir
-  # is a runtime path the binary dlopen's later, via SIDECAR_ONNX_LIB_DIR.
+  # Only libtokenizers.a is needed here: sidecar/Dockerfile's build stage
+  # links it in statically, but does not reference the ONNX Runtime shared
+  # library at build time -- that's a runtime path the binary dlopen's
+  # later, via SIDECAR_ONNX_LIB_DIR.
   sidecar-binary:
     name: Build sidecar binary (linux/amd64)
     runs-on: ubuntu-latest
@@ -153,13 +144,8 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # linux/amd64 only: this fork has not measured how long a
-      # QEMU-emulated multi-platform build of this Dockerfile takes, and
-      # is not building images locally to find out (see this task's
-      # report). Upstream's own 5-platform matrix is a known-slow
-      # baseline this fork does not want to inherit by default; widen
-      # this list later if there's a real need for another platform and
-      # the build time is verified acceptable.
+      # linux/amd64 only: build time for a QEMU-emulated multi-platform
+      # build of this Dockerfile is unmeasured. Widen later if needed.
       - name: Build and push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -196,11 +182,10 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # linux/amd64 only -- required, not just preferred: sidecar/Dockerfile
-      # is ~219MB before the model and downloads ~131MB more of model
-      # weights at build time (see its own header comment). A 5-platform
-      # QEMU matrix here would multiply that by 5 for an arm64 (etc.)
-      # sidecar image nothing here is known to use yet.
+      # linux/amd64 only, required not just preferred: the image is
+      # ~219MB before the model plus ~131MB more of model weights, so a
+      # 5-platform QEMU matrix would multiply that for platforms nothing
+      # here uses yet.
       - name: Build and push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:

@@ -2,20 +2,16 @@
 # Fails the caller if any of the sidecar's SIDECAR_MODEL_PATH-gated tests
 # were skipped instead of actually executed.
 #
-# Why this exists: internal/embed/onnx and cmd/sidecar's model-backed tests
-# t.Skip silently when SIDECAR_MODEL_PATH (or, for a couple of them,
-# SIDECAR_ONNX_LIB_DIR / a database / SIDECAR_SWEEP) is unset, and `go
-# test` prints "ok" for a run that executed none of them -- a green job
-# that proves nothing. That exact false green was hit twice in one day
-# during this fork's development, once by setting the wrong env var
-# (SIDECAR_NOMIC_MODEL_PATH instead of SIDECAR_MODEL_PATH) and seeing "ok".
+# Why: these tests t.Skip silently when SIDECAR_MODEL_PATH (or, for a
+# couple of them, SIDECAR_ONNX_LIB_DIR / a database / SIDECAR_SWEEP) is
+# unset, and `go test` prints "ok" for a run that executed none of them --
+# a green job that proves nothing.
 #
 # Usage: check-sidecar-gated-tests.sh <path to `go test -v` output>
 #
-# The list below is deliberately NOT "every test in the package" and NOT
-# "zero SKIP lines allowed" -- several tests in these same packages skip on
-# purpose even with SIDECAR_MODEL_PATH and SIDECAR_ONNX_LIB_DIR set, and
-# that is correct, not a bug:
+# The list below is deliberately not "every test in the package" and not
+# "zero SKIP lines allowed": several tests in these same packages skip on
+# purpose even with SIDECAR_MODEL_PATH and SIDECAR_ONNX_LIB_DIR set:
 #
 #   - TestEmbedAppliesDistinctPromptPrefixesForNomic and
 #     TestEmbedDocumentsAndEmbedQueryAgreeWithoutPrefixes gate on
@@ -23,17 +19,12 @@
 #     checkouts this workflow does not fetch.
 #   - TestEvalRecall and TestChunkingSweep gate on
 #     SIDECAR_TEST_DATABASE_URL (TestChunkingSweep additionally on
-#     SIDECAR_SWEEP=1); this job intentionally runs with no database, the
-#     same as sidecar.yml's hermetic job, so these are expected to skip
-#     here.
+#     SIDECAR_SWEEP=1); this job runs with no database, so these are
+#     expected to skip here.
 #
-# So this script asserts a specific, named list of tests -- the ones that
-# gate on SIDECAR_MODEL_PATH (and, where used, SIDECAR_ONNX_LIB_DIR) alone
-# and nothing else -- actually reported PASS, not SKIP and not merely
-# "absent because the package failed to build". That is precise enough to
-# catch a misconfigured env var (this job's whole reason to exist) without
-# being so broad that a legitimately-skipped, differently-gated test fails
-# the build.
+# So this script asserts a specific, named list of tests -- the ones
+# gated on SIDECAR_MODEL_PATH (and, where used, SIDECAR_ONNX_LIB_DIR)
+# alone -- actually reported PASS, not SKIP and not merely absent.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
