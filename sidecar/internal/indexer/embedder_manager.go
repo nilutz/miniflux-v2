@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"miniflux.app/v2/sidecar/internal/embed"
@@ -59,6 +60,25 @@ type EmbedderFactory func(ctx context.Context, kind, remoteURL string, timeout t
 // every page load, and a down remote must not make that load hang for
 // anywhere near that long.
 const reachabilityProbeTimeout = 5 * time.Second
+
+// reachabilityCacheTTL bounds how often Info actually re-probes the
+// configured remote for reachability, rather than serving a memoised
+// result. Without this, GET / and GET /api/embedder each triggered a
+// fresh network round trip on every call, and the admin page's own
+// 10-second meta-refresh means any open tab re-triggers one every 10s
+// indefinitely -- continuous load on the operator's remote host
+// regardless of whether indexing is even running, and worse for a SLOW
+// remote than a down one: a down remote fails fast, a slow one pays the
+// full reachabilityProbeTimeout on every single refresh. 20s is short
+// enough that "reachable" flips to "unreachable" within about two page
+// refreshes of an outage starting, and long enough to cut the refresh
+// cadence's own load by half or more.
+//
+// A var, not the constant directly, purely so this package's own tests
+// can shrink it and observe the cache actually expiring without a real
+// 20-second sleep (the same convention internal/store's pipelineVersion
+// uses for the identical reason); production never changes it.
+var reachabilityCacheTTL = 20 * time.Second
 
 // measuredPassagesPerSecond and measuredPassagesPerEntry are the task 9
 // brief's own measured throughput figures (spec §13.1's re-index cost
@@ -160,32 +180,87 @@ type SettingsStore interface {
 	SetEmbedderSettings(ctx context.Context, kind, remoteURL string) error
 }
 
+// QueryCacheInvalidator is the subset of *search.Searcher Manager needs
+// to keep a live embedder switch correct end to end. internal/search's
+// queryCache caches EmbedQuery's output keyed on query TEXT alone, with
+// no notion of which model produced a cached vector -- a live switch
+// (this file) changes what EmbedQuery returns for the identical text,
+// and nothing else invalidates that cache (a review-round finding: the
+// first version of this file fixed the embedder REFERENCE via
+// Indexer.AsEmbedder but left every already-cached query vector from the
+// old model being served, silently, after a perfectly successful
+// switch -- spec §13.1's cross-model corruption, reopened one layer up
+// from search.passages, which the content-hash mechanism does nothing to
+// protect).
+//
+// An interface, not *search.Searcher directly: internal/indexer must not
+// import internal/search (a layering internal/search itself avoids the
+// other way too -- search.WithEmbedder takes embed.Embedder, not
+// *indexer.Indexer), and this package's own tests must stay hermetic.
+type QueryCacheInvalidator interface {
+	ClearQueryCache()
+}
+
+// ErrSwitchInProgress is returned by Switch when another Switch call is
+// already running (a double-click, two admin-page tabs, a retried
+// request). Without this, two overlapping Switch calls could each
+// construct a candidate, each pause/resume the lanes independently, and
+// each call store.SetModelIdentity and persist settings in an
+// unspecified interleaving -- the recorded identity ending up not
+// matching whichever embedder actually ends up installed. Only one
+// Switch may be in flight at a time; a second is rejected outright
+// rather than queued, so an operator sees the conflict immediately
+// instead of it resolving silently in whatever order the two happened to
+// interleave.
+var ErrSwitchInProgress = fmt.Errorf("indexer: another embedder switch is already in progress")
+
 // Manager owns the live-swappable embedder end to end (Task 9, spec
 // §13.1): showing what is currently configured, testing a candidate
 // remote before committing, and performing the swap itself -- quiesce
 // both lanes, guarantee no in-flight embed call before closing the old
 // embedder, publish the new one through Indexer's synchronised accessor,
-// record its identity with the store, persist the choice, and resume.
-// internal/web drives it entirely through this type so that package never
-// has to reach into *Backfill/*LiveMonitor/*Indexer's swap internals
-// itself.
+// record its identity with the store, invalidate the query cache,
+// persist the choice, and resume. internal/web drives it entirely
+// through this type so that package never has to reach into
+// *Backfill/*LiveMonitor/*Indexer's swap internals itself.
 type Manager struct {
-	idx      *Indexer
-	backfill *Backfill
-	live     *LiveMonitor
-	settings SettingsStore
-	factory  EmbedderFactory
+	idx        *Indexer
+	backfill   *Backfill
+	live       *LiveMonitor
+	settings   SettingsStore
+	factory    EmbedderFactory
+	queryCache QueryCacheInvalidator // may be nil (tests, or no search configured)
+
+	// switchMu enforces ErrSwitchInProgress: TryLock'd by Switch, and
+	// released by installEmbedder once the background goroutine it starts
+	// has COMPLETELY finished -- installed-and-closed-old, or
+	// abandoned-and-closed-candidate -- never by Switch's own return,
+	// which can happen (ctx cancelled/timeout) long before that
+	// background work is actually done. Releasing it on Switch's return
+	// instead would let a second Switch start while the first is still
+	// resolving, exactly the interleaving ErrSwitchInProgress exists to
+	// prevent.
+	switchMu sync.Mutex
 
 	mu   sync.Mutex
 	info EmbedderInfo // kind/backend/URL -- metadata a bare embed.Embedder cannot self-report
+
+	// reachMu/reachURL/reachResult/reachCachedAt back cachedReachability
+	// -- see reachabilityCacheTTL's own doc comment for why Info does not
+	// probe the remote fresh on every call.
+	reachMu       sync.Mutex
+	reachURL      string // the URL reachResult is a reading FOR; a switch to a different URL invalidates the cache outright
+	reachResult   ProbeResult
+	reachCachedAt time.Time
 }
 
 // NewManager builds a Manager. initial describes the embedder idx was
 // already constructed with (cmd/sidecar resolves this from the persisted
 // settings row, falling back to the startup environment variables when
-// none exists -- spec §13.1).
-func NewManager(idx *Indexer, backfill *Backfill, live *LiveMonitor, settings SettingsStore, factory EmbedderFactory, initial EmbedderInfo) *Manager {
-	return &Manager{idx: idx, backfill: backfill, live: live, settings: settings, factory: factory, info: initial}
+// none exists -- spec §13.1). queryCache may be nil (see
+// QueryCacheInvalidator).
+func NewManager(idx *Indexer, backfill *Backfill, live *LiveMonitor, settings SettingsStore, factory EmbedderFactory, initial EmbedderInfo, queryCache QueryCacheInvalidator) *Manager {
+	return &Manager{idx: idx, backfill: backfill, live: live, settings: settings, factory: factory, info: initial, queryCache: queryCache}
 }
 
 // Info returns a snapshot of the currently configured embedder --
@@ -208,9 +283,7 @@ func (m *Manager) Info(ctx context.Context) EmbedderInfo {
 	}
 
 	if info.Kind == "remote" && info.RemoteURL != "" && m.factory != nil {
-		probeCtx, cancel := context.WithTimeout(ctx, reachabilityProbeTimeout)
-		result := m.probe(probeCtx, "remote", info.RemoteURL)
-		cancel()
+		result := m.cachedReachability(ctx, info.RemoteURL)
 		info.ReachabilityChecked = true
 		info.Reachable = result.Error == ""
 		info.ReachabilityError = result.Error
@@ -285,25 +358,80 @@ func (m *Manager) probe(ctx context.Context, kind, remoteURL string) ProbeResult
 	return ProbeResult{Reachable: true, Identity: e.Identity(), Dimensions: e.Dimensions(), Backend: backend}
 }
 
-// switchTimeout bounds how long Switch waits for the quiesce-and-swap
-// sequence below before giving up and reporting a timeout error. The
-// swap itself (Indexer.SetEmbedder) has no way to be cancelled once
-// started -- sync.RWMutex.Lock has no context-aware variant -- so a
-// timeout here does not abort it; it can only stop WAITING and let the
-// caller (the HTTP handler) return an answer instead of hanging
-// indefinitely. The swap keeps running in the background and completes
-// on its own once whatever in-flight batch it is waiting on finishes.
+// cachedReachability returns a reachability probe against url, reusing a
+// result already fetched within the last reachabilityCacheTTL for that
+// SAME url instead of hitting the network again -- see that constant's
+// own doc comment for why. A url that differs from what the cache was
+// last populated for (an operator just switched, say) is never served a
+// stale cached result for the wrong remote: the cache is keyed on url and
+// simply misses when it changes, exactly as expired.
+func (m *Manager) cachedReachability(ctx context.Context, url string) ProbeResult {
+	m.reachMu.Lock()
+	fresh := m.reachURL == url && !m.reachCachedAt.IsZero() && time.Since(m.reachCachedAt) < reachabilityCacheTTL
+	cached := m.reachResult
+	m.reachMu.Unlock()
+	if fresh {
+		return cached
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, reachabilityProbeTimeout)
+	result := m.probe(probeCtx, "remote", url)
+	cancel()
+
+	m.reachMu.Lock()
+	m.reachURL = url
+	m.reachResult = result
+	m.reachCachedAt = time.Now()
+	m.reachMu.Unlock()
+
+	return result
+}
+
+// switchTimeout bounds how long Switch's CALLER waits for the
+// quiesce-and-swap sequence before giving up and reporting a timeout
+// error. The swap itself (SetEmbedderIfNotAbandoned) has no way to be
+// cancelled once blocked on embedderMu's write lock -- sync.RWMutex.Lock
+// has no context-aware variant -- so a timeout here does not abort it; it
+// only stops the CALLER's wait. installEmbedder keeps running in the
+// background regardless, and is solely responsible for either finishing
+// the swap or disposing of the candidate it never got to install -- see
+// installEmbedder's own doc comment for why that decision cannot safely
+// be made here, in Switch, at all.
 const switchTimeout = 60 * time.Second
 
+// switchOutcome is what installEmbedder reports back to Switch over
+// outcomeCh when it reaches a result BEFORE Switch's own select has
+// already moved on (ctx cancelled or switchTimeout elapsed) -- Switch is
+// the only reader, and only reads if it is still waiting.
+type switchOutcome struct {
+	result SwitchResult
+	err    error
+}
+
 // Switch constructs kind/remoteURL as a candidate, quiesces both lanes,
-// guarantees no in-flight embed call before closing the previous
-// embedder, publishes the new one, records its identity with the store,
-// persists the choice, and resumes both lanes (Task 9, section 4).
+// and starts installEmbedder to perform the actual swap, waiting up to
+// switchTimeout (or ctx) for it to finish (Task 9, section 4).
 //
 // confirm must be true or Switch returns ErrSwitchNotConfirmed without
 // touching anything -- section 5's "the switch must not proceed without
 // explicit confirmation", enforced server-side rather than trusted
 // entirely to the admin page's own confirmation dialog.
+//
+// Only one Switch may run at a time (ErrSwitchInProgress) -- see
+// switchMu's own doc comment for why the lock it holds is released by
+// installEmbedder, not here.
+//
+// Switch itself NEVER closes an embedder it constructed: not the
+// candidate (installEmbedder decides, atomically with the install
+// decision, whether that is ever safe), and not the previous one either
+// (only installEmbedder, immediately after actually installing the
+// candidate, knows a fresh old value exists to close). A prior version of
+// this function closed the candidate here on a ctx-cancelled/timeout
+// path, racing installEmbedder's own still-pending attempt to install
+// that exact value -- fixed after a review round found a deterministic
+// reproduction: block an in-flight embed to hold the RLock, call Switch
+// with an already-cancelled context, release the block, and the active
+// embedder came back closed.
 func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bool) (SwitchResult, error) {
 	if !confirm {
 		return SwitchResult{}, ErrSwitchNotConfirmed
@@ -312,14 +440,19 @@ func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bo
 		return SwitchResult{}, fmt.Errorf("indexer: no embedder factory configured")
 	}
 
+	if !m.switchMu.TryLock() {
+		return SwitchResult{}, ErrSwitchInProgress
+	}
+	// switchMu.Unlock() is NOT deferred here -- see the field's own doc
+	// comment. installEmbedder unlocks it once it has completely
+	// finished, on every path, including this function's own early
+	// returns below (which unlock immediately, since installEmbedder was
+	// never started on those paths).
+
 	newEmbedder, backend, err := m.factory(ctx, kind, remoteURL, 0)
 	if err != nil {
+		m.switchMu.Unlock()
 		return SwitchResult{}, err
-	}
-
-	oldIdentity := ""
-	if e := m.idx.Embedder(); e != nil {
-		oldIdentity = e.Identity()
 	}
 
 	// Quiesce both lanes (spec §13.1's requirement; reuses Task 3's own
@@ -327,11 +460,15 @@ func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bo
 	// LiveMonitor.Pause/Resume added by this task following the identical
 	// pattern) so neither starts NEW work while the swap below is in
 	// progress. This is defense in depth, not the correctness mechanism
-	// itself -- SetEmbedder below is what actually proves no in-flight
-	// call remains, via sync.RWMutex -- but it bounds how much work either
-	// lane can pile up waiting on the write lock, and it is what makes
-	// Stats().Paused honestly reflect "a switch is in progress" for
-	// anyone watching the admin page mid-swap.
+	// itself -- SetEmbedderIfNotAbandoned is what actually proves no
+	// in-flight call remains, via sync.RWMutex -- but it bounds how much
+	// work either lane can pile up waiting on the write lock. Resuming
+	// happens when THIS function returns, even if installEmbedder is
+	// still running in the background: new attempts from either lane
+	// simply queue up behind installEmbedder's still-pending write lock
+	// (RWMutex's own fairness guarantee -- see embedderMu's doc comment),
+	// so resuming early is safe, and it is what keeps a slow switch from
+	// leaving the lanes paused indefinitely.
 	m.backfill.Pause()
 	m.live.Pause()
 	defer func() {
@@ -339,13 +476,74 @@ func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bo
 		m.live.Resume()
 	}()
 
-	old, err := m.setEmbedderWithTimeout(ctx, newEmbedder)
-	if err != nil {
-		newEmbedder.Close()
-		return SwitchResult{}, err
+	var abandoned atomic.Bool
+	outcomeCh := make(chan switchOutcome, 1)
+	go m.installEmbedder(kind, remoteURL, backend, newEmbedder, &abandoned, outcomeCh)
+
+	select {
+	case o := <-outcomeCh:
+		return o.result, o.err
+	case <-ctx.Done():
+		abandoned.Store(true)
+		return SwitchResult{}, fmt.Errorf("indexer: switch cancelled while waiting for in-flight embedding to finish: %w", ctx.Err())
+	case <-time.After(switchTimeout):
+		abandoned.Store(true)
+		return SwitchResult{}, fmt.Errorf("indexer: timed out after %s waiting for in-flight embedding to finish before switching embedders -- it may still complete in the background", switchTimeout)
+	}
+}
+
+// installEmbedder is Switch's actual swap, always run in its own
+// goroutine, and the SOLE owner of two decisions a prior version of this
+// file split unsafely across two goroutines: whether newEmbedder ever
+// gets installed at all, and what happens to whichever of
+// (newEmbedder, old) does NOT end up active.
+//
+// It calls SetEmbedderIfNotAbandoned, which makes the install-or-abandon
+// decision atomically with the write lock -- see that method's own doc
+// comment. Exactly one of the two branches below runs:
+//
+//   - installed: newEmbedder is now active. old (if any) is safe to Close
+//     immediately -- SetEmbedderIfNotAbandoned's own guarantee. This
+//     branch does everything a successful switch requires: records the
+//     new identity with the store, invalidates the query cache (a
+//     review-round finding: without this, a cached pre-switch query
+//     vector keeps being served under the new model's identity, spec
+//     §13.1's cross-model corruption one layer up from search.passages),
+//     persists the choice, and updates Manager's own metadata -- ALL of
+//     it here, unconditionally, regardless of whether Switch's own caller
+//     is still waiting on outcomeCh or gave up long ago. That is
+//     deliberate: the swap either fully happened or it fully did not,
+//     never partially depending on whether an HTTP request was still
+//     open to see it through.
+//   - not installed (abandoned): newEmbedder was never published, so
+//     nothing else can be using it -- closing it here, now, is safe and
+//     is this goroutine's job, because Switch's own caller no longer
+//     knows whether that is still true (see Switch's own doc comment for
+//     the bug this replaced).
+//
+// switchMu is released here, on every path, exactly once -- see that
+// field's own doc comment for why Switch itself must not release it.
+func (m *Manager) installEmbedder(kind, remoteURL, backend string, newEmbedder embed.Embedder, abandoned *atomic.Bool, outcomeCh chan<- switchOutcome) {
+	defer m.switchMu.Unlock()
+
+	old, installed := m.idx.SetEmbedderIfNotAbandoned(newEmbedder, abandoned.Load)
+	if !installed {
+		if err := newEmbedder.Close(); err != nil {
+			slog.Warn("indexer: closing an abandoned switch candidate", slog.Any("error", err))
+		}
+		slog.Warn("indexer: embedder switch abandoned before it could complete -- the caller gave up waiting; nothing was installed",
+			slog.String("kind", kind))
+		trySend(outcomeCh, switchOutcome{err: fmt.Errorf("indexer: switch abandoned before it could complete")})
+		return
 	}
 
-	store.SetModelIdentity(newEmbedder.Identity())
+	oldIdentity := ""
+	if old != nil {
+		oldIdentity = old.Identity()
+	}
+	newIdentity := newEmbedder.Identity()
+
+	store.SetModelIdentity(newIdentity)
 
 	if old != nil {
 		if closeErr := old.Close(); closeErr != nil {
@@ -353,21 +551,33 @@ func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bo
 		}
 	}
 
+	if m.queryCache != nil {
+		// Must run on every successful install, whether or not Switch's
+		// caller is still waiting -- a query embedded under the OLD
+		// model must never keep being served once the new one is active,
+		// with or without an HTTP response to report it on.
+		m.queryCache.ClearQueryCache()
+	}
+
 	if m.settings != nil {
-		if err := m.settings.SetEmbedderSettings(ctx, kind, remoteURL); err != nil {
+		if err := m.settings.SetEmbedderSettings(context.Background(), kind, remoteURL); err != nil {
 			// The switch itself already happened -- the identity is
 			// recorded with the store and both lanes are indexing under
 			// the new embedder -- so this is logged, not returned as a
 			// failure of the switch. Left unpersisted, the NEXT restart
 			// would revert to the environment variables' default (spec
 			// §13.1's own risk this table exists to close), so it is
-			// still worth surfacing loudly.
+			// still worth surfacing loudly. context.Background(), not a
+			// ctx threaded from Switch: that ctx may already be Done by
+			// the time this runs (the abandoned path proves it can be),
+			// and a persistence write following a successful in-memory
+			// swap must not be skipped just because the ORIGINAL request
+			// that triggered it is gone.
 			slog.Error("indexer: switch succeeded but the choice could not be persisted -- a restart will revert to the environment variables' default",
 				slog.Any("error", err))
 		}
 	}
 
-	newIdentity := newEmbedder.Identity()
 	m.mu.Lock()
 	m.info = EmbedderInfo{Kind: kind, Backend: backend, RemoteURL: remoteURL}
 	m.mu.Unlock()
@@ -377,25 +587,20 @@ func (m *Manager) Switch(ctx context.Context, kind, remoteURL string, confirm bo
 		slog.String("old_identity", oldIdentity),
 		slog.String("new_identity", newIdentity),
 		slog.Bool("same_identity", oldIdentity == newIdentity),
+		slog.Bool("caller_still_waiting", !abandoned.Load()),
 	)
 
-	return SwitchResult{OldIdentity: oldIdentity, NewIdentity: newIdentity, SameIdentity: oldIdentity == newIdentity}, nil
+	trySend(outcomeCh, switchOutcome{result: SwitchResult{OldIdentity: oldIdentity, NewIdentity: newIdentity, SameIdentity: oldIdentity == newIdentity}})
 }
 
-// setEmbedderWithTimeout runs Indexer.SetEmbedder in a goroutine and waits
-// for it, ctx, or switchTimeout, whichever comes first -- see
-// switchTimeout's own doc comment for why a timeout here can only stop
-// waiting, not cancel the swap itself.
-func (m *Manager) setEmbedderWithTimeout(ctx context.Context, e embed.Embedder) (embed.Embedder, error) {
-	done := make(chan embed.Embedder, 1)
-	go func() { done <- m.idx.SetEmbedder(e) }()
-
+// trySend delivers v on ch without blocking -- ch is always a
+// buffered-by-1 channel installEmbedder owns exclusively, so this always
+// succeeds; the select/default shape only exists so a future change to
+// that invariant fails safe (drops the value) instead of leaking this
+// goroutine on a blocked send nobody will ever read.
+func trySend[T any](ch chan<- T, v T) {
 	select {
-	case old := <-done:
-		return old, nil
-	case <-ctx.Done():
-		return nil, fmt.Errorf("indexer: switch cancelled while waiting for in-flight embedding to finish: %w", ctx.Err())
-	case <-time.After(switchTimeout):
-		return nil, fmt.Errorf("indexer: timed out after %s waiting for in-flight embedding to finish before switching embedders -- it may still complete in the background", switchTimeout)
+	case ch <- v:
+	default:
 	}
 }

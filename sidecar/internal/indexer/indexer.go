@@ -246,24 +246,47 @@ func (idx *Indexer) Embedder() embed.Embedder {
 	return idx.embedder
 }
 
-// SetEmbedder atomically replaces the configured embedder and returns the
-// one it replaced. It blocks until every embedBatch/AsEmbedder call
-// already in flight against the OLD embedder has returned -- see
-// embedderMu's own doc comment for the sync.RWMutex guarantee that makes
-// this true -- which is what makes it safe for a caller to Close the
-// returned embedder immediately afterward with no risk of a concurrent
+// SetEmbedderIfNotAbandoned atomically replaces the configured embedder
+// with e and returns the one it replaced (old, true) -- UNLESS abandoned
+// reports true at the exact moment this has acquired embedderMu's write
+// lock, in which case it installs nothing and reports (nil, false).
+//
+// It blocks until every embedPassages/AsEmbedder call already in flight
+// against the OLD embedder has returned -- see embedderMu's own doc
+// comment for the sync.RWMutex guarantee that makes this true -- which is
+// what makes it safe for a caller to Close the returned OLD embedder
+// immediately after a (old, true) result, with no risk of a concurrent
 // native call still in progress against it.
 //
-// SetEmbedder does not call store.SetModelIdentity and does not pause
-// either indexing lane -- see Manager.Switch, the only production caller,
-// for the full sequence (pause both lanes, SetEmbedder, SetModelIdentity,
-// close the old embedder, resume both lanes).
-func (idx *Indexer) SetEmbedder(e embed.Embedder) embed.Embedder {
+// The abandoned callback exists for exactly one reason (Manager.Switch,
+// the only production caller): the caller that asked for this swap may
+// give up waiting -- ctx cancelled, or a timeout -- before this call ever
+// reaches the front of embedderMu's queue, because SetEmbedderIfNotAbandoned
+// itself cannot be cancelled once blocked on the lock (sync.RWMutex.Lock
+// has no context-aware variant). If that caller had already closed e on
+// its own way out, and THIS call then went on to install e anyway once
+// the lock became free, every subsequent embedder call would run against
+// an already-closed session -- the exact segfault-class hazard this whole
+// mechanism exists to prevent, reached through the escape hatch instead
+// of the swap. Checking abandoned() here, inside the critical section,
+// atomically with the decision to install, closes that hole: e is
+// NEVER closed while this call could still decide to install it, and the
+// decision of whether to install it is made in exactly one place. The
+// caller that gets (nil, false) back is the one responsible for e's
+// disposal (Close it, since Indexer never took ownership) -- SetEmbedderIfNotAbandoned
+// itself never closes anything.
+//
+// This does not call store.SetModelIdentity and does not pause either
+// indexing lane -- see Manager.installEmbedder for the full sequence.
+func (idx *Indexer) SetEmbedderIfNotAbandoned(e embed.Embedder, abandoned func() bool) (old embed.Embedder, installed bool) {
 	idx.embedderMu.Lock()
 	defer idx.embedderMu.Unlock()
-	old := idx.embedder
+	if abandoned() {
+		return nil, false
+	}
+	old = idx.embedder
 	idx.embedder = e
-	return old
+	return old, true
 }
 
 // Close releases the currently configured embedder's underlying session.

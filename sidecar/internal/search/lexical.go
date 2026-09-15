@@ -111,6 +111,23 @@ func NewSearcher(s *store.Store, opts ...SearcherOption) *Searcher {
 	return searcher
 }
 
+// ClearQueryCache discards every cached query embedding. It exists for
+// exactly one caller (the sidecar's internal/indexer.Manager, via the
+// QueryCacheInvalidator interface, on every successful live embedder
+// switch — spec §13.1): the cache's key is query text alone, with no
+// notion of which model produced a cached vector, so a switch that
+// changed what EmbedQuery returns for the same text would otherwise keep
+// serving pre-switch vectors under the new model's identity, silently,
+// for as long as those entries stay warm — see embedCached's own doc
+// comment for the full argument. A no-op on a Searcher built without
+// WithEmbedder (cache is nil).
+func (s *Searcher) ClearQueryCache() {
+	if s.cache == nil {
+		return
+	}
+	s.cache.clear()
+}
+
 // Lexical ranks passages by BM25 (paradedb.score) against query, applying
 // f within its own candidate scan, and returns up to limit hits ordered
 // best-first.

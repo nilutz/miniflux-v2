@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"miniflux.app/v2/sidecar/internal/store"
 )
 
 // countingFakeEmbedder is a hermetic stand-in for embed.Embedder: no
@@ -158,4 +160,53 @@ func TestEmbedCachedConcurrentAccessIsRaceFree(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestSearcherClearQueryCacheDiscardsCachedEmbeddings is Task 9's guard
+// (spec §13.1): after a live embedder switch, a query embedding cached
+// under the OLD model must not keep being served. This proves
+// ClearQueryCache actually discards cache contents -- a repeated query
+// that previously hit the cache (one embed call total) must force a
+// fresh embed call after Clear.
+func TestSearcherClearQueryCacheDiscardsCachedEmbeddings(t *testing.T) {
+	fe := &countingFakeEmbedder{}
+	s, err := store.New("postgres://unused/unused?sslmode=disable")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	searcher := NewSearcher(s, WithEmbedder(fe))
+
+	ctx := context.Background()
+	if _, err := embedCached(ctx, searcher.cache, fe, "hello"); err != nil {
+		t.Fatalf("embedCached: %v", err)
+	}
+	if _, err := embedCached(ctx, searcher.cache, fe, "hello"); err != nil {
+		t.Fatalf("embedCached: %v", err)
+	}
+	if got := fe.calls.Load(); got != 1 {
+		t.Fatalf("expected the second identical query to hit the cache (1 embed call), got %d", got)
+	}
+
+	searcher.ClearQueryCache()
+
+	if _, err := embedCached(ctx, searcher.cache, fe, "hello"); err != nil {
+		t.Fatalf("embedCached: %v", err)
+	}
+	if got := fe.calls.Load(); got != 2 {
+		t.Fatalf("expected ClearQueryCache to discard the cached vector, forcing a second embed call, got %d calls", got)
+	}
+}
+
+// TestSearcherClearQueryCacheOnNilCacheIsANoOp proves a Searcher built
+// without WithEmbedder (cache is nil) does not panic when
+// ClearQueryCache is called on it -- Manager.installEmbedder calls this
+// unconditionally on every successful switch, regardless of whether the
+// sidecar happens to have search configured.
+func TestSearcherClearQueryCacheOnNilCacheIsANoOp(t *testing.T) {
+	s, err := store.New("postgres://unused/unused?sslmode=disable")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	searcher := NewSearcher(s)
+	searcher.ClearQueryCache() // must not panic
 }

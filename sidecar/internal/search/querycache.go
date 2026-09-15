@@ -94,6 +94,18 @@ func (c *queryCache) put(query string, vec []float32) {
 	}
 }
 
+// clear discards every cached entry, resetting the cache to empty --
+// Searcher.ClearQueryCache's implementation. See embedCached's own doc
+// comment for why this must run on every live embedder switch: a cached
+// vector's key carries no model identity, so nothing else can tell a
+// pre-switch entry apart from a fresh one.
+func (c *queryCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.order.Init()
+	c.entries = make(map[string]*list.Element, c.capacity)
+}
+
 // embedCached returns query's embedding, consulting cache first and
 // calling embedder.EmbedQuery only on a miss — the seam this package's
 // querycache_test.go exercises hermetically with a counting fake
@@ -107,15 +119,25 @@ func (c *queryCache) put(query string, vec []float32) {
 // not change that. A prefixed model (nomic-embed-text-v1.5) means two
 // different vectors can now exist for the same text — its document
 // embedding and its query embedding — but that is not a hazard for THIS
-// cache: a queryCache's entire lifetime is bounded to one Searcher, built
-// once in cmd/sidecar/main.go over one embed.Embedder instance for the
-// life of the process (swapping embedders needs a restart — see
-// embed.ErrRequiresRestart), and embedCached only ever calls EmbedQuery,
-// never EmbedDocuments. Every vector a given cache instance ever holds
-// was therefore produced by the same model's query-side prefixing,
-// consistently, for as long as that cache exists — there is no code path
-// by which one cache could hold a vector computed under one prefix
-// alongside one computed under another, or without a prefix at all.
+// cache: embedCached only ever calls EmbedQuery, never EmbedDocuments, so
+// every vector a given cache instance holds was produced by the same
+// side of the asymmetric split.
+//
+// It IS a hazard across a live embedder switch (sidecar Task 9, spec
+// §13.1): the sidecar's Searcher is built once in cmd/sidecar/main.go,
+// but — unlike an earlier version of this comment claimed — swapping
+// embedders no longer needs a restart. Indexer.AsEmbedder keeps the
+// Searcher calling whichever embedder is CURRENTLY configured (so a
+// switch cannot segfault it against a closed session), but that says
+// nothing about vectors ALREADY sitting in this cache from before the
+// switch — those were computed by the OLD model and would otherwise keep
+// being served, unchanged, under the new model's identity, with no error
+// anywhere. This cache has no way to tell a stale entry from a fresh one
+// on its own (the key is query text alone, not model identity), so
+// whoever performs a live switch MUST call Searcher.ClearQueryCache
+// afterward — internal/indexer's Manager.Switch is the one production
+// caller, via the QueryCacheInvalidator interface, on every successful
+// install.
 //
 // An error from embedder.EmbedQuery is returned as-is, uncached: a
 // transient failure must not poison the cache with a missing entry that

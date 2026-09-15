@@ -436,11 +436,15 @@ func run() error {
 	// call before closing the previous embedder, publishes the new one
 	// through ix's synchronised accessor, records its identity with the
 	// store, persists the choice, and resumes both lanes.
+	// searcher (built above) is passed as the QueryCacheInvalidator too:
+	// a live switch must clear its query cache on every successful
+	// install (spec §13.1) -- see Manager.installEmbedder and
+	// search.Searcher.ClearQueryCache's own doc comments.
 	manager := indexer.NewManager(ix, backfill, liveMonitor, s, embedderFactory, indexer.EmbedderInfo{
 		Kind:      choice.kind,
 		Backend:   backend,
 		RemoteURL: choice.remoteURL,
-	})
+	}, searcher)
 
 	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s, manager)
 	if err != nil {
