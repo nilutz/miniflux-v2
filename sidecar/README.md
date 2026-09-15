@@ -531,13 +531,20 @@ of them fails, the process cancels the others and exits non-zero.
 ### The admin page
 
 The status and admin page is at **<http://127.0.0.1:8081/>** by default
-(`SIDECAR_ADMIN_ADDR` to change it). The status page and every control
-endpoint below have **no authentication** — binding to loopback is their
-only protection — so point this server anywhere else only deliberately.
-This is a deliberate decision, not an oversight left over from before the
-[search API's own API-key requirement](#the-search-http-api) below: see
-"Why the status page and control endpoints are not gated by an API key"
-at the end of this section for the reasoning.
+(`SIDECAR_ADMIN_ADDR` to change it; the production compose stack sets it
+to `0.0.0.0:8081` and publishes the port — see `docker-compose.yaml`).
+The status page and every control endpoint below require a **Miniflux
+credential belonging to an administrator** (`is_admin`) — the same API
+key or web session cookie described under
+["Authentication"](#authentication) below, but with an extra check: a
+valid, non-admin credential gets `403`, not `200`. This was **not** true
+before task 18: earlier versions of this server left these endpoints
+completely open, reasoning that network isolation (binding to loopback,
+an unpublished compose port) was protection enough. That reasoning held
+only as long as the port stayed unpublished; once it is published, as it
+now is in production, it does not. See "Why the status page and control
+endpoints require an admin credential" at the end of this section for
+the full reasoning and what changed.
 
 It shows progress and ETA, current throughput, the live worker count with
 the controller's reason for it, skip and failure counts by cause, the
@@ -559,45 +566,44 @@ The three `POST /api/backfill/*` and `/api/embedder/*` endpoints check the
 `Origin` header and reject cross-origin requests, so a page open in your
 browser on another origin cannot drive them.
 
-#### Why the status page and control endpoints are not gated by an API key
+#### Why the status page and control endpoints require an admin credential
 
-None of the endpoints in this section require a Miniflux API key, even
-though [the search API](#the-search-http-api) below does as of the change
-that added authentication. That split was a deliberate decision, argued
-here rather than made by accident:
+Earlier (task 17), none of the endpoints in this section required a
+Miniflux API key at all, even though [the search API](#the-search-http-api)
+below did. Task 18 (publishing this server's port in production)
+supersedes that decision. The original reasoning, and why each part of
+it stopped holding:
 
-- **There is no per-user data here to protect.** The confidentiality
-  problem the search API's own authentication requirement exists to fix
-  is one Miniflux user's articles leaking into another's search results.
-  The status page and every control endpoint above are global —
-  throughput, ETA, database size, the embedder in use, pause/resume — with
-  no per-user dimension at all. A Miniflux API key has nothing to scope
-  here.
-- **Network isolation is the existing, documented protection**, unchanged
-  by adding an API key requirement elsewhere: this server binds to
-  loopback by default, and the production compose stack deliberately
-  publishes no port for it at all. Anyone who can already reach this admin
-  surface is already inside that trust boundary.
-- **A Miniflux API key does not actually mean "operator".** Any Miniflux
-  user — including a low-privilege reader — can mint their own API key
-  from their account settings; `public.api_keys` carries no admin
-  distinction. Gating the embedder switch (the most dangerous control
-  endpoint here — it can trigger a multi-hour full corpus re-index) behind
-  "any valid Miniflux key" would look like it raises the bar against a
-  malicious actor on the network, while actually only requiring that actor
-  to hold any one reader's key — which the search API's own confidentiality
-  fix does nothing to make harder to obtain. That would be a worse outcome
-  than today's plain network-isolation boundary: it would look like
-  protection without providing much.
-- **Locking an operator out of their own pause button has a real cost.**
-  An operator recovering a stuck backfill from the box in front of them
-  may not have a Miniflux API key to hand at all.
+- **"There is no per-user data here to protect."** Still true — the
+  status page and every control endpoint are global (throughput, ETA,
+  database size, the embedder in use, pause/resume), with no per-user
+  dimension. This is why the gate here is "administrator", not "scoped
+  to your own data" the way the search API's gate is: there is nothing
+  to scope to.
+- **"Network isolation is the existing, documented protection."** This
+  was the load-bearing premise, and publishing the port in production
+  (task 18) removes it: a server reachable from outside the compose
+  network can no longer rely on "you can only reach this if you are
+  already inside the trust boundary."
+- **"A Miniflux API key does not actually mean 'operator'."** This
+  premise was simply wrong, not just outdated: `public.users.is_admin`
+  exists on the fork (`internal/database/migrations.go`'s initial
+  migration) and is one join away from either credential's resolved
+  user id. There was a real admin/operator distinction available the
+  whole time; task 17 just didn't use it.
+- **"Locking an operator out of their own pause button has a real
+  cost."** Still true, and still the reason there is no flag to disable
+  this check — an admin account, which every Miniflux install already
+  has (the one `CREATE_ADMIN` provisions), is the answer instead.
 
-If your threat model requires more than network isolation for this admin
-surface specifically, the answer is to isolate it further at the network
-layer (a firewall rule, a reverse-proxy auth layer, an SSH tunnel) — not a
-Miniflux API key, which was not designed to express an admin/operator
-privilege level in the first place.
+So: every endpoint in this section now requires `requireAdmin`
+(`internal/web/auth.go`) — the same two credentials
+["Authentication"](#authentication) below describes, plus a read-only
+check of `is_admin` against `public.users`. No credential → `401`; a
+valid but non-admin credential → `403`; an admin credential → normal
+behaviour. Binding this server to loopback by default is still in
+place, as defence in depth, but it is no longer the only thing standing
+between these endpoints and the network.
 
 ### The backfill lane and its throttle
 
@@ -671,12 +677,26 @@ now).
 
 ### Authentication
 
-**These three endpoints require a Miniflux API key.** Send it as the
-`X-Auth-Token` header — the exact header Miniflux's own REST API reads
-(`internal/api/middleware.go`) — and the sidecar validates it with a
-single read-only lookup against `public.api_keys`, the same table
-Miniflux itself uses. **One Miniflux API key works against both
-services**; there is no separate sidecar credential to create or manage.
+**These three endpoints require a Miniflux credential — either kind
+Miniflux itself issues, no separate sidecar credential to create or
+manage:**
+
+- An **API key**, sent as the `X-Auth-Token` header — the exact header
+  Miniflux's own REST API reads (`internal/api/middleware.go`) —
+  validated with a single read-only lookup against `public.api_keys`,
+  the same table Miniflux itself uses.
+- (Task 18) Your **browser's Miniflux session cookie**
+  (`MinifluxSessionID`), validated read-only against `public.web_sessions`
+  the same way Miniflux's own web UI does
+  (`sidecar/internal/store/websession.go`, which documents exactly which
+  upstream files it mirrors and the coupling risk that creates). This is
+  what lets the admin page (below) "just work" in a browser already
+  signed into Miniflux, with no separate sidecar login.
+
+API keys are what programmatic callers (`cmd/mcp`, `curl`) use; the
+session cookie is what a browser already carries. Either one
+authenticates these three endpoints identically; only the admin page and
+control endpoints below add the extra `is_admin` requirement.
 
 Create one from Miniflux's own web UI: **Settings → API Keys → Create a
 new API key**. Give it a description and save it; the token shown there
@@ -706,12 +726,16 @@ curl -H 'X-Auth-Token: <your-miniflux-api-key>' \
   rejected with `400` rather than honoured or silently overridden.
 
 The admin/status page, `GET /api/status`, and the backfill/embedder
-control endpoints documented under "The admin page" above are **not**
-gated by an API key — see that section's own "Why the status page and
-control endpoints are not gated by an API key" for the reasoning. Binding
-this server to loopback (or a trusted LAN) remains that group's only
-protection, and is why the MCP server below talks to it over a local
-child process rather than opening its own network port.
+control endpoints documented under "The admin page" above accept the
+same two credentials, but additionally require the resolved user to be
+a Miniflux **administrator** — see that section's own "Why the status
+page and control endpoints require an admin credential" for the
+reasoning (task 18 superseded task 17's original "leave them open"
+decision once this server's port started being published in
+production). Binding this server to loopback by default is still in
+place as defence in depth, and is still why the MCP server below talks
+to it over a local child process rather than opening its own network
+port.
 
 ## The MCP server (`cmd/mcp`)
 

@@ -11,9 +11,10 @@
 //
 // That check exists to stop Cross-Site Request Forgery — a page open in
 // the operator's own browser, on any origin, silently firing a
-// state-changing request at this loopback-only, unauthenticated service.
-// CSRF is specifically an attack on STATE CHANGE: it works by getting the
-// victim's browser to *cause an effect* (pause the backfill, change its
+// state-changing request at this loopback-bound service, riding whatever
+// ambient credential (task 18's MinifluxSessionID cookie) the browser
+// attaches automatically. CSRF is specifically an attack on STATE
+// CHANGE: it works by getting the victim's browser to *cause an effect* (pause the backfill, change its
 // concurrency) using credentials/network-position the attacker doesn't
 // have themselves. A GET against /api/search or /api/similar changes
 // nothing server-side — it returns a read of already-indexed public.entries
@@ -502,7 +503,7 @@ func parseFilters(q url.Values) (search.Filters, error) {
 // both GET /api/search and GET /api/similar: it reconciles f.UserID (as
 // parsed by parseFilters, above, from the caller-supplied "user" query
 // parameter) against the user id the caller's own API key resolved to
-// (requireAPIKey in auth.go, always run first on both routes).
+// (requireAuthenticatedUser in auth.go, always run first on both routes).
 //
 //   - f.UserID == 0 (the caller expressed no opinion): filled in from the
 //     authenticated user unconditionally. Once a request is authenticated
@@ -528,7 +529,7 @@ func resolveAuthenticatedUserID(w http.ResponseWriter, r *http.Request, f *searc
 	authUserID, ok := authenticatedUserID(r)
 	if !ok {
 		// Unreachable through the registered routes: handleSearch and
-		// handleSimilar are only ever invoked wrapped by requireAPIKey,
+		// handleSimilar are only ever invoked wrapped by requireAuthenticatedUser,
 		// which always sets this before calling through. Fail closed
 		// rather than silently search unscoped if that invariant is ever
 		// broken by a future refactor.

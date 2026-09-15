@@ -7,9 +7,11 @@
 #   docker compose -f docker-compose.yaml up -d
 #
 # Miniflux ends up on http://localhost:8080. The sidecar's admin/status
-# page is deliberately NOT published here -- see the `sidecar` service
-# below -- reach it with `docker compose exec` or a loopback-only override
-# if you genuinely need it.
+# page is published too, on ${SIDECAR_HOST_PORT} -- see the `sidecar`
+# service below for why this is now safe to do (task 18: the same
+# Miniflux credentials that sign you into port 8080 also authenticate
+# you on the sidecar's port, with the operator-only pages gated behind
+# is_admin).
 #
 # *** IMAGE TAGS ARE PLACEHOLDERS. REPLACE BEFORE USE. ***
 # As of 2026-09-15 this fork's release pipeline
@@ -107,18 +109,25 @@ services:
   sidecar:
     image: ghcr.io/nilutz/miniflux-sidecar:v0.0.0-UNRELEASED # <- replace with the first real release tag
     restart: unless-stopped
-    # Deliberately NO `ports:` entry -- this is the change that matters
-    # most in this file. docker-compose.dev.yaml publishes 8081:8081 for
-    # local inspection; that is not acceptable in production. The
-    # sidecar's HTTP API has no authentication of any kind -- its own
-    # package documentation: "no authentication in this protocol -- run
-    # the remote on a private network, the same trust boundary Postgres
-    # itself is given" -- and it exposes an embedder-switch control that
-    # can trigger a full corpus re-index. Reachable only on the compose
-    # network here; Miniflux talks to it by service name
-    # (http://sidecar:8081). If you genuinely need the admin page, bind it
-    # to the host's loopback ONLY, in a docker-compose.override.yaml, e.g.
-    # `ports: ["127.0.0.1:8081:8081"]` -- never publish it on 0.0.0.0.
+    # Published, on a configurable host port (task 18) -- this used to be
+    # deliberately unpublished, on the reasoning that network isolation
+    # was this server's only real protection: its control endpoints
+    # (backfill pause/resume/config, the embedder switch, which can
+    # trigger a full corpus re-index) and its status page carried no
+    # authentication at all. That reasoning is now void, because this
+    # line exists: the sidecar authenticates every request with the same
+    # credentials Miniflux itself issues (an X-Auth-Token API key, or --
+    # for a browser that is already signed into Miniflux on port 8080 --
+    # the MinifluxSessionID session cookie, which the browser sends
+    # automatically to this port too, since cookies are scoped by host,
+    # not port; see sidecar/internal/web/auth.go and session_auth.go).
+    # The status page and every control endpoint additionally require
+    # the signed-in user to be a Miniflux administrator (is_admin) -- a
+    # valid but non-admin credential gets 403, not 200. SIDECAR_HOST_PORT
+    # is set in .env (see .env.example); there is no default here, on
+    # purpose, matching every other variable this file requires.
+    ports:
+      - "${SIDECAR_HOST_PORT:?SIDECAR_HOST_PORT is required -- copy .env.example to .env and fill it in}:8081"
     depends_on:
       db:
         condition: service_healthy
@@ -143,6 +152,17 @@ services:
       # the remote reports is folded into the content hash, so switching
       # re-indexes the corpus.
       - SIDECAR_EMBEDDER=local
+      # Required for the `ports:` mapping above to actually work, not
+      # just this binary's own default (web.DefaultAddr, 127.0.0.1:8081):
+      # a process bound only to loopback INSIDE a container's network
+      # namespace never receives traffic Docker forwards in from a
+      # published host port -- that traffic arrives on the container's
+      # own eth0, not its loopback interface, and a socket bound to
+      # 127.0.0.1 does not accept connections on eth0. 0.0.0.0 is safe
+      # here specifically because task 18 added real authentication
+      # (see the `ports:` comment above); binding wide with no auth is
+      # what the previous, unpublished version of this file avoided.
+      - SIDECAR_ADMIN_ADDR=0.0.0.0:8081
     healthcheck:
       # No curl/wget in this image (sidecar/Dockerfile installs only
       # ca-certificates on top of debian:trixie-slim) and no built-in

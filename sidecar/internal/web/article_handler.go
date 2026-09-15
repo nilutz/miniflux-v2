@@ -46,7 +46,7 @@ func toArticleResponseView(d *store.ArticleDetail) articleResponseView {
 
 // handleArticle serves GET /api/article. See this file's package-level
 // doc comment for why it carries no sameOriginOrNoOrigin check. It DOES
-// carry requireAPIKey (task 17, auth.go): the entry lookup below is
+// carry requireAuthenticatedUser (task 17, extended by task 18 -- auth.go): the entry lookup below is
 // scoped to the authenticated caller's own user id, exactly like
 // handleSearch/handleSimilar's own resolveAuthenticatedUserID — see
 // store.Store.EntryArticle's doc comment for why an entry belonging to a
@@ -68,7 +68,7 @@ func (s *Server) handleArticle(w http.ResponseWriter, r *http.Request) {
 	userID, ok := authenticatedUserID(r)
 	if !ok {
 		// Unreachable through the registered routes: handleArticle is
-		// only ever invoked wrapped by requireAPIKey, which always sets
+		// only ever invoked wrapped by requireAuthenticatedUser, which always sets
 		// this before calling through. Fail closed rather than look up
 		// the entry unscoped if that invariant is ever broken by a future
 		// refactor.

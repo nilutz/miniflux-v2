@@ -94,7 +94,7 @@ func newTestSearchServer(t *testing.T, searcher SearchService, entries EntryLook
 		testAuthToken:      testAuthUserID,
 		testOtherAuthToken: testOtherUserID,
 	})
-	srv, err := New(&fakeBackfill{}, nil, searcher, entries, nil, nil, nil, keys)
+	srv, err := New(&fakeBackfill{}, nil, searcher, entries, nil, nil, nil, keys, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

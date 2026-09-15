@@ -34,10 +34,14 @@ import (
 )
 
 // DefaultAddr is the address the admin server binds by default. This page
-// has no authentication and exposes operational control (pause/resume,
-// and any future live-editable knob), so it binds to loopback only —
-// never a wildcard or externally reachable address — unless an operator
-// deliberately overrides it (cmd/sidecar's SIDECAR_ADMIN_ADDR).
+// exposes operational control (pause/resume, and any future
+// live-editable knob) behind task 18's requireAdmin gate, but stays
+// loopback-only by default anyway — defence in depth, not this task's
+// only protection — never a wildcard or externally reachable address —
+// unless an operator deliberately overrides it (cmd/sidecar's
+// SIDECAR_ADMIN_ADDR; the production compose stack does this
+// deliberately, to publish the port — see docker-compose.yaml's own
+// comment on the sidecar service).
 const DefaultAddr = "127.0.0.1:8081"
 
 //go:embed templates/status.html
@@ -118,55 +122,43 @@ type ArticleLookup interface {
 // since task 15, GET /api/article — the full-content read the MCP server's
 // fetch_article tool wraps.
 //
-// Since task 17, GET /api/search, /api/similar and /api/article are
-// protected by requireAPIKey (auth.go): a Miniflux API key, read from the
-// same X-Auth-Token header and validated read-only against the same
-// public.api_keys table Miniflux's own REST API uses. The status page
-// (GET /{$}), GET /api/status, and every control endpoint (backfill
-// pause/resume/config, the Task 9 embedder-switch endpoints) are
-// deliberately left unauthenticated, exactly as before -- a decision this
-// task made, not an oversight:
+// Since task 17, GET /api/search, /api/similar and /api/article require a
+// valid Miniflux credential (requireAuthenticatedUser, auth.go) and scope
+// their result to that credential's user. Since task 18, that credential
+// may be either a Miniflux API key (X-Auth-Token, task 17's original
+// mechanism) or a Miniflux web session cookie (MinifluxSessionID) — see
+// auth.go's package doc comment and session_auth.go.
 //
-//   - The confidentiality problem task 17 exists to fix is per-user
-//     article content leaking between Miniflux users through the search
-//     API. Status and control state carry no per-user data at all --
-//     they are global operational metrics (throughput, ETA, database
-//     size) and global on/off switches (pause, the embedder in use).
-//     There is nothing there for one Miniflux user's key to protect from
-//     another's.
-//   - Network isolation is already this server's documented security
-//     model, unchanged by this task: it binds to loopback by default
-//     (DefaultAddr's own doc comment), the production compose stack
-//     deliberately publishes no port for it, and README.md already
-//     states plainly that binding it anywhere else is a deliberate
-//     operator override. Everyone who can already reach this admin
-//     surface at all sits inside that same trust boundary.
-//   - Gating these endpoints on "any valid Miniflux API key" would not
-//     actually restrict them to an operator: public.api_keys carries no
-//     admin/operator distinction (any Miniflux user, including a
-//     low-privilege reader, can mint one from their own account
-//     settings). Requiring one here would look like it raises the bar
-//     against a malicious LAN actor -- the embedder switch's real threat,
-//     since it can trigger a multi-hour full re-index -- while actually
-//     only requiring that actor to hold any one valid reader's key, which
-//     the confidentiality leak this task closes makes no harder to
-//     obtain than before. That is a worse outcome than today's plain
-//     network-isolation boundary: an operator who saw "now protected by
-//     an API key" would reasonably read that as raising the bar, when it
-//     would not.
-//   - The task brief's own hard constraint -- no configuration flag may
-//     disable authentication, because that is the flag production
-//     forgets to unset -- has a mirror image here: gating an operator's
-//     own pause button, or the embedder-switch preview/config forms they
-//     use to recover a stuck backfill, behind a key they may not have to
-//     hand on the box in front of them has a real operational cost, for
-//     a security benefit this endpoint's actual threat model (an
-//     authenticated non-admin Miniflux user versus an unauthenticated
-//     LAN actor) does not clearly provide.
+// Task 18 also supersedes task 17's own ruling that the status page (GET
+// /{$}), GET /api/status, and every control endpoint (backfill
+// pause/resume/config, the Task 9 embedder-switch endpoints) stay
+// unauthenticated. That ruling rested on two premises, and task 18's brief
+// is explicit that both are now void:
 //
-// See auth_test.go's TestControlAndStatusEndpointsRemainUnauthenticated,
-// which pins this decision so a later change cannot silently narrow it by
-// accident.
+//   - "The production compose stack publishes no port for this server, so
+//     network isolation is the real boundary." Task 18 publishes the
+//     port. A boundary that used to be "you cannot reach this server at
+//     all from outside the compose network" is gone.
+//   - "A Miniflux API key carries no admin/operator distinction, so
+//     gating these endpoints behind any valid key would look like
+//     protection without providing much." This was simply wrong:
+//     public.users.is_admin exists (internal/database/migrations.go's
+//     initial migration), one join away from either credential's
+//     resolved user id, and gives these endpoints a real distinction to
+//     gate on.
+//
+// So, since task 18: the status page, GET /api/status, and every control
+// endpoint require requireAdmin (auth.go) instead of being left open — ANY
+// valid credential authenticates a caller, but only one whose user
+// is_admin may reach these operator surfaces (AdminChecker /
+// store.Store.IsAdmin, read-only against public.users.is_admin). A valid
+// non-admin credential gets 403, not 200; no credential at all gets 401;
+// nothing here is optional or behind a flag.
+//
+// See auth_test.go's TestControlAndStatusEndpointsRequireAdmin, which pins
+// this per-endpoint, per-case (no credential / non-admin / admin) so a
+// later change cannot silently narrow it by accident the way task 17's
+// own report warned this project has repeatedly done.
 type Server struct {
 	backfill BackfillController
 	live     LiveLane
@@ -176,6 +168,8 @@ type Server struct {
 	metrics  DatabaseMetricsSource
 	manager  EmbedderManager
 	keys     APIKeyValidator
+	sessions SessionValidator
+	admins   AdminChecker
 	tmpl     *template.Template
 	mux      *http.ServeMux
 }
@@ -186,24 +180,28 @@ type Server struct {
 // search.BuildSnippet — see search_handlers.go), articles (GET
 // /api/article's full-content read — see article_handler.go), metrics (the
 // database-size and health section — spec §13.2), manager (the Model
-// section's embedder controls — Task 9, spec §13.1) and keys (task 17's
-// API key validator, guarding GET /api/search, /api/similar and
-// /api/article — see this type's own doc comment for which endpoints are
-// and are not protected, and why). It parses the embedded status page
-// template eagerly so a malformed template fails at startup, not on the
-// first request.
+// section's embedder controls — Task 9, spec §13.1), keys (task 17's API
+// key validator), sessions (task 18's Miniflux web session cookie
+// validator) and admins (task 18's is_admin check, guarding the status
+// page and every control endpoint — see this type's own doc comment for
+// which endpoints require which gate, and why). It parses the embedded
+// status page template eagerly so a malformed template fails at startup,
+// not on the first request.
 //
-// live, searcher, entries, articles, metrics, manager and keys may all be
-// nil in tests that don't care about what they cover (see server_test.go);
-// cmd/sidecar always supplies all seven. A nil live renders as "not
-// paused" — the zero value of indexer.LiveStats — rather than panicking; a
-// nil (or erroring) metrics source renders the database-size section as
-// unavailable rather than panicking or showing zeroes as if they were real
-// (see view()); a nil manager renders the Model section as unavailable the
-// same way (see modelView()); a nil keys fails every protected request
-// closed with 500 (see requireAPIKey in auth.go) rather than silently
-// admitting every caller.
-func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, articles ArticleLookup, metrics DatabaseMetricsSource, manager EmbedderManager, keys APIKeyValidator) (*Server, error) {
+// live, searcher, entries, articles, metrics, manager, keys, sessions and
+// admins may all be nil in tests that don't care about what they cover
+// (see server_test.go); cmd/sidecar always supplies all ten. A nil live
+// renders as "not paused" — the zero value of indexer.LiveStats — rather
+// than panicking; a nil (or erroring) metrics source renders the
+// database-size section as unavailable rather than panicking or showing
+// zeroes as if they were real (see view()); a nil manager renders the
+// Model section as unavailable the same way (see modelView()); a nil keys
+// or sessions fails every request presenting that credential kind closed
+// with 500 (see resolveCredential in auth.go) rather than silently
+// admitting every caller; a nil admins fails every request to an
+// admin-gated route closed with 500 (see requireAdmin in auth.go) the
+// same way, regardless of whether the credential itself was valid.
+func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, articles ArticleLookup, metrics DatabaseMetricsSource, manager EmbedderManager, keys APIKeyValidator, sessions SessionValidator, admins AdminChecker) (*Server, error) {
 	tmpl, err := template.New("status.html").Funcs(template.FuncMap{
 		"comma":    commaInt,
 		"bytesize": formatBytes,
@@ -212,32 +210,36 @@ func New(backfill BackfillController, live LiveLane, searcher SearchService, ent
 		return nil, fmt.Errorf("web: unable to parse status template: %w", err)
 	}
 
-	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, articles: articles, metrics: metrics, manager: manager, keys: keys, tmpl: tmpl}
+	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, articles: articles, metrics: metrics, manager: manager, keys: keys, sessions: sessions, admins: admins, tmpl: tmpl}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", s.handleIndex)
-	mux.HandleFunc("GET /api/status", s.handleAPIStatus)
-	mux.HandleFunc("POST /api/backfill/pause", s.handlePause)
-	mux.HandleFunc("POST /api/backfill/resume", s.handleResume)
-	mux.HandleFunc("GET /api/backfill/config", s.handleGetConfig)
-	mux.HandleFunc("POST /api/backfill/config", s.handleSetConfig)
+	// GET /{$} and every route below down to POST /api/embedder/switch
+	// are task 18's admin-gated operator surfaces (requireAdmin, auth.go)
+	// — see this type's own doc comment for why they are no longer left
+	// unauthenticated the way task 17 left them.
+	mux.HandleFunc("GET /{$}", s.requireAdmin(s.handleIndex))
+	mux.HandleFunc("GET /api/status", s.requireAdmin(s.handleAPIStatus))
+	mux.HandleFunc("POST /api/backfill/pause", s.requireAdmin(s.handlePause))
+	mux.HandleFunc("POST /api/backfill/resume", s.requireAdmin(s.handleResume))
+	mux.HandleFunc("GET /api/backfill/config", s.requireAdmin(s.handleGetConfig))
+	mux.HandleFunc("POST /api/backfill/config", s.requireAdmin(s.handleSetConfig))
 
-	mux.HandleFunc("GET /api/embedder", s.handleGetEmbedder)
-	mux.HandleFunc("POST /api/embedder/preview", s.handleEmbedderPreview)
-	mux.HandleFunc("POST /api/embedder/switch", s.handleEmbedderSwitch)
+	mux.HandleFunc("GET /api/embedder", s.requireAdmin(s.handleGetEmbedder))
+	mux.HandleFunc("POST /api/embedder/preview", s.requireAdmin(s.handleEmbedderPreview))
+	mux.HandleFunc("POST /api/embedder/switch", s.requireAdmin(s.handleEmbedderSwitch))
 
 	// GET /api/search, GET /api/similar (search_handlers.go) and GET
 	// /api/article (article_handler.go) do NOT carry
 	// sameOriginOrNoOrigin's check — see handleSearch/handleSimilar's own
 	// doc comment for why a read-only endpoint on this loopback-bound
 	// server does not need it; handleArticle is the same shape of
-	// endpoint for the same reason. They DO carry requireAPIKey (task 17,
-	// auth.go) — these are the sidecar's data endpoints, the ones this
-	// task's Server doc comment explains are protected while the routes
-	// above are not.
-	mux.HandleFunc("GET /api/search", s.requireAPIKey(s.handleSearch))
-	mux.HandleFunc("GET /api/similar", s.requireAPIKey(s.handleSimilar))
-	mux.HandleFunc("GET /api/article", s.requireAPIKey(s.handleArticle))
+	// endpoint for the same reason. They DO carry requireAuthenticatedUser
+	// (task 17, extended by task 18 to also accept a session cookie —
+	// auth.go) — these are the sidecar's data endpoints, gated on ANY
+	// valid credential with no admin requirement, unlike the routes above.
+	mux.HandleFunc("GET /api/search", s.requireAuthenticatedUser(s.handleSearch))
+	mux.HandleFunc("GET /api/similar", s.requireAuthenticatedUser(s.handleSimilar))
+	mux.HandleFunc("GET /api/article", s.requireAuthenticatedUser(s.handleArticle))
 	s.mux = mux
 
 	return s, nil
@@ -645,9 +647,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 // handleSetConfig applies spec §9.2's live-editable knobs to the running
 // lane. It carries the same Origin check as pause/resume — it is a
-// state-changing request against an unauthenticated loopback service, and
-// concurrency and schedule are exactly the settings an attacker would want
-// to change.
+// state-changing, admin-gated (task 18) request, and concurrency and
+// schedule are exactly the settings an attacker who somehow reached this
+// far would want to change; sameOriginOrNoOrigin is defence in depth on
+// top of requireAdmin, not a substitute for it (see that function's own
+// doc comment).
 //
 // The response is the configuration as it actually stands afterwards, not
 // an echo of the request: values outside the permitted ranges are clamped
@@ -903,14 +907,21 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 // request, or a browser navigation/form submission old enough to omit it),
 // or when it does and that Origin's host matches the request's own Host.
 //
-// This page has no authentication (bind-to-localhost is its only real
-// protection), but localhost binding alone does not stop a page open in
-// the operator's own browser, on any origin, from firing a same-site
-// "simple" POST at http://127.0.0.1:8081/api/backfill/pause — a classic
-// local-service CSRF vector. The admin page's own inline fetch() calls
-// (templates/status.html) always set Origin on state-changing requests
-// per the Fetch spec, so this check costs those calls nothing, while a
-// cross-origin page's request is rejected outright.
+// Since task 18, these routes also require requireAdmin (auth.go) — but
+// that alone does not stop a page open in the operator's own browser, on
+// any origin, from firing a same-site "simple" POST at
+// http://127.0.0.1:8081/api/backfill/pause and having the browser attach
+// the operator's own MinifluxSessionID cookie automatically: a classic
+// CSRF vector, and if anything MORE relevant now that a browser cookie is
+// one of the two credentials these routes accept, not less. (SameSite=Lax
+// already blocks the cookie on a genuinely cross-SITE POST in current
+// browsers — see internal/ui/auth.go's setSessionCookie — but this check
+// is defence in depth on top of that, not a replacement for it, the same
+// way it was defence in depth on top of loopback binding before task 18.)
+// The admin page's own inline fetch() calls (templates/status.html)
+// always set Origin on state-changing requests per the Fetch spec, so
+// this check costs those calls nothing, while a cross-origin page's
+// request is rejected outright.
 func sameOriginOrNoOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {

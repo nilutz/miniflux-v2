@@ -163,25 +163,101 @@ func (f *fakeKeyValidator) revoke(token string) {
 	delete(f.tokens, token)
 }
 
+// fakeSessionValidator is a hermetic stand-in for SessionValidator (task
+// 18): an in-memory cookie-value -> user id map, mutable mid-test
+// (delete a value to simulate Miniflux deleting the underlying
+// web_sessions row -- a sign-out, or its own cleanup sweep), so these
+// tests never need a database. Mirrors fakeKeyValidator exactly, one
+// level up (a cookie VALUE rather than a bare token), because
+// store.ValidateWebSessionCookie's own signature mirrors
+// store.ValidateAPIKey's the same way.
+type fakeSessionValidator struct {
+	mu      sync.Mutex
+	cookies map[string]int64
+	err     error
+}
+
+func newFakeSessionValidator(cookies map[string]int64) *fakeSessionValidator {
+	cp := make(map[string]int64, len(cookies))
+	for k, v := range cookies {
+		cp[k] = v
+	}
+	return &fakeSessionValidator{cookies: cp}
+}
+
+func (f *fakeSessionValidator) ValidateWebSessionCookie(_ context.Context, cookieValue string) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return 0, false, f.err
+	}
+	id, ok := f.cookies[cookieValue]
+	return id, ok, nil
+}
+
+// expire removes cookieValue from the map, simulating Miniflux deleting
+// the underlying web_sessions row: the very next ValidateWebSessionCookie
+// call for it must report ok=false, exactly like fakeKeyValidator.revoke
+// for an API key.
+func (f *fakeSessionValidator) expire(cookieValue string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.cookies, cookieValue)
+}
+
+// fakeAdminChecker is a hermetic stand-in for AdminChecker (task 18): an
+// in-memory set of admin user ids, so these tests never need a database
+// or a real public.users.is_admin column.
+type fakeAdminChecker struct {
+	mu     sync.Mutex
+	admins map[int64]bool
+	err    error
+}
+
+func newFakeAdminChecker(admins map[int64]bool) *fakeAdminChecker {
+	cp := make(map[int64]bool, len(admins))
+	for k, v := range admins {
+		cp[k] = v
+	}
+	return &fakeAdminChecker{admins: cp}
+}
+
+func (f *fakeAdminChecker) IsAdmin(_ context.Context, userID int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.admins[userID], nil
+}
+
 // testAuthToken/testAuthUserID are the fixed API key and user id every
 // helper below that builds a Server with a real SearchService/
-// ArticleLookup authenticates requests as, via authedHandler, unless a
-// test is specifically about authentication itself (see auth_test.go)
-// and sets its own header (or none) directly.
+// ArticleLookup, or the plain control/status helpers just below, authenticates
+// requests as, via authedHandler, unless a test is specifically about
+// authentication itself (see auth_test.go) and sets its own header (or
+// none) directly. testAuthUserID is configured as a Miniflux administrator
+// by every helper that wires an AdminChecker (newTestServer and friends,
+// below) -- these helpers exist to exercise CONTROL-endpoint behaviour
+// unrelated to task 18's authorisation itself, so they authenticate as an
+// admin by default; TestControlAndStatusEndpointsRequireAdmin (auth_test.go)
+// is what actually exercises the non-admin/no-credential cases, with its
+// own distinct fixtures.
 const (
-	testAuthToken           = "sidecar-test-token"
-	testAuthUserID    int64 = 777
-	testOtherAuthToken      = "sidecar-test-token-other-user"
-	testOtherUserID   int64 = 888
+	testAuthToken            = "sidecar-test-token"
+	testAuthUserID     int64 = 777
+	testOtherAuthToken       = "sidecar-test-token-other-user"
+	testOtherUserID    int64 = 888
 )
 
 // authedHandler wraps h so every request it serves already carries a
 // valid X-Auth-Token header (testAuthToken), unless the request already
 // set one itself -- which lets the many pre-existing search/similar/
-// article tests that predate task 17's authentication requirement keep
-// exercising their own, unrelated behaviour unchanged, while auth_test.go
-// and the handful of tests below that ARE about authentication set (or
-// deliberately omit) their own header and are never overridden here.
+// article/control/status tests that predate task 17's (and task 18's)
+// authentication requirements keep exercising their own, unrelated
+// behaviour unchanged, while auth_test.go and the handful of tests below
+// that ARE about authentication set (or deliberately omit) their own
+// header and are never overridden here.
 type authedHandler struct{ h http.Handler }
 
 func (a authedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +265,19 @@ func (a authedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set(authTokenHeader, testAuthToken)
 	}
 	a.h.ServeHTTP(w, r)
+}
+
+// controlTestKeys/controlTestAdmins build the fixed keys/admins fixture
+// every plain control/status test helper below wires in: testAuthToken
+// resolves to testAuthUserID, and testAuthUserID IS a Miniflux
+// administrator -- see the doc comment on testAuthToken/testAuthUserID
+// above for why these helpers default to an admin identity.
+func controlTestKeys() *fakeKeyValidator {
+	return newFakeKeyValidator(map[string]int64{testAuthToken: testAuthUserID})
+}
+
+func controlTestAdmins() *fakeAdminChecker {
+	return newFakeAdminChecker(map[int64]bool{testAuthUserID: true})
 }
 
 func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
@@ -199,12 +288,17 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	// for that, via newTestServerWithLive). nil, nil, nil, nil: no search
 	// service/entries/articles/metrics source either -- see
 	// search_handlers_test.go and article_handler_test.go for the first
-	// three and TestStatusPage*Metrics* below for the fourth.
-	srv, err := New(fb, nil, nil, nil, nil, nil, nil, nil)
+	// three and TestStatusPage*Metrics* below for the fourth. keys/admins
+	// (task 18): these routes are admin-gated now, so every test using
+	// this helper authenticates as testAuthUserID, configured as an admin
+	// -- via authedHandler below, which every one of this file's
+	// pre-existing tests already relies on for the same reason task 17's
+	// own report describes.
+	srv, err := New(fb, nil, nil, nil, nil, nil, nil, controlTestKeys(), nil, controlTestAdmins())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return srv.Handler()
+	return authedHandler{h: srv.Handler()}
 }
 
 // newTestServerWithLive is newTestServer plus a real, non-nil LiveLane, for
@@ -212,11 +306,11 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 // renders distinctly from the backfill lane's.
 func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.Handler {
 	t.Helper()
-	srv, err := New(fb, live, nil, nil, nil, nil, nil, nil)
+	srv, err := New(fb, live, nil, nil, nil, nil, nil, controlTestKeys(), nil, controlTestAdmins())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return srv.Handler()
+	return authedHandler{h: srv.Handler()}
 }
 
 // newTestServerWithMetrics is newTestServer plus a real, non-nil
@@ -224,11 +318,11 @@ func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.H
 // database-size section renders from it.
 func newTestServerWithMetrics(t *testing.T, fb *fakeBackfill, metrics DatabaseMetricsSource) http.Handler {
 	t.Helper()
-	srv, err := New(fb, nil, nil, nil, nil, metrics, nil, nil)
+	srv, err := New(fb, nil, nil, nil, nil, metrics, nil, controlTestKeys(), nil, controlTestAdmins())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return srv.Handler()
+	return authedHandler{h: srv.Handler()}
 }
 
 // fakeEmbedderManager is a hermetic stand-in for *indexer.Manager: it
@@ -287,11 +381,11 @@ func (f *fakeEmbedderManager) switchCallCount() int {
 // EmbedderManager, for the tests that check the Model section (Task 9).
 func newTestServerWithManager(t *testing.T, fb *fakeBackfill, manager EmbedderManager) http.Handler {
 	t.Helper()
-	srv, err := New(fb, nil, nil, nil, nil, nil, manager, nil)
+	srv, err := New(fb, nil, nil, nil, nil, nil, manager, controlTestKeys(), nil, controlTestAdmins())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return srv.Handler()
+	return authedHandler{h: srv.Handler()}
 }
 
 func TestAPIStatusReturnsProgressThroughputWorkersAndReason(t *testing.T) {

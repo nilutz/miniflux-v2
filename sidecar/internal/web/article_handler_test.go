@@ -64,7 +64,7 @@ func newTestArticleServer(t *testing.T, articles ArticleLookup) http.Handler {
 		testAuthToken:      testAuthUserID,
 		testOtherAuthToken: testOtherUserID,
 	})
-	srv, err := New(&fakeBackfill{}, nil, nil, nil, articles, nil, nil, keys)
+	srv, err := New(&fakeBackfill{}, nil, nil, nil, articles, nil, nil, keys, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

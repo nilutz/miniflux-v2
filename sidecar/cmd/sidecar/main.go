@@ -108,10 +108,12 @@ type config struct {
 // ONNXConfig.ONNXLibraryDir is ignored when empty, and only matters on
 // platforms (macOS) where the native library isn't found at hugot's
 // Linux-only default search path. SIDECAR_ADMIN_ADDR is also optional and
-// defaults to web.DefaultAddr (loopback-only): the status/admin page has
-// no authentication, so binding it anywhere reachable off the local
-// machine is an operator's deliberate override, never this binary's
-// default.
+// defaults to web.DefaultAddr (loopback-only): the status/admin page is
+// gated by task 18's requireAdmin regardless of where it binds, but
+// binding it anywhere reachable off the local machine is still an
+// operator's deliberate override, never this binary's default (see
+// docker-compose.yaml's production sidecar service for the override
+// production actually uses, to publish the port behind that same gate).
 func loadConfig() (config, error) {
 	cfg := config{
 		databaseURL:  os.Getenv("SIDECAR_DATABASE_URL"),
@@ -447,12 +449,14 @@ func run() error {
 		RemoteURL: choice.remoteURL,
 	}, searcher)
 
-	// The final s: task 17's APIKeyValidator, guarding GET /api/search,
-	// /api/similar and /api/article with the same Miniflux API keys
-	// Miniflux's own REST API validates (public.api_keys, read-only) —
-	// see web.Server's own doc comment for which endpoints are and are
-	// not protected, and why.
-	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s, s, manager, s)
+	// The final three s's: task 17's APIKeyValidator and task 18's
+	// SessionValidator and AdminChecker. All three are satisfied by
+	// *store.Store with no adaptation -- ValidateAPIKey, ValidateWebSessionCookie
+	// and IsAdmin are all read-only lookups against tables Miniflux itself
+	// owns (public.api_keys, public.web_sessions, public.users) — see
+	// web.Server's own doc comment for which endpoints require which of
+	// these, and why.
+	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s, s, manager, s, s, s)
 	if err != nil {
 		return fmt.Errorf("sidecar: unable to build admin server: %w", err)
 	}

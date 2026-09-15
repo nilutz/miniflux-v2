@@ -1,16 +1,20 @@
 // SPDX-FileCopyrightText: Copyright The Miniflux Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// This file is task 17's own required test coverage: every protected data
-// endpoint (GET /api/search, /api/similar, /api/article) rejects a
-// missing or unknown API key, accepts and correctly SCOPES a valid one,
-// stops accepting a key the instant its api_keys row is gone (simulated
-// here via fakeKeyValidator.revoke), and every endpoint this task
-// deliberately left unauthenticated (server.go's own Server doc comment
-// explains which, and why) stays that way. Per the brief: assert missing
-// and unknown token cases PER endpoint, not once for the group -- this
-// project has repeatedly shipped a guard that covered one call site out
-// of several.
+// This file is task 17's own required test coverage, extended by task 18:
+// every protected data endpoint (GET /api/search, /api/similar,
+// /api/article) rejects a missing or unknown credential (API key OR
+// session cookie), accepts and correctly SCOPES a valid one of either
+// kind, and stops accepting a credential the instant its underlying row
+// (api_keys or web_sessions) is gone (simulated here via
+// fakeKeyValidator.revoke / fakeSessionValidator.expire). Task 18 adds:
+// every control endpoint and the status page -- left unauthenticated by
+// task 17 -- now require an ADMIN credential specifically
+// (TestControlAndStatusEndpointsRequireAdmin), superseding task 17's own
+// ruling (see server.go's Server doc comment for why). Per the brief:
+// assert every case PER endpoint, not once for the group -- this project
+// has repeatedly shipped a guard that covered one call site out of
+// several.
 package web // import "miniflux.app/v2/sidecar/internal/web"
 
 import (
@@ -37,18 +41,18 @@ var protectedRequests = []protectedRequest{
 	{name: "article", method: http.MethodGet, target: "/api/article?entry_id=42"},
 }
 
-// newAuthTestServer builds a full Server over keys, wired with fresh
-// fakeSearcher/fakeArticles so a subtest can assert whether they were
-// actually reached. Unlike newTestSearchServer/newTestArticleServer, the
-// returned handler is the RAW server handler -- NOT wrapped in
-// authedHandler -- because these tests are specifically about what
-// happens with no header, an unrecognised header, or a header that stops
-// working mid-test.
-func newAuthTestServer(t *testing.T, keys APIKeyValidator) (handler http.Handler, fs *fakeSearcher, fa *fakeArticles) {
+// newAuthTestServer builds a full Server over keys and sessions, wired
+// with fresh fakeSearcher/fakeArticles so a subtest can assert whether
+// they were actually reached. Unlike newTestSearchServer/
+// newTestArticleServer, the returned handler is the RAW server handler --
+// NOT wrapped in authedHandler -- because these tests are specifically
+// about what happens with no credential, an unrecognised one, or one
+// that stops working mid-test.
+func newAuthTestServer(t *testing.T, keys APIKeyValidator, sessions SessionValidator) (handler http.Handler, fs *fakeSearcher, fa *fakeArticles) {
 	t.Helper()
 	fs = &fakeSearcher{}
 	fa = &fakeArticles{byID: map[int64]*store.ArticleDetail{42: {ID: 42, Title: "t"}}}
-	srv, err := New(&fakeBackfill{}, nil, fs, nil, fa, nil, nil, keys)
+	srv, err := New(&fakeBackfill{}, nil, fs, nil, fa, nil, nil, keys, sessions, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -63,7 +67,7 @@ func newAuthTestServer(t *testing.T, keys APIKeyValidator) (handler http.Handler
 func TestProtectedEndpointsRejectMissingHeader(t *testing.T) {
 	for _, pr := range protectedRequests {
 		t.Run(pr.name, func(t *testing.T) {
-			handler, fs, fa := newAuthTestServer(t, newFakeKeyValidator(map[string]int64{testAuthToken: testAuthUserID}))
+			handler, fs, fa := newAuthTestServer(t, newFakeKeyValidator(map[string]int64{testAuthToken: testAuthUserID}), nil)
 
 			req := httptest.NewRequest(pr.method, pr.target, nil)
 			rec := httptest.NewRecorder()
@@ -94,7 +98,7 @@ func TestProtectedEndpointsRejectMissingHeader(t *testing.T) {
 func TestProtectedEndpointsRejectUnknownToken(t *testing.T) {
 	for _, pr := range protectedRequests {
 		t.Run(pr.name, func(t *testing.T) {
-			handler, fs, fa := newAuthTestServer(t, newFakeKeyValidator(map[string]int64{testAuthToken: testAuthUserID}))
+			handler, fs, fa := newAuthTestServer(t, newFakeKeyValidator(map[string]int64{testAuthToken: testAuthUserID}), nil)
 
 			req := httptest.NewRequest(pr.method, pr.target, nil)
 			req.Header.Set(authTokenHeader, "this-token-was-never-issued")
@@ -125,7 +129,7 @@ func TestProtectedEndpointsRejectUnknownToken(t *testing.T) {
 func TestProtectedEndpointsAcceptValidToken(t *testing.T) {
 	for _, pr := range protectedRequests {
 		t.Run(pr.name, func(t *testing.T) {
-			handler, _, _ := newAuthTestServer(t, newFakeKeyValidator(map[string]int64{testAuthToken: testAuthUserID}))
+			handler, _, _ := newAuthTestServer(t, newFakeKeyValidator(map[string]int64{testAuthToken: testAuthUserID}), nil)
 
 			req := httptest.NewRequest(pr.method, pr.target, nil)
 			req.Header.Set(authTokenHeader, testAuthToken)
@@ -153,7 +157,7 @@ func TestProtectedEndpointsReject401AfterKeyIsRevoked(t *testing.T) {
 	for _, pr := range protectedRequests {
 		t.Run(pr.name, func(t *testing.T) {
 			keys := newFakeKeyValidator(map[string]int64{testAuthToken: testAuthUserID})
-			handler, _, _ := newAuthTestServer(t, keys)
+			handler, _, _ := newAuthTestServer(t, keys, nil)
 
 			okReq := httptest.NewRequest(pr.method, pr.target, nil)
 			okReq.Header.Set(authTokenHeader, testAuthToken)
@@ -184,7 +188,7 @@ func TestProtectedEndpointsReject401AfterKeyIsRevoked(t *testing.T) {
 // unconfigured validator must never be indistinguishable from "auth
 // turned off".
 func TestProtectedEndpointFailsClosedWithoutKeyValidator(t *testing.T) {
-	handler, _, _ := newAuthTestServer(t, nil)
+	handler, _, _ := newAuthTestServer(t, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/search?q=widgets", nil)
 	req.Header.Set(authTokenHeader, testAuthToken)
@@ -196,61 +200,327 @@ func TestProtectedEndpointFailsClosedWithoutKeyValidator(t *testing.T) {
 	}
 }
 
-// TestControlAndStatusEndpointsRemainUnauthenticated pins this task's own
-// deliberate decision (see server.go's Server doc comment for the
-// reasoning): the status page, GET /api/status, and every backfill/
-// embedder control endpoint stay open with NO X-Auth-Token header at
-// all -- exactly as they behaved before this task. This exists so a
-// later change that silently narrows that decision (accidentally routing
-// one of these through requireAPIKey) is caught by a failing test, not
-// discovered by an operator locked out of their own pause button.
-func TestControlAndStatusEndpointsRemainUnauthenticated(t *testing.T) {
-	fb := &fakeBackfill{cfg: indexer.RuntimeConfig{MinWorkers: 1, MaxWorkers: 2, BatchSize: 16, PageSize: 20}}
-	manager := &fakeEmbedderManager{}
-	// keys is nil here, deliberately: these routes must not even consult
-	// a validator, whether or not one is configured.
-	srv, err := New(fb, nil, nil, nil, nil, nil, manager, nil)
+// --- Task 18: session-cookie authentication on the data endpoints ---
+
+// testSessionCookieValue/testSessionUserID and testOtherSessionCookieValue/
+// testOtherSessionUserID are the fixed session-cookie fixtures the tests
+// below use, the cookie-based counterpart of testAuthToken/testAuthUserID
+// and testOtherAuthToken/testOtherUserID (server_test.go).
+const (
+	testSessionCookieValue            = "sidecar-test-session-id.sidecar-test-session-secret"
+	testSessionUserID           int64 = 7770
+	testOtherSessionCookieValue       = "sidecar-test-session-id-other.sidecar-test-session-secret-other"
+	testOtherSessionUserID      int64 = 8880
+)
+
+// withSessionCookie sets Miniflux's own session cookie on req -- the
+// browser-side counterpart of setting the X-Auth-Token header.
+func withSessionCookie(req *http.Request, value string) {
+	req.AddCookie(&http.Cookie{Name: minifluxSessionCookieName, Value: value})
+}
+
+// TestProtectedEndpointsAcceptValidSessionCookie is
+// TestProtectedEndpointsAcceptValidToken's session-cookie counterpart
+// (task 18's "no login" requirement): a request carrying no X-Auth-Token
+// header at all, but a valid MinifluxSessionID cookie, must pass the
+// same gate every protected data endpoint uses.
+func TestProtectedEndpointsAcceptValidSessionCookie(t *testing.T) {
+	for _, pr := range protectedRequests {
+		t.Run(pr.name, func(t *testing.T) {
+			sessions := newFakeSessionValidator(map[string]int64{testSessionCookieValue: testSessionUserID})
+			handler, _, _ := newAuthTestServer(t, nil, sessions)
+
+			req := httptest.NewRequest(pr.method, pr.target, nil)
+			withSessionCookie(req, testSessionCookieValue)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s, want 200 for a valid session cookie", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestProtectedEndpointsRejectUnknownSessionCookie mirrors
+// TestProtectedEndpointsRejectUnknownToken for the cookie credential: a
+// cookie present but naming a session no row matches must be 401 on
+// every protected route, indistinguishable from a missing credential.
+func TestProtectedEndpointsRejectUnknownSessionCookie(t *testing.T) {
+	for _, pr := range protectedRequests {
+		t.Run(pr.name, func(t *testing.T) {
+			sessions := newFakeSessionValidator(map[string]int64{testSessionCookieValue: testSessionUserID})
+			handler, fs, fa := newAuthTestServer(t, nil, sessions)
+
+			req := httptest.NewRequest(pr.method, pr.target, nil)
+			withSessionCookie(req, "this-session-was-never-created.some-secret")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, body = %s, want 401", rec.Code, rec.Body.String())
+			}
+			if fs.lastRequest.Query != "" || fs.similarCalled {
+				t.Errorf("the searcher was reached despite an unknown session cookie: %+v / similarCalled=%v", fs.lastRequest, fs.similarCalled)
+			}
+			if fa.lastUserID != 0 {
+				t.Errorf("the article lookup was reached despite an unknown session cookie: lastUserID=%d", fa.lastUserID)
+			}
+		})
+	}
+}
+
+// TestProtectedEndpointsReject401AfterSessionCookieExpires is
+// TestProtectedEndpointsReject401AfterKeyIsRevoked's session-cookie
+// counterpart, and the brief's own required "expired or deleted session
+// -> 401 on the next request" case: a session that validates
+// successfully must stop working the instant its underlying
+// web_sessions row is gone (sign-out, or Miniflux's own cleanup sweep;
+// simulated here via fakeSessionValidator.expire, which is exactly what
+// store.Store.ValidateWebSessionCookie does for a real DELETE -- see
+// internal/store/websession_test.go's
+// TestValidateWebSessionCookieReturnsFalseAfterSessionIsDeleted for the
+// data-layer proof of that).
+func TestProtectedEndpointsReject401AfterSessionCookieExpires(t *testing.T) {
+	for _, pr := range protectedRequests {
+		t.Run(pr.name, func(t *testing.T) {
+			sessions := newFakeSessionValidator(map[string]int64{testSessionCookieValue: testSessionUserID})
+			handler, _, _ := newAuthTestServer(t, nil, sessions)
+
+			okReq := httptest.NewRequest(pr.method, pr.target, nil)
+			withSessionCookie(okReq, testSessionCookieValue)
+			okRec := httptest.NewRecorder()
+			handler.ServeHTTP(okRec, okReq)
+			if okRec.Code != http.StatusOK {
+				t.Fatalf("expected 200 before expiry, got %d: %s", okRec.Code, okRec.Body.String())
+			}
+
+			sessions.expire(testSessionCookieValue)
+
+			expiredReq := httptest.NewRequest(pr.method, pr.target, nil)
+			withSessionCookie(expiredReq, testSessionCookieValue)
+			expiredRec := httptest.NewRecorder()
+			handler.ServeHTTP(expiredRec, expiredReq)
+			if expiredRec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401 on the request immediately after the session expired, got %d: %s", expiredRec.Code, expiredRec.Body.String())
+			}
+		})
+	}
+}
+
+// TestSessionCookieScopesArticleLookupToItsOwnUser proves a session
+// cookie is resolved to the RIGHT user, not just SOME user: two distinct
+// sessions, for two distinct users, each of whom owns a different entry,
+// must each only be able to read their own via GET /api/article -- the
+// brief's own required "a session belonging to user A must not return
+// user B's entries" case, exercised through the cookie credential
+// specifically (the equivalent API-key case is
+// article_handler_test.go's TestArticleDoesNotReturnAnotherUsersEntry).
+func TestSessionCookieScopesArticleLookupToItsOwnUser(t *testing.T) {
+	sessions := newFakeSessionValidator(map[string]int64{
+		testSessionCookieValue:      testSessionUserID,
+		testOtherSessionCookieValue: testOtherSessionUserID,
+	})
+	fa := &fakeArticles{
+		byID: map[int64]*store.ArticleDetail{
+			42: {ID: 42, Title: "user A's article"},
+			43: {ID: 43, Title: "user B's article"},
+		},
+		ownerOf: map[int64]int64{42: testSessionUserID, 43: testOtherSessionUserID},
+	}
+	srv, err := New(&fakeBackfill{}, nil, nil, nil, fa, nil, nil, nil, sessions, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	handler := srv.Handler()
 
-	cases := []struct {
-		name   string
-		method string
-		target string
-		body   string
-	}{
-		{name: "status page", method: http.MethodGet, target: "/"},
-		{name: "api status", method: http.MethodGet, target: "/api/status"},
-		{name: "backfill pause", method: http.MethodPost, target: "/api/backfill/pause"},
-		{name: "backfill resume", method: http.MethodPost, target: "/api/backfill/resume"},
-		{name: "backfill get config", method: http.MethodGet, target: "/api/backfill/config"},
-		{name: "backfill set config", method: http.MethodPost, target: "/api/backfill/config", body: `{"max_workers":2}`},
-		{name: "get embedder", method: http.MethodGet, target: "/api/embedder"},
-		{name: "embedder preview", method: http.MethodPost, target: "/api/embedder/preview", body: `{"kind":"local"}`},
-		{name: "embedder switch", method: http.MethodPost, target: "/api/embedder/switch", body: `{"kind":"local","confirm":true}`},
+	// User A's session can read entry 42 (their own)...
+	reqOwn := httptest.NewRequest(http.MethodGet, "/api/article?entry_id=42", nil)
+	withSessionCookie(reqOwn, testSessionCookieValue)
+	recOwn := httptest.NewRecorder()
+	handler.ServeHTTP(recOwn, reqOwn)
+	if recOwn.Code != http.StatusOK {
+		t.Fatalf("user A reading their own entry: status = %d, body = %s", recOwn.Code, recOwn.Body.String())
 	}
 
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			var req *http.Request
-			if c.body != "" {
-				req = httptest.NewRequest(c.method, c.target, strings.NewReader(c.body))
-				req.Header.Set("Content-Type", "application/json")
-			} else {
-				req = httptest.NewRequest(c.method, c.target, nil)
-			}
-			// Deliberately NO X-Auth-Token header anywhere in this test.
+	// ...but not entry 43, which belongs to user B.
+	reqOther := httptest.NewRequest(http.MethodGet, "/api/article?entry_id=43", nil)
+	withSessionCookie(reqOther, testSessionCookieValue)
+	recOther := httptest.NewRecorder()
+	handler.ServeHTTP(recOther, reqOther)
+	if recOther.Code != http.StatusNotFound {
+		t.Fatalf("user A reading user B's entry: status = %d, body = %s, want 404 (indistinguishable from non-existent)", recOther.Code, recOther.Body.String())
+	}
+
+	// Symmetrically, user B's OWN, DIFFERENT session cookie can read
+	// their own entry 43...
+	reqBOwn := httptest.NewRequest(http.MethodGet, "/api/article?entry_id=43", nil)
+	withSessionCookie(reqBOwn, testOtherSessionCookieValue)
+	recBOwn := httptest.NewRecorder()
+	handler.ServeHTTP(recBOwn, reqBOwn)
+	if recBOwn.Code != http.StatusOK {
+		t.Fatalf("user B reading their own entry: status = %d, body = %s", recBOwn.Code, recBOwn.Body.String())
+	}
+
+	// ...but not entry 42, which belongs to user A -- proving the two
+	// DISTINCT cookies actually resolve to two DISTINCT user ids (a bug
+	// that resolved every cookie to the same user, or swapped the two,
+	// would still pass the two checks above in isolation but fails this
+	// one).
+	reqBOther := httptest.NewRequest(http.MethodGet, "/api/article?entry_id=42", nil)
+	withSessionCookie(reqBOther, testOtherSessionCookieValue)
+	recBOther := httptest.NewRecorder()
+	handler.ServeHTTP(recBOther, reqBOther)
+	if recBOther.Code != http.StatusNotFound {
+		t.Fatalf("user B reading user A's entry: status = %d, body = %s, want 404", recBOther.Code, recBOther.Body.String())
+	}
+}
+
+// --- Task 18: requireAdmin on every control endpoint and the status page ---
+
+// controlAndStatusRequests is every route task 17 left unauthenticated
+// and task 18 now gates behind requireAdmin -- the same nine routes
+// TestControlAndStatusEndpointsRemainUnauthenticated (task 17) asserted
+// stayed OPEN; this is that test's replacement, since task 17's ruling is
+// now explicitly superseded (server.go's Server doc comment).
+var controlAndStatusRequests = []struct {
+	name   string
+	method string
+	target string
+	body   string
+}{
+	{name: "status page", method: http.MethodGet, target: "/"},
+	{name: "api status", method: http.MethodGet, target: "/api/status"},
+	{name: "backfill pause", method: http.MethodPost, target: "/api/backfill/pause"},
+	{name: "backfill resume", method: http.MethodPost, target: "/api/backfill/resume"},
+	{name: "backfill get config", method: http.MethodGet, target: "/api/backfill/config"},
+	{name: "backfill set config", method: http.MethodPost, target: "/api/backfill/config", body: `{"max_workers":2}`},
+	{name: "get embedder", method: http.MethodGet, target: "/api/embedder"},
+	{name: "embedder preview", method: http.MethodPost, target: "/api/embedder/preview", body: `{"kind":"local"}`},
+	{name: "embedder switch", method: http.MethodPost, target: "/api/embedder/switch", body: `{"kind":"local","confirm":true}`},
+}
+
+// newControlTestServer builds a Server over fb/manager plus keys+admins
+// fixtures with exactly two known users: adminUserID (is_admin=true) and
+// nonAdminUserID (present in keys, absent -- so false -- from admins).
+// adminToken/nonAdminToken authenticate as each via X-Auth-Token.
+const (
+	adminToken     = "sidecar-test-admin-token"
+	adminUserID    = 9001
+	nonAdminToken  = "sidecar-test-nonadmin-token"
+	nonAdminUserID = 9002
+)
+
+func newControlTestServer(t *testing.T, fb *fakeBackfill, manager EmbedderManager) http.Handler {
+	t.Helper()
+	keys := newFakeKeyValidator(map[string]int64{
+		adminToken:    adminUserID,
+		nonAdminToken: nonAdminUserID,
+	})
+	admins := newFakeAdminChecker(map[int64]bool{
+		adminUserID: true,
+		// nonAdminUserID is deliberately absent -- a map lookup miss
+		// reports false, exactly like store.Store.IsAdmin does for a real
+		// row with is_admin=false.
+	})
+	srv, err := New(fb, nil, nil, nil, nil, nil, manager, keys, nil, admins)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return srv.Handler()
+}
+
+func newControlRequest(c struct {
+	name   string
+	method string
+	target string
+	body   string
+}) *http.Request {
+	if c.body != "" {
+		req := httptest.NewRequest(c.method, c.target, strings.NewReader(c.body))
+		req.Header.Set("Content-Type", "application/json")
+		return req
+	}
+	return httptest.NewRequest(c.method, c.target, nil)
+}
+
+// TestControlAndStatusEndpointsRequireAdmin is task 18's central
+// authorisation guard, replacing task 17's
+// TestControlAndStatusEndpointsRemainUnauthenticated (that ruling is now
+// explicitly superseded -- see server.go's Server doc comment for why).
+// Asserted PER endpoint, PER case, exactly as the brief requires ("this
+// project has repeatedly shipped guards covering one route out of
+// several, every time caught only by mutation"):
+//
+//   - no credential at all -> 401
+//   - a valid, non-admin credential -> 403, never 200
+//   - a valid admin credential -> 200 (or at least not 401/403/5xx)
+func TestControlAndStatusEndpointsRequireAdmin(t *testing.T) {
+	newServer := func(t *testing.T) http.Handler {
+		fb := &fakeBackfill{cfg: indexer.RuntimeConfig{MinWorkers: 1, MaxWorkers: 2, BatchSize: 16, PageSize: 20}}
+		manager := &fakeEmbedderManager{}
+		return newControlTestServer(t, fb, manager)
+	}
+
+	for _, c := range controlAndStatusRequests {
+		t.Run(c.name+"/no credential", func(t *testing.T) {
+			handler := newServer(t)
+			req := newControlRequest(c)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
-
-			if rec.Code == http.StatusUnauthorized {
-				t.Fatalf("status = 401 with no API key; this endpoint is supposed to remain unauthenticated (body: %s)", rec.Body.String())
-			}
-			if rec.Code >= 500 {
-				t.Fatalf("status = %d, body = %s; expected this unauthenticated route to work, not fail server-side", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, body = %s, want 401 with no credential", rec.Code, rec.Body.String())
 			}
 		})
+
+		t.Run(c.name+"/non-admin credential", func(t *testing.T) {
+			handler := newServer(t)
+			req := newControlRequest(c)
+			req.Header.Set(authTokenHeader, nonAdminToken)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, body = %s, want 403 for a valid non-admin credential", rec.Code, rec.Body.String())
+			}
+		})
+
+		t.Run(c.name+"/admin credential", func(t *testing.T) {
+			handler := newServer(t)
+			req := newControlRequest(c)
+			req.Header.Set(authTokenHeader, adminToken)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+				t.Fatalf("status = %d, body = %s; an admin credential must not be rejected as unauthenticated/unauthorised", rec.Code, rec.Body.String())
+			}
+			if rec.Code >= 500 {
+				t.Fatalf("status = %d, body = %s; expected this admin-authenticated route to work, not fail server-side", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestControlAndStatusEndpointsFailClosedWithoutAdminChecker mirrors
+// TestProtectedEndpointFailsClosedWithoutKeyValidator for the admin gate:
+// a Server built with admins == nil (a misconfiguration -- cmd/sidecar
+// always supplies one) must fail CLOSED with 500 for a credential that
+// otherwise validates, never fall through to 200 because there was
+// nothing to check admin status against.
+func TestControlAndStatusEndpointsFailClosedWithoutAdminChecker(t *testing.T) {
+	fb := &fakeBackfill{}
+	keys := newFakeKeyValidator(map[string]int64{adminToken: adminUserID})
+	srv, err := New(fb, nil, nil, nil, nil, nil, nil, keys, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	handler := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Header.Set(authTokenHeader, adminToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s, want 500 (fail closed, not open) with no AdminChecker configured", rec.Code, rec.Body.String())
 	}
 }
