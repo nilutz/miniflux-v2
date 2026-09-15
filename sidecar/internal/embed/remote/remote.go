@@ -66,13 +66,21 @@ import (
 	"miniflux.app/v2/sidecar/internal/embed"
 )
 
-// wantDimensions is the fixed width search.passages.embedding requires
+// WantDimensions is the fixed width search.passages.embedding requires
 // (public.vector(384); spec §13.1). A remote reporting anything else is
 // a schema mismatch and must fail construction, not the first insert —
 // pgvector's fixed-width column would otherwise reject it there with a
 // confusing type error instead of this being caught as the model change
 // it is.
-const wantDimensions = 384
+//
+// Exported (Task 9) so internal/indexer's Manager can show the admin
+// page's Model section what the schema actually requires, and so a
+// probe/switch's dimension-mismatch refusal is traceable to one constant
+// rather than a second, independently maintained 384 literal -- the
+// nomic migration plan raises this to 768 in a schema migration, at
+// which point every reader of this constant changes with it instead of
+// silently disagreeing with the new column width.
+const WantDimensions = 384
 
 // DefaultTimeout is used for every request, including New's own startup
 // probe, when Config.Timeout is zero.
@@ -149,10 +157,10 @@ func New(cfg Config) (embed.Embedder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("embed/remote: probe %s: %w", e.endpoint, err)
 	}
-	if model.Dimensions != wantDimensions {
+	if model.Dimensions != WantDimensions {
 		return nil, fmt.Errorf(
 			"embed/remote: remote %s reports %d dimensions, but search.passages requires %d — a dimension change needs an explicit, operator-initiated re-index, not a config swap (spec §13.1)",
-			e.endpoint, model.Dimensions, wantDimensions,
+			e.endpoint, model.Dimensions, WantDimensions,
 		)
 	}
 	if err := validateIdentityComponents(model.Name, model.Revision); err != nil {

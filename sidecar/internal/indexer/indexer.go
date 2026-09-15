@@ -161,8 +161,24 @@ func genericCause(err error) string {
 
 // Indexer indexes one entry at a time into search.passages.
 type Indexer struct {
-	store    *store.Store
-	embedder embed.Embedder
+	store *store.Store
+
+	// embedderMu guards embedder itself (Task 9, spec §13.1: the admin
+	// page's live embedder switch). It is held as a WRITE lock only for
+	// the instant SetEmbedder replaces the pointer, and as a READ lock for
+	// the full duration of every call that actually invokes the embedder
+	// -- not merely a snapshot read of the pointer -- so that
+	// sync.RWMutex's own guarantee ("once Lock is pending, no new RLock
+	// proceeds until it completes, and Lock itself blocks until every
+	// currently-held RLock is released") is what proves no goroutine can
+	// still be calling EmbedDocuments/EmbedQuery on the embedder
+	// SetEmbedder just replaced, by the time SetEmbedder returns -- see
+	// SetEmbedder and embedBatch/AsEmbedder below. Closing that embedder
+	// immediately afterward is therefore safe: for the ONNX backend, a
+	// concurrent native call into a closed session is a segfault, not an
+	// error, so this has to be a guarantee, not a best effort.
+	embedderMu sync.RWMutex
+	embedder   embed.Embedder
 
 	mu        sync.Mutex
 	batchSize int // live-editable (spec §9.2); guarded by mu, always read via BatchSize()
@@ -210,6 +226,94 @@ func (idx *Indexer) BatchSize() int {
 	defer idx.mu.Unlock()
 	return idx.batchSize
 }
+
+// Embedder returns the currently configured embedder, for read-only
+// inspection (the admin page's Model section, tests). It takes only a
+// momentary read lock to copy the interface value out -- safe even
+// against a concurrent SetEmbedder/Close, since Identity()/Dimensions()
+// are plain field reads for every implementation today, not native
+// calls.
+//
+// Do not use this to actually CALL the embedder (EmbedDocuments/
+// EmbedQuery): the lock is released before the caller does anything with
+// the returned value, so a SetEmbedder+Close racing immediately after
+// this returns is exactly the segfault this file's other embedder-access
+// paths (the batch loop below, AsEmbedder) exist to prevent. Those hold
+// embedderMu.RLock for the call's entire duration instead.
+func (idx *Indexer) Embedder() embed.Embedder {
+	idx.embedderMu.RLock()
+	defer idx.embedderMu.RUnlock()
+	return idx.embedder
+}
+
+// SetEmbedder atomically replaces the configured embedder and returns the
+// one it replaced. It blocks until every embedBatch/AsEmbedder call
+// already in flight against the OLD embedder has returned -- see
+// embedderMu's own doc comment for the sync.RWMutex guarantee that makes
+// this true -- which is what makes it safe for a caller to Close the
+// returned embedder immediately afterward with no risk of a concurrent
+// native call still in progress against it.
+//
+// SetEmbedder does not call store.SetModelIdentity and does not pause
+// either indexing lane -- see Manager.Switch, the only production caller,
+// for the full sequence (pause both lanes, SetEmbedder, SetModelIdentity,
+// close the old embedder, resume both lanes).
+func (idx *Indexer) SetEmbedder(e embed.Embedder) embed.Embedder {
+	idx.embedderMu.Lock()
+	defer idx.embedderMu.Unlock()
+	old := idx.embedder
+	idx.embedder = e
+	return old
+}
+
+// Close releases the currently configured embedder's underlying session.
+// cmd/sidecar defers this instead of closing whatever embedder it
+// originally constructed directly, so that shutdown always closes
+// whichever embedder is active NOW -- the one a live switch (Task 9) may
+// have since swapped in -- not a stale reference to the one main()
+// started with.
+func (idx *Indexer) Close() error {
+	return idx.Embedder().Close()
+}
+
+// AsEmbedder returns an embed.Embedder that always delegates to whichever
+// embedder is CURRENTLY configured, rather than a value fixed once at
+// construction. Pass this, never a raw embed.Embedder pulled from
+// Embedder() above, to anything that must keep working correctly across a
+// live embedder switch (Task 9) -- cmd/sidecar's search.WithEmbedder call
+// is the one production caller: without this indirection, the Searcher
+// would keep calling EmbedQuery on a *closed* embedder after a switch,
+// which is a segfault for the ONNX backend, not an error.
+func (idx *Indexer) AsEmbedder() embed.Embedder { return indexerEmbedder{idx} }
+
+// indexerEmbedder adapts *Indexer to embed.Embedder by delegating every
+// call through embedBatch/embedQuery, which hold embedderMu.RLock for the
+// call's full duration -- see embedderMu's own doc comment. Dimensions and
+// Identity are plain field reads even on a closed embedder for every
+// implementation today, so those two use the momentary Embedder()
+// snapshot rather than holding the lock for a call that cannot itself
+// race with Close.
+type indexerEmbedder struct{ idx *Indexer }
+
+func (d indexerEmbedder) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	d.idx.embedderMu.RLock()
+	defer d.idx.embedderMu.RUnlock()
+	return d.idx.embedder.EmbedDocuments(ctx, texts)
+}
+
+func (d indexerEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	d.idx.embedderMu.RLock()
+	defer d.idx.embedderMu.RUnlock()
+	return d.idx.embedder.EmbedQuery(ctx, text)
+}
+
+func (d indexerEmbedder) Dimensions() int  { return d.idx.Embedder().Dimensions() }
+func (d indexerEmbedder) Identity() string { return d.idx.Embedder().Identity() }
+
+// Close is a no-op: indexerEmbedder is a view onto *Indexer's own
+// lifecycle (see Indexer.Close), never an owner of one -- nothing that
+// receives an AsEmbedder() value may close it.
+func (d indexerEmbedder) Close() error { return nil }
 
 // IndexEntry indexes a single entry: it loads the entry's content, and if
 // its content hash matches what is already recorded as successfully
@@ -279,11 +383,6 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	// loop below embeds both kinds uniformly. Embedding the title costs
 	// one extra short forward pass per entry, negligible against the
 	// entry's own 4-6 body passages.
-	type sourcedPassage struct {
-		text               string
-		charStart, charEnd int
-		source             string
-	}
 	var combined []sourcedPassage
 	if title != "" {
 		combined = append(combined, sourcedPassage{text: title, charStart: 0, charEnd: len(title), source: "title"})
@@ -291,6 +390,50 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 	for _, p := range bodyPassages {
 		combined = append(combined, sourcedPassage{text: p.Text, charStart: p.CharStart, charEnd: p.CharEnd, source: "content"})
 	}
+
+	rows, err := idx.embedPassages(ctx, entryID, entry.ContentHash, combined)
+	if err != nil {
+		return err
+	}
+
+	if err := idx.store.ReplacePassages(entryID, entry.ContentHash, rows); err != nil {
+		return fmt.Errorf("%w #%d: %w", errWritePassages, entryID, err)
+	}
+
+	return nil
+}
+
+// sourcedPassage is one passage awaiting embedding -- title or body --
+// carrying enough to become a store.PassageRow once embedPassages has its
+// vector. Package-level (not local to IndexEntry) purely so embedPassages
+// can take a slice of it as a parameter.
+type sourcedPassage struct {
+	text               string
+	charStart, charEnd int
+	source             string
+}
+
+// embedPassages embeds every one of combined's passages in batches of
+// BatchSize(), returning one store.PassageRow per passage in the same
+// order. It holds embedderMu.RLock for its entire duration (see that
+// field's own doc comment on *Indexer) -- not merely a snapshot read of
+// the embedder pointer -- for two reasons together: it is what lets
+// SetEmbedder (Task 9's live embedder switch) prove no in-flight call
+// remains before the caller closes the replaced embedder, and it
+// guarantees every passage of THIS entry is embedded by the SAME
+// embedder object even if a switch happens to land between two of this
+// entry's own batches -- otherwise a single entry could end up with some
+// passages embedded by the old model and some by the new one, written
+// together under one content_hash. (A mixed entry like that is not
+// permanent corruption either way -- contentHash is computed once, before
+// this runs, from whichever model was configured at IndexEntry's start,
+// so a mismatch against the model that ends up producing some of its
+// vectors makes PendingEntryIDs re-offer it on the very next pass -- but
+// holding the lock for the whole call avoids ever producing one.)
+func (idx *Indexer) embedPassages(ctx context.Context, entryID int64, contentHash string, combined []sourcedPassage) ([]store.PassageRow, error) {
+	idx.embedderMu.RLock()
+	defer idx.embedderMu.RUnlock()
+	e := idx.embedder
 
 	batchSize := idx.BatchSize()
 	rows := make([]store.PassageRow, len(combined))
@@ -302,7 +445,7 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 			texts[i-batchStart] = combined[i].text
 		}
 
-		vectors, err := idx.embedder.EmbedDocuments(ctx, texts)
+		vectors, err := e.EmbedDocuments(ctx, texts)
 		if err != nil {
 			if ctx.Err() != nil {
 				// ctx was cancelled (shutdown, or a backfill/live lane
@@ -313,7 +456,7 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 				// "failed" row on every graceful shutdown — leave it
 				// exactly as it was; PendingEntryIDs offers it again next
 				// time, identical to an entry that was never attempted.
-				return fmt.Errorf("%w #%d: %w", errInterrupted, entryID, err)
+				return nil, fmt.Errorf("%w #%d: %w", errInterrupted, entryID, err)
 			}
 			if errors.Is(err, embed.ErrUnavailable) {
 				// LANE-level, not this entry's fault (spec §13.1): the
@@ -331,13 +474,13 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 				// unwind it. The backfill and live lanes call
 				// isEmbedderUnavailable on this error to pause
 				// themselves instead of counting a per-entry failure.
-				return fmt.Errorf("%w #%d: %w", errEmbedderUnavailable, entryID, err)
+				return nil, fmt.Errorf("%w #%d: %w", errEmbedderUnavailable, entryID, err)
 			}
 			reason := fmt.Sprintf("embedding failed: %v", err)
-			if markErr := idx.store.MarkEntryFailed(entryID, entry.ContentHash, reason); markErr != nil {
-				return fmt.Errorf("%w #%d: could not be marked failed (%v) after: %w", errMarkFailed, entryID, markErr, err)
+			if markErr := idx.store.MarkEntryFailed(entryID, contentHash, reason); markErr != nil {
+				return nil, fmt.Errorf("%w #%d: could not be marked failed (%v) after: %w", errMarkFailed, entryID, markErr, err)
 			}
-			return fmt.Errorf("%w #%d: %w", errEmbed, entryID, err)
+			return nil, fmt.Errorf("%w #%d: %w", errEmbed, entryID, err)
 		}
 
 		for i, vector := range vectors {
@@ -353,9 +496,5 @@ func (idx *Indexer) IndexEntry(ctx context.Context, entryID int64) error {
 		}
 	}
 
-	if err := idx.store.ReplacePassages(entryID, entry.ContentHash, rows); err != nil {
-		return fmt.Errorf("%w #%d: %w", errWritePassages, entryID, err)
-	}
-
-	return nil
+	return rows, nil
 }

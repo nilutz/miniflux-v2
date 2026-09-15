@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // Entry is the subset of a Miniflux entry the indexer needs: its title and
@@ -82,26 +83,51 @@ var pipelineVersion = PipelineVersion
 // pipelineVersion is one: exactly one value compared on both the Go side
 // and the SQL side, set once via SetModelIdentity by whoever constructs
 // the configured Embedder (indexer.New), and otherwise left alone.
-// Production sets it once at startup and never mutates it afterwards;
-// this package's own tests bump it directly, exactly like
-// pipelineVersion, to exercise the "model changed" path.
+// Task 9 (spec §13.1) made this mutable well after startup, not just
+// once: the admin page's live embedder switch calls SetModelIdentity
+// while backfill workers may be concurrently calling contentHash via
+// EntryForIndexing/PendingEntryIDs/PendingEntryCount, on other
+// goroutines, RIGHT NOW -- exactly the scenario a plain, unguarded
+// package-level var is not safe for, and exactly what -race caught the
+// first time a switch test exercised it against an actively-indexing
+// lane. modelIdentityMu guards every access, read or write, below;
+// modelIdentity itself must never be read or written outside
+// getModelIdentity/SetModelIdentity.
 //
 // Deliberately not exported as a var itself (SetModelIdentity is the only
 // way to change it from outside this package) so that nothing outside
 // this file can set it to something that does not actually come from an
 // Embedder's own Identity().
-var modelIdentity string
+var (
+	modelIdentityMu sync.RWMutex
+	modelIdentity   string
+)
 
 // SetModelIdentity records the identity of the embedding model currently
 // configured to produce vectors (embed.Embedder.Identity()), so that
 // switching models — a different remote host, a different revision, a
 // different width entirely — marks every entry pending on its own,
-// exactly as a PipelineVersion bump already does (spec §13.1). Call it
-// once at startup with the configured Embedder's Identity(); leaving it
-// unset is indistinguishable from every configured model sharing the same
-// (empty) identity, which reintroduces the exact gap this exists to close.
+// exactly as a PipelineVersion bump already does (spec §13.1). Called
+// once at startup with the configured Embedder's Identity(), and again by
+// Manager.Switch (Task 9) on every live embedder switch thereafter --
+// leaving it unset is indistinguishable from every configured model
+// sharing the same (empty) identity, which reintroduces the exact gap
+// this exists to close.
 func SetModelIdentity(identity string) {
+	modelIdentityMu.Lock()
+	defer modelIdentityMu.Unlock()
 	modelIdentity = identity
+}
+
+// getModelIdentity is the only place contentHash/PendingEntryIDs/
+// PendingEntryCount may read modelIdentity from -- see modelIdentityMu's
+// own doc comment for why a direct read is a data race, not merely bad
+// style, now that Task 9 can call SetModelIdentity concurrently with a
+// backfill or live lane in full flight.
+func getModelIdentity() string {
+	modelIdentityMu.RLock()
+	defer modelIdentityMu.RUnlock()
+	return modelIdentity
 }
 
 // contentHash returns the hash recorded in
@@ -122,7 +148,7 @@ func SetModelIdentity(identity string) {
 // coalescing it on the SQL side costs nothing and keeps the two sides
 // symmetric with how content is already handled.
 func contentHash(title, content string) string {
-	sum := md5.Sum([]byte(pipelineVersion + modelIdentity + title + content))
+	sum := md5.Sum([]byte(pipelineVersion + getModelIdentity() + title + content))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -180,7 +206,7 @@ func (s *Store) PendingEntryIDs(afterID int64, limit int) ([]int64, error) {
 		LIMIT $2
 	`
 
-	rows, err := s.db.Query(query, afterID, limit, pipelineVersion, modelIdentity)
+	rows, err := s.db.Query(query, afterID, limit, pipelineVersion, getModelIdentity())
 	if err != nil {
 		return nil, fmt.Errorf("store: unable to fetch pending entry ids: %w", err)
 	}
@@ -243,7 +269,7 @@ func (s *Store) PendingEntryCount(afterID int64) (int64, error) {
 		    OR s.status = 'failed'
 		    OR s.content_hash <> md5($2 || $3 || coalesce(e.title, '') || coalesce(e.content, ''))
 		  )
-	`, afterID, pipelineVersion, modelIdentity).Scan(&count)
+	`, afterID, pipelineVersion, getModelIdentity()).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("store: unable to count pending entries: %w", err)
 	}

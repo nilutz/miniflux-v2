@@ -49,7 +49,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "sidecar runs the Miniflux search sidecar: live indexing, throttled backfill, and the status/admin page.\n\n")
 		fmt.Fprintf(os.Stderr, "Configuration is via environment variables:\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_DATABASE_URL   Postgres DSN (required)\n")
-		fmt.Fprintf(os.Stderr, "  SIDECAR_EMBEDDER       \"local\" (default) or \"remote\" — where embedding runs (spec §13.1)\n")
+		fmt.Fprintf(os.Stderr, "  SIDECAR_EMBEDDER       \"local\" (default) or \"remote\" — where embedding runs (spec §13.1).\n")
+		fmt.Fprintf(os.Stderr, "                         Only the INITIAL default: once an operator switches embedders from\n")
+		fmt.Fprintf(os.Stderr, "                         the admin page's Model section, the persisted choice wins on every\n")
+		fmt.Fprintf(os.Stderr, "                         later restart and this variable is ignored until the settings row is cleared.\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_MODEL_PATH     path to the quantized ONNX model file (required when SIDECAR_EMBEDDER=local)\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_ONNX_LIB_DIR   directory containing the native ONNX Runtime library (optional, local only)\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_REMOTE_EMBEDDER_URL      base URL of the remote embedding service (required when SIDECAR_EMBEDDER=remote)\n")
@@ -233,6 +236,73 @@ func loadBackfillPatch() (indexer.ConfigPatch, error) {
 	return patch, nil
 }
 
+// resolvedEmbedderChoice is what actually gets constructed at startup:
+// kind ("local" or "remote") and, for "remote", the URL — after spec
+// §13.1's startup rule has been applied (see resolveEmbedderChoice).
+type resolvedEmbedderChoice struct {
+	kind      string
+	remoteURL string
+}
+
+// resolveEmbedderChoice applies spec §13.1's startup rule: "the
+// persisted row wins; SIDECAR_EMBEDDER and SIDECAR_REMOTE_EMBEDDER_URL
+// are the initial default used only when no row exists." persisted is
+// nil when an operator has never switched embedders through the admin
+// page (store.GetEmbedderSettings' own nil-means-no-row contract) — in
+// that case, and only then, cfg's own environment-variable-derived
+// kind/URL are used.
+//
+// A pure function, not inlined into run(), specifically so the rule that
+// matters — which one wins when BOTH are set to something — is
+// unit-testable without a database: see
+// TestResolveEmbedderChoicePrefersPersistedRowOverEnvironmentVariable,
+// which sets the two to DIFFERENT values and asserts which one actually
+// took effect. A test that sets only one of them (leaving the other at
+// its zero value) cannot tell "persisted wins" apart from "whichever one
+// happened to be non-empty wins" — that is the trap the task 9 brief
+// calls out by name.
+func resolveEmbedderChoice(cfg config, persisted *store.EmbedderSettings) resolvedEmbedderChoice {
+	if persisted != nil {
+		return resolvedEmbedderChoice{kind: persisted.Kind, remoteURL: persisted.RemoteURL}
+	}
+	return resolvedEmbedderChoice{kind: cfg.embedderKind, remoteURL: cfg.remoteURL}
+}
+
+// newEmbedderFactory builds the indexer.EmbedderFactory Manager.Switch
+// uses to construct a candidate embedder for a probe/preview/switch —
+// closing over cfg's local model path/ONNX library dir and the
+// operationally configured remote timeout, exactly like run()'s own
+// startup construction above, so a later switch is held to the same
+// configuration a restart would have used. timeout, when positive,
+// overrides cfg.remoteTimeout for a "remote" candidate — Manager passes
+// a short, fixed one for its own background reachability checks so a
+// down remote cannot make an admin page load hang for
+// remote.DefaultTimeout.
+//
+// This is cmd/sidecar's own reason to exist as the only package that
+// imports internal/embed/onnx: internal/indexer never does, so
+// `go test ./internal/indexer/...` never needs the native ONNX Runtime /
+// libtokenizers libraries onnx.NewONNX requires.
+func newEmbedderFactory(cfg config) indexer.EmbedderFactory {
+	return func(ctx context.Context, kind, remoteURL string, timeout time.Duration) (embed.Embedder, string, error) {
+		switch kind {
+		case "remote":
+			t := timeout
+			if t <= 0 {
+				t = cfg.remoteTimeout
+			}
+			e, err := remote.New(remote.Config{URL: remoteURL, Timeout: t})
+			return e, "", err
+		default:
+			e, err := onnx.NewONNX(onnx.ONNXConfig{
+				ModelPath:      cfg.modelPath,
+				ONNXLibraryDir: cfg.onnxLibDir,
+			})
+			return e, onnx.BackendName(), err
+		}
+	}
+}
+
 func run() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -253,11 +323,33 @@ func run() error {
 		return fmt.Errorf("sidecar: unable to run migrations: %w", err)
 	}
 
+	// Task 9, spec §13.1: "the persisted row wins; SIDECAR_EMBEDDER and
+	// SIDECAR_REMOTE_EMBEDDER_URL are the initial default used only when
+	// no row exists." Without this, the compose stack's
+	// `restart: unless-stopped` would silently revert an operator's
+	// switch back to the environment variables' default on every
+	// container restart — and because that changes the model identity,
+	// it would re-index the entire corpus with nobody asking.
+	persisted, err := s.GetEmbedderSettings(context.Background())
+	if err != nil {
+		return fmt.Errorf("sidecar: unable to read persisted embedder settings: %w", err)
+	}
+	choice := resolveEmbedderChoice(cfg, persisted)
+	if persisted != nil {
+		slog.Info("sidecar: using the persisted embedder choice from the admin page",
+			slog.String("kind", choice.kind),
+			slog.Time("switched_at", persisted.UpdatedAt),
+		)
+	}
+
+	embedderFactory := newEmbedderFactory(cfg)
+
 	var embedder embed.Embedder
-	switch cfg.embedderKind {
+	var backend string
+	switch choice.kind {
 	case "remote":
 		embedder, err = remote.New(remote.Config{
-			URL:     cfg.remoteURL,
+			URL:     choice.remoteURL,
 			Timeout: cfg.remoteTimeout,
 		})
 		if err != nil {
@@ -271,17 +363,26 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("sidecar: unable to create embedder: %w", err)
 		}
+		backend = onnx.BackendName()
 
 		// Logged unconditionally on every startup of the local embedder.
 		// In production, a line reading "GoMLX" here instead of "ORT" is
 		// the only visible symptom that this binary was built without
 		// -tags ORT and is running roughly 10x slower than expected — see
-		// internal/embed/onnx/backend_noort.go.
-		slog.Info("sidecar: embedder ready", slog.String("backend", onnx.BackendName()))
+		// internal/embed/onnx/backend_noort.go. The admin page's Model
+		// section (Task 9) shows the same value continuously, not only in
+		// this one startup log line.
+		slog.Info("sidecar: embedder ready", slog.String("backend", backend))
 	}
-	defer embedder.Close()
 
 	ix := indexer.New(s, embedder)
+	// ix.Close, not a deferred embedder.Close(): Task 9's live embedder
+	// switch (Manager.Switch) can replace ix's configured embedder any
+	// number of times before shutdown, and closing the ORIGINAL embedder
+	// here would either double-close it (if it is still active) or leak
+	// whichever one actually ended up active. Indexer.Close always closes
+	// whichever embedder is configured right now.
+	defer ix.Close()
 
 	// liveMonitor tracks the live lane's own embedder-pause state,
 	// entirely separate from the backfill lane's (spec §13.1, requirement
@@ -320,9 +421,28 @@ func run() error {
 	// satisfies web.EntryLookup (EntryForIndexing, EntryIndexState) and
 	// web.DatabaseMetricsSource (DatabaseMetrics — spec §13.2) with no
 	// adaptation, so it is passed to web.New twice more for those.
-	searcher := search.NewSearcher(s, search.WithEmbedder(embedder))
+	//
+	// ix.AsEmbedder(), not the raw embedder value: the Searcher must keep
+	// working correctly across a live embedder switch (Task 9) too — a
+	// static embed.Embedder value fixed here would keep calling EmbedQuery
+	// on a *closed* embedder the moment Manager.Switch replaces it, which
+	// is a segfault for the ONNX backend, not an error.
+	searcher := search.NewSearcher(s, search.WithEmbedder(ix.AsEmbedder()))
 
-	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s)
+	// manager owns the live embedder switch end to end (Task 9, spec
+	// §13.1): the admin page's Model section reads its Info, tests a
+	// candidate through its Preview, and applies a choice through its
+	// Switch, which quiesces both lanes, guarantees no in-flight embed
+	// call before closing the previous embedder, publishes the new one
+	// through ix's synchronised accessor, records its identity with the
+	// store, persists the choice, and resumes both lanes.
+	manager := indexer.NewManager(ix, backfill, liveMonitor, s, embedderFactory, indexer.EmbedderInfo{
+		Kind:      choice.kind,
+		Backend:   backend,
+		RemoteURL: choice.remoteURL,
+	})
+
+	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s, manager)
 	if err != nil {
 		return fmt.Errorf("sidecar: unable to build admin server: %w", err)
 	}

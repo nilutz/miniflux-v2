@@ -41,11 +41,16 @@ const (
 
 // LiveStats is the live lane's status snapshot for the admin page (spec
 // §13.1's requirement 3: the page must say which lane is paused and why).
-// The live lane has no operator Pause()/Resume() of its own and no
-// backlog/throughput concept like Backfill.Stats() -- it only ever
-// auto-pauses for the one reason Backfill can also auto-pause for, so
-// this carries just that.
+// The live lane has no backlog/throughput concept like Backfill.Stats()
+// -- it only ever auto-pauses for the one reason Backfill can also
+// auto-pause for, plus (Task 9) the same operator pause Backfill has
+// always had, so this carries just those.
 type LiveStats struct {
+	// Paused is true between Pause() and the matching Resume() -- an
+	// OPERATOR pause (Task 9), mirroring Backfill.Stats().Paused exactly;
+	// see EmbedderPaused below for the lane's own automatic one.
+	Paused bool
+
 	// EmbedderPaused is true while the live lane is not attempting new
 	// ids because the embedder reported itself unavailable
 	// (isEmbedderUnavailable; spec §13.1) -- kept as the live lane's OWN
@@ -76,18 +81,97 @@ type LiveStats struct {
 // able to show DIFFERENT pause states at the same time, so each needs its
 // own place to keep one.
 //
-// A nil *LiveMonitor is valid and simply does nothing -- runLive/RunLive
-// never require one, so tests that don't care about pause visibility
-// don't need to construct one.
+// Task 9 (spec §13.1) additionally gave it an OPERATOR pause -- paused/
+// resumeCh below -- mirroring Backfill's own Pause/Resume/resumeCh
+// exactly, rather than inventing a second pause mechanism: the live lane
+// previously had no way for anything outside itself to stop it starting
+// new work, which Manager.Switch needs so it can quiesce both lanes
+// before swapping the embedder they share.
+//
+// A nil *LiveMonitor is valid and every method on it is a no-op (Pause/
+// Resume) or returns the zero value (Stats) -- runLive/RunLive never
+// require one, so tests that don't care about pause visibility don't need
+// to construct one.
 type LiveMonitor struct {
 	mu                  sync.Mutex
 	embedderPaused      bool
 	embedderPauseReason string
 	requiresRestart     bool
+
+	// paused/resumeCh are the operator pause (Task 9), guarded by the same
+	// mu as the fields above -- structurally identical to Backfill's own
+	// paused/resumeCh (see backfill.go's Pause/Resume/waitWhilePaused):
+	// Pause sets paused and lets a batch/tick already in flight finish;
+	// Resume closes resumeCh to wake every waiter and replaces it with a
+	// fresh one, exactly the "close to broadcast, then swap" pattern
+	// Backfill already uses.
+	paused   bool
+	resumeCh chan struct{}
 }
 
 // NewLiveMonitor builds a LiveMonitor with no pause recorded yet.
-func NewLiveMonitor() *LiveMonitor { return &LiveMonitor{} }
+func NewLiveMonitor() *LiveMonitor { return &LiveMonitor{resumeCh: make(chan struct{})} }
+
+// Pause requests that the live lane stop starting new attempts -- the
+// live-lane counterpart to Backfill.Pause, added for Task 9's embedder
+// switch (Manager.Switch quiesces both lanes the same way before
+// swapping). A tick already in progress is allowed to finish attempting
+// the ids it already fetched (checked between ticks, never mid-tick, the
+// same discipline Backfill uses between batches); after that, runLive
+// blocks until Resume. Safe to call from any goroutine, nil-tolerant like
+// every other LiveMonitor method.
+func (m *LiveMonitor) Pause() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.paused = true
+}
+
+// Resume releases a paused live lane, waking a blocked runLive
+// immediately. Calling it when not paused is a harmless no-op, mirroring
+// Backfill.Resume.
+func (m *LiveMonitor) Resume() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.paused {
+		m.paused = false
+		close(m.resumeCh)
+		m.resumeCh = make(chan struct{})
+	}
+}
+
+// waitWhilePaused blocks while the live lane is paused by the operator,
+// returning false if ctx is cancelled while waiting and true otherwise
+// (including immediately, when not paused or when m is nil) -- the
+// live-lane counterpart to Backfill.waitWhilePaused's operator-pause
+// branch.
+func (m *LiveMonitor) waitWhilePaused(ctx context.Context) bool {
+	if m == nil {
+		return true
+	}
+	for {
+		m.mu.Lock()
+		paused := m.paused
+		ch := m.resumeCh
+		m.mu.Unlock()
+
+		if !paused {
+			return true
+		}
+
+		select {
+		case <-ch:
+			continue
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
 
 // pauseForEmbedder records the live lane pausing for the embedder,
 // mirroring Backfill.pauseForEmbedder -- idempotent, safe to call from the
@@ -124,6 +208,7 @@ func (m *LiveMonitor) Stats() LiveStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return LiveStats{
+		Paused:                       m.paused,
 		EmbedderPaused:               m.embedderPaused,
 		EmbedderPauseReason:          m.embedderPauseReason,
 		EmbedderPauseRequiresRestart: m.requiresRestart,
@@ -261,6 +346,15 @@ func runLive(ctx context.Context, ix *Indexer, interval time.Duration, startAfte
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+		}
+
+		// Checked once per tick, never mid-tick -- the same discipline
+		// Backfill applies between batches (spec §9.2) -- so an operator
+		// pause (Task 9) never interrupts ids already being attempted,
+		// only stops the NEXT tick from starting. Blocks here until
+		// Resume(); a nil monitor never blocks.
+		if !monitor.waitWhilePaused(ctx) {
+			return nil
 		}
 
 		now := time.Now()

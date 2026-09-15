@@ -132,7 +132,7 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	// for that, via newTestServerWithLive). nil, nil, nil: no search
 	// service/entries/metrics source either -- see search_handlers_test.go
 	// for the first two and TestStatusPage*Metrics* below for the third.
-	srv, err := New(fb, nil, nil, nil, nil)
+	srv, err := New(fb, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -144,7 +144,7 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 // renders distinctly from the backfill lane's.
 func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.Handler {
 	t.Helper()
-	srv, err := New(fb, live, nil, nil, nil)
+	srv, err := New(fb, live, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -156,7 +156,70 @@ func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.H
 // database-size section renders from it.
 func newTestServerWithMetrics(t *testing.T, fb *fakeBackfill, metrics DatabaseMetricsSource) http.Handler {
 	t.Helper()
-	srv, err := New(fb, nil, nil, nil, metrics)
+	srv, err := New(fb, nil, nil, nil, metrics, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return srv.Handler()
+}
+
+// fakeEmbedderManager is a hermetic stand-in for *indexer.Manager: it
+// satisfies EmbedderManager by returning fixed, caller-set results and
+// recording every call it receives, so tests can exercise the Model
+// section's HTTP surface (Task 9, spec §13.1) without a real store,
+// embedder, or native ONNX Runtime library anywhere nearby.
+type fakeEmbedderManager struct {
+	mu sync.Mutex
+
+	info         indexer.EmbedderInfo
+	preview      indexer.SwitchPreview
+	switchResult indexer.SwitchResult
+	switchErr    error
+
+	previewCalls []struct{ kind, remoteURL string }
+	switchCalls  []struct {
+		kind, remoteURL string
+		confirm         bool
+	}
+}
+
+func (f *fakeEmbedderManager) Info(context.Context) indexer.EmbedderInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.info
+}
+
+func (f *fakeEmbedderManager) Preview(_ context.Context, kind, remoteURL string) indexer.SwitchPreview {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.previewCalls = append(f.previewCalls, struct{ kind, remoteURL string }{kind, remoteURL})
+	return f.preview
+}
+
+func (f *fakeEmbedderManager) Switch(_ context.Context, kind, remoteURL string, confirm bool) (indexer.SwitchResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.switchCalls = append(f.switchCalls, struct {
+		kind, remoteURL string
+		confirm         bool
+	}{kind, remoteURL, confirm})
+	if f.switchErr != nil {
+		return indexer.SwitchResult{}, f.switchErr
+	}
+	return f.switchResult, nil
+}
+
+func (f *fakeEmbedderManager) switchCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.switchCalls)
+}
+
+// newTestServerWithManager is newTestServer plus a real, non-nil
+// EmbedderManager, for the tests that check the Model section (Task 9).
+func newTestServerWithManager(t *testing.T, fb *fakeBackfill, manager EmbedderManager) http.Handler {
+	t.Helper()
+	srv, err := New(fb, nil, nil, nil, nil, manager)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -981,4 +1044,244 @@ func passagesPerEntryRow(t *testing.T, body string) string {
 		t.Fatalf("could not find the end of the passages-per-entry row in the page:\n%s", body)
 	}
 	return body[start : start+end]
+}
+
+// --- Task 9: the admin page's Model section and its HTTP surface ---
+
+func TestGetEmbedderReturnsCurrentInfo(t *testing.T) {
+	manager := &fakeEmbedderManager{info: indexer.EmbedderInfo{
+		Kind:       "remote",
+		Identity:   "bge-small-en-v1.5@abc123#384",
+		Dimensions: 384,
+		RemoteURL:  "http://gpu-host:9000",
+		Reachable:  true,
+	}}
+	handler := newTestServerWithManager(t, &fakeBackfill{}, manager)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/embedder", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got indexer.EmbedderInfo
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Identity != "bge-small-en-v1.5@abc123#384" || got.RemoteURL != "http://gpu-host:9000" {
+		t.Fatalf("got %+v, want the fake manager's fixed info", got)
+	}
+}
+
+// TestGetEmbedderUnavailableWithoutManager proves the Model section's API
+// degrades honestly (the Addendum: "a section whose data is unavailable
+// ... must say so") rather than panicking or serving a misleading 200.
+func TestGetEmbedderUnavailableWithoutManager(t *testing.T) {
+	handler := newTestServer(t, &fakeBackfill{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/embedder", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+}
+
+// TestStatusPageShowsModelUnavailableWithoutManager is the same guard at
+// the HTML page: a nil EmbedderManager must render an explicit
+// unavailable message in the Model section, never an empty or silently
+// missing panel.
+func TestStatusPageShowsModelUnavailableWithoutManager(t *testing.T) {
+	handler := newTestServer(t, &fakeBackfill{})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "Embedder controls unavailable") {
+		t.Fatalf("expected the Model section to say controls are unavailable without a manager, got:\n%s", body)
+	}
+}
+
+// TestStatusPageRendersModelSectionBehindTheSidebar proves the Addendum's
+// core requirement: the page has a sidebar nav, and the Model section
+// (this task's embedder controls) is reachable through it and actually
+// renders the manager's current identity -- not appended as a fifth
+// stacked section with no navigation, and not silently absent.
+func TestStatusPageRendersModelSectionBehindTheSidebar(t *testing.T) {
+	manager := &fakeEmbedderManager{info: indexer.EmbedderInfo{
+		Kind:             "local",
+		Backend:          "ORT",
+		Identity:         "bge-small-en-v1.5@sha256deadbeef#384",
+		Dimensions:       384,
+		SchemaDimensions: 384,
+	}}
+	handler := newTestServerWithManager(t, &fakeBackfill{}, manager)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<nav class="sidebar">`,
+		`href="#status"`,
+		`href="#database"`,
+		`href="#indexing"`,
+		`href="#model"`,
+		`id="model"`,
+		"bge-small-en-v1.5@sha256deadbeef#384",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected the page to contain %q, got:\n%s", want, body)
+		}
+	}
+}
+
+func TestEmbedderPreviewForwardsToManagerAndReturnsResult(t *testing.T) {
+	manager := &fakeEmbedderManager{preview: indexer.SwitchPreview{
+		ProbeResult: indexer.ProbeResult{Reachable: true, Identity: "candidate@rev#384", Dimensions: 384},
+		Kind:        "remote",
+		RemoteURL:   "http://gpu-host:9000",
+		EntryCount:  436,
+	}}
+	handler := newTestServerWithManager(t, &fakeBackfill{}, manager)
+
+	body := strings.NewReader(`{"kind":"remote","remote_url":"http://gpu-host:9000"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/embedder/preview", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got struct {
+		Identity   string `json:"identity"`
+		EntryCount int64  `json:"entry_count"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Identity != "candidate@rev#384" || got.EntryCount != 436 {
+		t.Fatalf("got %+v, want the fake manager's fixed preview", got)
+	}
+
+	if len(manager.previewCalls) != 1 || manager.previewCalls[0].kind != "remote" || manager.previewCalls[0].remoteURL != "http://gpu-host:9000" {
+		t.Fatalf("expected Preview to be called once with (remote, http://gpu-host:9000), got %+v", manager.previewCalls)
+	}
+	// Section 3: a probe must never swap anything -- Switch must not have
+	// been called at all by a preview request.
+	if manager.switchCallCount() != 0 {
+		t.Fatalf("expected Preview to never call Switch, got %d Switch calls", manager.switchCallCount())
+	}
+}
+
+func TestEmbedderPreviewRejectsCrossOriginRequest(t *testing.T) {
+	manager := &fakeEmbedderManager{}
+	handler := newTestServerWithManager(t, &fakeBackfill{}, manager)
+
+	body := strings.NewReader(`{"kind":"remote","remote_url":"http://gpu-host:9000"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/embedder/preview", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if len(manager.previewCalls) != 0 {
+		t.Fatalf("expected a cross-origin request to never reach Preview, got %d calls", len(manager.previewCalls))
+	}
+}
+
+func TestEmbedderPreviewRejectsInvalidKind(t *testing.T) {
+	manager := &fakeEmbedderManager{}
+	handler := newTestServerWithManager(t, &fakeBackfill{}, manager)
+
+	body := strings.NewReader(`{"kind":"bogus"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/embedder/preview", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if len(manager.previewCalls) != 0 {
+		t.Fatalf("expected an invalid kind to never reach Preview, got %d calls", len(manager.previewCalls))
+	}
+}
+
+// TestEmbedderSwitchWithoutConfirmationIsRejected proves section 5's "the
+// switch must not proceed without explicit confirmation" reaches the
+// manager honestly: confirm defaults to false when the field is omitted,
+// and the handler must pass that through (never silently upgrading it to
+// true) and surface indexer.Manager's own refusal as a 428.
+func TestEmbedderSwitchWithoutConfirmationIsRejected(t *testing.T) {
+	manager := &fakeEmbedderManager{switchErr: indexer.ErrSwitchNotConfirmed}
+	handler := newTestServerWithManager(t, &fakeBackfill{}, manager)
+
+	body := strings.NewReader(`{"kind":"remote","remote_url":"http://gpu-host:9000"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/embedder/switch", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPreconditionRequired {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusPreconditionRequired, rec.Body.String())
+	}
+	if len(manager.switchCalls) != 1 || manager.switchCalls[0].confirm {
+		t.Fatalf("expected Switch to be called once with confirm=false, got %+v", manager.switchCalls)
+	}
+}
+
+func TestEmbedderSwitchWithConfirmationAppliesChoice(t *testing.T) {
+	manager := &fakeEmbedderManager{switchResult: indexer.SwitchResult{
+		OldIdentity: "old@rev#384", NewIdentity: "new@rev#384", SameIdentity: false,
+	}}
+	handler := newTestServerWithManager(t, &fakeBackfill{}, manager)
+
+	body := strings.NewReader(`{"kind":"remote","remote_url":"http://gpu-host:9000","confirm":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/embedder/switch", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got indexer.SwitchResult
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.NewIdentity != "new@rev#384" {
+		t.Fatalf("got %+v, want the fake manager's fixed switch result", got)
+	}
+	if len(manager.switchCalls) != 1 || !manager.switchCalls[0].confirm || manager.switchCalls[0].remoteURL != "http://gpu-host:9000" {
+		t.Fatalf("expected Switch to be called once with confirm=true, got %+v", manager.switchCalls)
+	}
+}
+
+func TestEmbedderSwitchRejectsCrossOriginRequest(t *testing.T) {
+	manager := &fakeEmbedderManager{}
+	handler := newTestServerWithManager(t, &fakeBackfill{}, manager)
+
+	body := strings.NewReader(`{"kind":"remote","remote_url":"http://gpu-host:9000","confirm":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/embedder/switch", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if manager.switchCallCount() != 0 {
+		t.Fatalf("expected a cross-origin request to never reach Switch, got %d calls", manager.switchCallCount())
+	}
 }

@@ -754,3 +754,54 @@ func TestRunLiveSkipsPreexistingEntries(t *testing.T) {
 		t.Fatalf("expected the pre-existing entry #%d to be left untouched, got status %q", oldID, entryStatus(t, db, oldID))
 	}
 }
+
+// TestRunLiveHonorsOperatorPauseAndResumesOnResume proves LiveMonitor's
+// Task 9 operator Pause()/Resume() actually gates runLive's own loop --
+// not merely a flag Stats() reflects with nothing checking it. Paused
+// before runLive starts, the lane must not attempt the one entry in
+// scope for several poll intervals; Resume() must let it proceed and
+// index it, exactly like the unpaused case.
+func TestRunLiveHonorsOperatorPauseAndResumesOnResume(t *testing.T) {
+	s, db := testEnv(t)
+	entryID := createTestEntry(t, db, "live-operator-pause",
+		"<p>Entry that must not be indexed while the live lane is paused by an operator.</p>")
+
+	idx := New(s, &fakeEmbedder{})
+	monitor := NewLiveMonitor()
+	monitor.Pause()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runLive(ctx, idx, pollInterval, entryID-1, boundedUpTo(entryID), monitor) }()
+
+	// Several poll intervals' worth of time to have attempted the entry,
+	// were the pause not actually honored.
+	time.Sleep(5 * pollInterval)
+	if got := entryStatus(t, db, entryID); got == "ok" {
+		t.Fatalf("entry #%d was indexed while the live lane was paused by the operator", entryID)
+	}
+	if !monitor.Stats().Paused {
+		t.Fatalf("expected LiveMonitor.Stats().Paused to be true while paused")
+	}
+
+	monitor.Resume()
+
+	waitFor(t, 2*time.Second, "entry indexed after Resume", func() bool {
+		return entryStatus(t, db, entryID) == "ok"
+	})
+	if monitor.Stats().Paused {
+		t.Fatalf("expected LiveMonitor.Stats().Paused to be false after Resume")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runLive returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLive did not return after cancellation")
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"miniflux.app/v2/sidecar/internal/indexer"
@@ -87,6 +88,20 @@ type DatabaseMetricsSource interface {
 	DatabaseMetrics(ctx context.Context) (store.DatabaseMetrics, error)
 }
 
+// EmbedderManager is the subset of *indexer.Manager the admin page's Model
+// section needs (Task 9, spec §13.1): what is currently configured
+// (Info), testing a candidate before committing (Preview), and applying
+// a switch (Switch). Defined as an interface, not *indexer.Manager
+// directly, for the same reason BackfillController/LiveLane/
+// DatabaseMetricsSource are: this package's own test suite must stay
+// hermetic, with no real store, embedder or native ONNX Runtime library,
+// by injecting a fake (see server_test.go's fakeEmbedderManager).
+type EmbedderManager interface {
+	Info(ctx context.Context) indexer.EmbedderInfo
+	Preview(ctx context.Context, kind, remoteURL string) indexer.SwitchPreview
+	Switch(ctx context.Context, kind, remoteURL string, confirm bool) (indexer.SwitchResult, error)
+}
+
 // Server is the sidecar's status and admin HTTP server (spec §9.4), and,
 // since task 7, its read-only search HTTP API (spec §6.3-6.4, §7).
 type Server struct {
@@ -95,6 +110,7 @@ type Server struct {
 	searcher SearchService
 	entries  EntryLookup
 	metrics  DatabaseMetricsSource
+	manager  EmbedderManager
 	tmpl     *template.Template
 	mux      *http.ServeMux
 }
@@ -102,18 +118,21 @@ type Server struct {
 // New builds a Server over backfill (control endpoints), live (the live
 // lane's own pause status — spec §13.1), searcher (GET /api/search and
 // /api/similar), entries (loaded per result to build a highlighted
-// search.BuildSnippet — see search_handlers.go) and metrics (the
-// database-size and health section — spec §13.2). It parses the embedded
-// status page template eagerly so a malformed template fails at startup,
-// not on the first request.
+// search.BuildSnippet — see search_handlers.go), metrics (the
+// database-size and health section — spec §13.2) and manager (the Model
+// section's embedder controls — Task 9, spec §13.1). It parses the
+// embedded status page template eagerly so a malformed template fails at
+// startup, not on the first request.
 //
-// live, searcher, entries and metrics may all be nil in tests that don't
-// care about what they cover (see server_test.go); cmd/sidecar always
-// supplies all four. A nil live renders as "not paused" — the zero value
-// of indexer.LiveStats — rather than panicking; a nil (or erroring)
+// live, searcher, entries, metrics and manager may all be nil in tests
+// that don't care about what they cover (see server_test.go); cmd/sidecar
+// always supplies all five. A nil live renders as "not paused" — the zero
+// value of indexer.LiveStats — rather than panicking; a nil (or erroring)
 // metrics source renders the database-size section as unavailable rather
-// than panicking or showing zeroes as if they were real (see view()).
-func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, metrics DatabaseMetricsSource) (*Server, error) {
+// than panicking or showing zeroes as if they were real (see view()); a
+// nil manager renders the Model section as unavailable the same way (see
+// modelView()).
+func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, metrics DatabaseMetricsSource, manager EmbedderManager) (*Server, error) {
 	tmpl, err := template.New("status.html").Funcs(template.FuncMap{
 		"comma":    commaInt,
 		"bytesize": formatBytes,
@@ -122,7 +141,7 @@ func New(backfill BackfillController, live LiveLane, searcher SearchService, ent
 		return nil, fmt.Errorf("web: unable to parse status template: %w", err)
 	}
 
-	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, metrics: metrics, tmpl: tmpl}
+	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, metrics: metrics, manager: manager, tmpl: tmpl}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -131,6 +150,10 @@ func New(backfill BackfillController, live LiveLane, searcher SearchService, ent
 	mux.HandleFunc("POST /api/backfill/resume", s.handleResume)
 	mux.HandleFunc("GET /api/backfill/config", s.handleGetConfig)
 	mux.HandleFunc("POST /api/backfill/config", s.handleSetConfig)
+
+	mux.HandleFunc("GET /api/embedder", s.handleGetEmbedder)
+	mux.HandleFunc("POST /api/embedder/preview", s.handleEmbedderPreview)
+	mux.HandleFunc("POST /api/embedder/switch", s.handleEmbedderSwitch)
 
 	// GET /api/search and GET /api/similar (search_handlers.go) do NOT
 	// carry sameOriginOrNoOrigin's check — see that function's own doc
@@ -229,6 +252,11 @@ type statusView struct {
 	LiveEmbedderPauseReason          string `json:"live_embedder_pause_reason"`
 	LiveEmbedderPauseRequiresRestart bool   `json:"live_embedder_pause_requires_restart"`
 
+	// LivePaused mirrors Paused above, but for the live lane (Task 9 gave
+	// it an operator Pause()/Resume() too, so Manager.Switch can quiesce
+	// both lanes the same way) rather than the backfill lane.
+	LivePaused bool `json:"live_paused"`
+
 	Done            bool      `json:"done"`
 	ETA             string    `json:"eta"`              // human-readable, "unknown" or "done"
 	PercentComplete float64   `json:"percent_complete"` // -1 if Total is unknown
@@ -319,6 +347,7 @@ func buildView(st indexer.Stats, liveSt indexer.LiveStats, cfg indexer.RuntimeCo
 		LiveEmbedderPaused:               liveSt.EmbedderPaused,
 		LiveEmbedderPauseReason:          liveSt.EmbedderPauseReason,
 		LiveEmbedderPauseRequiresRestart: liveSt.EmbedderPauseRequiresRestart,
+		LivePaused:                       liveSt.Paused,
 
 		Done:            st.Done,
 		GeneratedAt:     time.Now(),
@@ -593,8 +622,40 @@ func writeJSON(w http.ResponseWriter, payload any) {
 	}
 }
 
+// modelView is the admin page's Model section (Task 9, spec §13.1),
+// derived from EmbedderManager.Info. Available is false when the Server
+// was built with a nil EmbedderManager -- the section must say so rather
+// than render the zero EmbedderInfo as if it were a real reading, the
+// same degrade-honestly rule MetricsAvailable already follows for the
+// Database section (the Addendum: "a section whose data is unavailable
+// ... must say so rather than render an empty panel").
+type modelView struct {
+	Available bool
+	indexer.EmbedderInfo
+}
+
+// modelInfoView builds the Model section's view, or the unavailable zero
+// value when s.manager is nil.
+func (s *Server) modelInfoView(ctx context.Context) modelView {
+	if s.manager == nil {
+		return modelView{}
+	}
+	return modelView{Available: true, EmbedderInfo: s.manager.Info(ctx)}
+}
+
+// pageView is what the template actually renders: the existing
+// status/database/indexing view (Status, unchanged in shape -- GET
+// /api/status still serves it directly, see handleAPIStatus) plus the
+// Model section this task adds. Kept as a separate top-level field
+// rather than folding Model's fields into statusView so that /api/status'
+// existing JSON shape does not change for this task at all.
+type pageView struct {
+	Status statusView
+	Model  modelView
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	view := s.view(r.Context())
+	view := pageView{Status: s.view(r.Context()), Model: s.modelInfoView(r.Context())}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.Execute(w, view); err != nil {
 		slog.Error("web: unable to render status page", slog.Any("error", err))
@@ -607,6 +668,135 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(view); err != nil {
 		slog.Error("web: unable to encode status response", slog.Any("error", err))
 	}
+}
+
+// embedderRequest is POST /api/embedder/preview and .../switch's shared
+// wire format (Task 9). Confirm is ignored by preview -- section 3's
+// probe never swaps anything regardless of what a caller sends -- and
+// required true by switch (section 5: "the switch must not proceed
+// without explicit confirmation"), enforced again server-side by
+// indexer.Manager.Switch itself, not only here.
+type embedderRequest struct {
+	Kind      string `json:"kind"`
+	RemoteURL string `json:"remote_url"`
+	Confirm   bool   `json:"confirm"`
+}
+
+// decodeEmbedderRequest reads and validates the shared request shape for
+// both embedder endpoints: kind must be "local" or "remote", and a
+// "remote" kind requires a non-empty URL. Returns the normalised
+// (lower-cased, trimmed) kind, the trimmed URL and the raw Confirm field,
+// or writes a 400 response and reports false.
+func decodeEmbedderRequest(w http.ResponseWriter, r *http.Request) (kind, remoteURL string, confirm, ok bool) {
+	var req embedderRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("unable to decode the request body: %v", err), http.StatusBadRequest)
+		return "", "", false, false
+	}
+	kind = strings.ToLower(strings.TrimSpace(req.Kind))
+	if kind != "local" && kind != "remote" {
+		http.Error(w, `"kind" must be "local" or "remote"`, http.StatusBadRequest)
+		return "", "", false, false
+	}
+	remoteURL = strings.TrimSpace(req.RemoteURL)
+	if kind == "remote" && remoteURL == "" {
+		http.Error(w, `"remote_url" is required when "kind" is "remote"`, http.StatusBadRequest)
+		return "", "", false, false
+	}
+	return kind, remoteURL, req.Confirm, true
+}
+
+// handleGetEmbedder serves the Model section's current state as JSON
+// (Task 9, section 1) -- the same data handleIndex renders into the
+// page, for a caller that wants it directly.
+func (s *Server) handleGetEmbedder(w http.ResponseWriter, r *http.Request) {
+	if s.manager == nil {
+		http.Error(w, "no embedder manager configured", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, s.manager.Info(r.Context()))
+}
+
+// handleEmbedderPreview probes a candidate embedder and, for a reachable
+// one, adds the re-index cost estimate -- Task 9, sections 3 ("test
+// before committing... without swapping anything") and 5 ("state the
+// re-index cost before doing it"). It carries the same Origin check as
+// pause/resume/config: a state-CHANGING request would need it for CSRF,
+// and although Preview itself swaps nothing, it does make an outbound
+// network request to whatever URL the caller supplies -- treating it
+// like the other POST endpoints costs nothing and avoids this becoming
+// an exception an operator has to remember.
+func (s *Server) handleEmbedderPreview(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginOrNoOrigin(r) {
+		http.Error(w, "cross-origin requests are not permitted", http.StatusForbidden)
+		return
+	}
+	if s.manager == nil {
+		http.Error(w, "no embedder manager configured", http.StatusServiceUnavailable)
+		return
+	}
+	kind, remoteURL, _, ok := decodeEmbedderRequest(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, buildPreviewView(s.manager.Preview(r.Context(), kind, remoteURL)))
+}
+
+// previewView reshapes indexer.SwitchPreview for JSON/template rendering
+// the same way statusView reshapes indexer.Stats: EstimatedDurationLabel
+// is the human-readable rendering of EstimatedDuration (formatDuration,
+// the same helper the ETA row already uses) -- indexer.SwitchPreview
+// itself carries only the raw time.Duration, since presentation is not
+// that package's concern.
+type previewView struct {
+	indexer.SwitchPreview
+	EstimatedDurationLabel string `json:"estimated_duration_label"`
+}
+
+func buildPreviewView(p indexer.SwitchPreview) previewView {
+	label := ""
+	if p.Error == "" && !p.SameIdentity && !p.EntryCountUnknown {
+		label = formatDuration(p.EstimatedDuration)
+	}
+	return previewView{SwitchPreview: p, EstimatedDurationLabel: label}
+}
+
+// handleEmbedderSwitch applies an operator's embedder choice (Task 9,
+// section 4). confirm=false is rejected with 428 Precondition Required
+// rather than silently no-oping, so a client bug that drops the field
+// fails loudly instead of quietly doing nothing.
+func (s *Server) handleEmbedderSwitch(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginOrNoOrigin(r) {
+		http.Error(w, "cross-origin requests are not permitted", http.StatusForbidden)
+		return
+	}
+	if s.manager == nil {
+		http.Error(w, "no embedder manager configured", http.StatusServiceUnavailable)
+		return
+	}
+	kind, remoteURL, confirm, ok := decodeEmbedderRequest(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := s.manager.Switch(r.Context(), kind, remoteURL, confirm)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, indexer.ErrSwitchNotConfirmed) {
+			status = http.StatusPreconditionRequired
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+
+	slog.Info("web: embedder switched via admin page",
+		slog.String("kind", kind),
+		slog.String("old_identity", result.OldIdentity),
+		slog.String("new_identity", result.NewIdentity),
+		slog.Bool("same_identity", result.SameIdentity),
+	)
+
+	writeJSON(w, result)
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {

@@ -281,25 +281,52 @@ func TestMigrateAppliesTuningToExistingDatabase(t *testing.T) {
 }
 
 // TestMigrateFromCrashLoopedVersionFourIsANoOp is the recovery path for
-// anyone who ran the now-reverted migration 5. That migration's autovacuum
-// predecessor (migration 4) commits and advances schema_version to 4 in
-// its own transaction before migration 5 ever runs, so a sidecar that hit
-// migration 5's shared-memory failure is left with schema_version = 4, not
-// damaged or partially migrated. With migration 5 removed, schemaVersion
-// is 4 too -- so this database is already fully migrated and Migrate()
-// must succeed with no further work and no error, not fail or try to
-// replay anything.
+// anyone who ran the now-reverted migration 5 (the HNSW index-rebuild
+// migration that crash-looped a container against its 64 MiB /dev/shm).
+// That migration's autovacuum predecessor (migration 4) commits and
+// advances schema_version to 4 in its own transaction before migration 5
+// ever ran, so a sidecar that hit migration 5's shared-memory failure was
+// left with schema_version = 4, not damaged or partially migrated.
+//
+// Task 9 appended a real migration 5 (search.embedder_settings), so a
+// from-scratch Migrate() no longer stops at 4 the way it did when this
+// test was written -- seeding has to replay migrations 1-4 by hand
+// (mirroring TestMigrateAppliesTuningToExistingDatabase's own technique
+// for the same reason) rather than relying on a fresh Migrate() call to
+// land there on its own. The behaviour under test is unchanged: Migrate()
+// against a database already fully migrated up to whatever schemaVersion
+// currently is must succeed with no further work and no error.
 func TestMigrateFromCrashLoopedVersionFourIsANoOp(t *testing.T) {
 	s := testStore(t)
 
-	// Start from a genuinely empty database, then bring it to exactly the
-	// state a crash-looped sidecar left behind: schema_version = 4,
-	// autovacuum tuning applied, nothing beyond that.
+	// testStore's database is shared across this file's tests; start from
+	// a genuinely empty schema before manually replaying migrations 1-4.
 	if _, err := s.db.Exec(`DROP SCHEMA IF EXISTS search CASCADE`); err != nil {
 		t.Fatalf("drop schema: %v", err)
 	}
-	if err := s.Migrate(); err != nil {
-		t.Fatalf("initial migrate to seed version 4 failed: %v", err)
+	if _, err := s.db.Exec(`CREATE SCHEMA IF NOT EXISTS search`); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS search.schema_version (version int not null)`); err != nil {
+		t.Fatalf("create schema_version: %v", err)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for i := range 4 {
+		if err := migrations[i](tx); err != nil {
+			tx.Rollback()
+			t.Fatalf("pre-migration %d: %v", i, err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO search.schema_version (version) VALUES (4)`); err != nil {
+		tx.Rollback()
+		t.Fatalf("seed schema_version: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
 	}
 
 	var seededVersion int
@@ -310,9 +337,9 @@ func TestMigrateFromCrashLoopedVersionFourIsANoOp(t *testing.T) {
 		t.Fatalf("seeded schema_version = %d, want 4 (this test's premise no longer holds)", seededVersion)
 	}
 
-	// The realistic recovery case: Migrate() runs again, as it does on
-	// every sidecar start, against a database already at the latest
-	// version.
+	// The realistic recovery case: Migrate() runs, as it does on every
+	// sidecar start, against a database seeded at exactly the
+	// crash-looped state above.
 	if err := s.Migrate(); err != nil {
 		t.Fatalf("migrate against an already-at-version-4 database failed: %v", err)
 	}
@@ -340,7 +367,7 @@ func TestMigrateFromCrashLoopedVersionFourIsANoOp(t *testing.T) {
 // Update this literal deliberately, in the same commit, whenever a
 // migration is appended or (never) removed.
 func TestSchemaVersionIsPinned(t *testing.T) {
-	const want = 4
+	const want = 5
 	if schemaVersion != want {
 		t.Fatalf("schemaVersion = %d, want %d -- a migration was added or removed without updating this pinned assertion", schemaVersion, want)
 	}

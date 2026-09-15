@@ -114,6 +114,43 @@ var migrations = [...]func(tx *sql.Tx) error{
 		`)
 		return err
 	},
+	func(tx *sql.Tx) error {
+		// Task 9 (spec §13.1): the operator's embedder choice ("local" or
+		// "remote", and for "remote" the URL) now lives here, not only in
+		// the SIDECAR_EMBEDDER/SIDECAR_REMOTE_EMBEDDER_URL environment
+		// variables cmd/sidecar reads once at startup. Without this, the
+		// compose stack's `restart: unless-stopped` would silently revert
+		// an operator's remote choice back to local on every container
+		// restart -- and because that changes the model identity, it would
+		// re-index the entire corpus with nobody asking.
+		//
+		// A single-row table, enforced by the CHECK(id = 1) singleton
+		// pattern rather than a second table or a well-known key in some
+		// generic settings table: there is exactly one embedder configured
+		// at a time, an UPSERT is simpler than a DELETE-then-INSERT pair,
+		// and a CHECK constraint makes "more than one row" a schema-level
+		// impossibility rather than an invariant application code has to
+		// maintain. Absent (no row at all) is a distinct, meaningful state
+		// -- "nothing has ever been switched" -- from any row's own
+		// content, which is exactly what lets the environment variables
+		// keep acting as the startup default: see
+		// store.GetEmbedderSettings.
+		//
+		// No SET/SET LOCAL of any kind here -- this migration only creates
+		// a table, nothing that could hold a lock across a slow operation
+		// the way migration 5's now-reverted HNSW rebuild did (see the
+		// comment below this migration).
+		_, err := tx.Exec(`
+			CREATE TABLE search.embedder_settings (
+				id         int NOT NULL CHECK (id = 1),
+				kind       text NOT NULL,
+				remote_url text NOT NULL DEFAULT '',
+				updated_at timestamptz NOT NULL DEFAULT now(),
+				PRIMARY KEY (id)
+			);
+		`)
+		return err
+	},
 	// There is deliberately no migration here to rebuild
 	// passages_embedding_idx under a raised maintenance_work_mem. That was
 	// tried and reverted: maintenance_work_mem only controls HNSW build

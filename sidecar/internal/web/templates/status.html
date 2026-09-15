@@ -5,8 +5,10 @@
 <title>Sidecar indexing status</title>
 <meta http-equiv="refresh" content="10">
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
-  h1 { font-size: 1.25rem; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 0; color: #1a1a1a; }
+  h1 { font-size: 1.25rem; margin-top: 0; }
+  h2 { font-size: 1.05rem; }
   table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
   td, th { text-align: left; padding: 0.25rem 0.75rem 0.25rem 0; vertical-align: top; }
   .progress { background: #eee; border-radius: 4px; height: 1rem; overflow: hidden; margin: 0.5rem 0; }
@@ -16,78 +18,128 @@
   fieldset { border: 1px solid #ddd; border-radius: 4px; margin: 1rem 0; padding: 0.5rem 1rem 1rem; }
   legend { font-weight: 600; font-size: 0.95rem; }
   label { display: block; margin: 0.6rem 0 0; font-size: 0.9rem; }
-  label input { display: block; margin-top: 0.2rem; padding: 0.3rem; width: 12rem; }
+  label input, label select { display: block; margin-top: 0.2rem; padding: 0.3rem; width: 100%; max-width: 24rem; }
   .hint { color: #555; font-size: 0.8em; }
   .stale { color: #a00; }
   .restart-badge { color: #a00; font-weight: 600; }
+  .unavailable { color: #a00; font-style: italic; }
+
+  /* Layout: a persistent sidebar plus anchored sections (see the task 9
+     report for why this, not a query-param-selected page, was chosen).
+     No JS is needed for the nav itself -- plain <a href="#..."> links
+     against <section id="..."> targets -- so it degrades to something
+     still perfectly usable with JS disabled entirely. */
+  .layout { display: flex; align-items: flex-start; min-height: 100vh; }
+  nav.sidebar {
+    flex: 0 0 12rem;
+    position: sticky; top: 0;
+    padding: 1.5rem 1rem;
+    background: #f7f7f8;
+    border-right: 1px solid #ddd;
+    height: 100vh;
+    overflow-y: auto;
+  }
+  nav.sidebar a {
+    display: block;
+    padding: 0.5rem 0.6rem;
+    margin-bottom: 0.2rem;
+    border-radius: 4px;
+    color: #1a1a1a;
+    text-decoration: none;
+    font-size: 0.95rem;
+  }
+  nav.sidebar a:hover { background: #eaeaea; }
+  main { flex: 1 1 auto; min-width: 0; padding: 1.5rem 2rem 4rem; max-width: 52rem; }
+  section { padding-top: 0.25rem; margin-bottom: 3rem; }
+  section:target { scroll-margin-top: 1rem; }
+
+  @media (max-width: 700px) {
+    .layout { display: block; }
+    nav.sidebar { position: static; height: auto; width: auto; border-right: none; border-bottom: 1px solid #ddd; display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    nav.sidebar a { padding: 0.4rem 0.6rem; }
+    main { padding: 1rem; max-width: 100%; }
+  }
 </style>
 </head>
 <body>
+<div class="layout">
+  <nav class="sidebar">
+    <a href="#status">Status</a>
+    <a href="#database">Database</a>
+    <a href="#indexing">Indexing</a>
+    <a href="#model">Model</a>
+  </nav>
+  <main>
+
+<section id="status">
 <h1>Sidecar indexing status</h1>
 
 <table>
-  <tr><th>Indexed</th><td>{{comma .Indexed}}{{if ge .Total 0}} of {{comma .Total}}{{end}}</td></tr>
-  {{if ge .PercentComplete 0.0}}
+  <tr><th>Indexed</th><td>{{comma .Status.Indexed}}{{if ge .Status.Total 0}} of {{comma .Status.Total}}{{end}}</td></tr>
+  {{if ge .Status.PercentComplete 0.0}}
   <tr><th>Progress</th><td>
-    {{printf "%.1f" .PercentComplete}}%
-    <div class="progress"><div class="progress-bar" style="width: {{printf "%.1f" .PercentComplete}}%"></div></div>
+    {{printf "%.1f" .Status.PercentComplete}}%
+    <div class="progress"><div class="progress-bar" style="width: {{printf "%.1f" .Status.PercentComplete}}%"></div></div>
   </td></tr>
   {{end}}
-  <tr><th>ETA</th><td>{{.ETA}}</td></tr>
-  <tr><th>Throughput</th><td>{{printf "%.2f" .ThroughputPerSec}} entries/sec (current)</td></tr>
-  <tr><th>Workers</th><td>{{.Workers}}<div class="reason">{{.ControllerReason}}</div></td></tr>
-  <tr><th>Skipped</th><td>{{comma .Skipped}}</td></tr>
-  <tr><th>Failed</th><td>{{comma .Failed}}</td></tr>
+  <tr><th>ETA</th><td>{{.Status.ETA}}</td></tr>
+  <tr><th>Throughput</th><td>{{printf "%.2f" .Status.ThroughputPerSec}} entries/sec (current)</td></tr>
+  <tr><th>Workers</th><td>{{.Status.Workers}}<div class="reason">{{.Status.ControllerReason}}</div></td></tr>
+  <tr><th>Skipped</th><td>{{comma .Status.Skipped}}</td></tr>
+  <tr><th>Failed</th><td>{{comma .Status.Failed}}</td></tr>
   <tr><th>Backfill lane paused</th><td>
-    {{if .Paused}}yes (paused by operator)
-    {{else if .EmbedderPaused}}yes (paused: embedder unreachable{{if .EmbedderPauseRequiresRestart}} <span class="restart-badge">— requires restart</span>{{end}})<div class="reason">{{.EmbedderPauseReason}}</div>
+    {{if .Status.Paused}}yes (paused by operator)
+    {{else if .Status.EmbedderPaused}}yes (paused: embedder unreachable{{if .Status.EmbedderPauseRequiresRestart}} <span class="restart-badge">— requires restart</span>{{end}})<div class="reason">{{.Status.EmbedderPauseReason}}</div>
     {{else}}no{{end}}
   </td></tr>
   <tr><th>Live lane paused</th><td>
-    {{if .LiveEmbedderPaused}}yes (paused: embedder unreachable{{if .LiveEmbedderPauseRequiresRestart}} <span class="restart-badge">— requires restart</span>{{end}})<div class="reason">{{.LiveEmbedderPauseReason}}</div>
+    {{if .Status.LivePaused}}yes (paused by operator)
+    {{else if .Status.LiveEmbedderPaused}}yes (paused: embedder unreachable{{if .Status.LiveEmbedderPauseRequiresRestart}} <span class="restart-badge">— requires restart</span>{{end}})<div class="reason">{{.Status.LiveEmbedderPauseReason}}</div>
     {{else}}no{{end}}
   </td></tr>
-  <tr><th>Done</th><td>{{if .Done}}yes{{else}}no{{end}}</td></tr>
+  <tr><th>Done</th><td>{{if .Status.Done}}yes{{else}}no{{end}}</td></tr>
 </table>
 
-{{if .SkippedByReason}}
+{{if .Status.SkippedByReason}}
 <h2>Skips by cause</h2>
 <table>
-  {{range $cause, $count := .SkippedByReason}}
+  {{range $cause, $count := .Status.SkippedByReason}}
   <tr><td>{{$cause}}</td><td>{{comma $count}}</td></tr>
   {{end}}
 </table>
 {{end}}
 
-{{if .FailedByReason}}
+{{if .Status.FailedByReason}}
 <h2>Failures by cause</h2>
 <table>
-  {{range $cause, $count := .FailedByReason}}
+  {{range $cause, $count := .Status.FailedByReason}}
   <tr><td>{{$cause}}</td><td>{{comma $count}}</td></tr>
   {{end}}
 </table>
 {{end}}
+</section>
 
-<h2>Database</h2>
-{{if .MetricsAvailable}}
+<section id="database">
+<h1>Database</h1>
+{{if .Status.MetricsAvailable}}
 <table>
-  <tr><th>Total database size</th><td>{{bytesize .DatabaseSizeBytes}}</td></tr>
-  <tr><th>search schema size</th><td>{{bytesize .SearchSchemaSizeBytes}}</td></tr>
-  <tr><th>HNSW index size</th><td>{{bytesize .HNSWIndexSizeBytes}}</td></tr>
+  <tr><th>Total database size</th><td>{{bytesize .Status.DatabaseSizeBytes}}</td></tr>
+  <tr><th>search schema size</th><td>{{bytesize .Status.SearchSchemaSizeBytes}}</td></tr>
+  <tr><th>HNSW index size</th><td>{{bytesize .Status.HNSWIndexSizeBytes}}</td></tr>
   <tr><th>Passages</th><td>
-    {{if .PassageCountUnknown}}not yet analyzed <span class="hint">(no estimate yet, not zero)</span>
-    {{else}}{{comma .PassageCount}}{{if .CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}{{end}}
+    {{if .Status.PassageCountUnknown}}not yet analyzed <span class="hint">(no estimate yet, not zero)</span>
+    {{else}}{{comma .Status.PassageCount}}{{if .Status.CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}{{end}}
   </td></tr>
   <tr><th>Entries</th><td>
-    {{if .EntryCountUnknown}}not yet analyzed <span class="hint">(no estimate yet, not zero)</span>
-    {{else}}{{comma .EntryCount}}{{if .CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}{{end}}
+    {{if .Status.EntryCountUnknown}}not yet analyzed <span class="hint">(no estimate yet, not zero)</span>
+    {{else}}{{comma .Status.EntryCount}}{{if .Status.CountsAreEstimated}} <span class="hint">(estimated)</span>{{end}}{{end}}
   </td></tr>
   <tr><th>Passages per entry</th><td>
-    {{if .PassagesPerEntryUnknown}}unknown <span class="hint">(not yet analyzed — not a real zero)</span>
-    {{else}}{{printf "%.2f" .PassagesPerEntry}}{{end}}
+    {{if .Status.PassagesPerEntryUnknown}}unknown <span class="hint">(not yet analyzed — not a real zero)</span>
+    {{else}}{{printf "%.2f" .Status.PassagesPerEntry}}{{end}}
   </td></tr>
   <tr><th>Dead tuples (search.passages)</th><td>
-    {{comma .DeadTuples}}
+    {{comma .Status.DeadTuples}}
     <div class="reason">A stale VACUUM silently truncates HNSW index scans — a high or climbing number here, not just search results that seem short, is the sign to check.</div>
   </td></tr>
 </table>
@@ -104,10 +156,12 @@
   shown as a plain zero.
 </p>
 {{else}}
-<p class="reason">Database metrics unavailable.</p>
+<p class="unavailable">Database metrics unavailable — the sidecar could not reach its database just now.</p>
 {{end}}
+</section>
 
-<h2>Controls</h2>
+<section id="indexing">
+<h1>Indexing</h1>
 <button id="pause-btn" onclick="post('/api/backfill/pause')">Pause</button>
 <button id="resume-btn" onclick="post('/api/backfill/resume')">Resume</button>
 <span id="control-msg"></span>
@@ -122,38 +176,104 @@
   </p>
 
   <label>Schedule window
-    <input id="cfg-window" type="text" placeholder="{{.WindowLabel}}">
+    <input id="cfg-window" type="text" placeholder="{{.Status.WindowLabel}}">
     <span class="hint">&ldquo;always&rdquo;, or an hour range such as 02:00-07:00 (wraps past midnight).</span>
   </label>
 
   <label>Maximum workers
-    <input id="cfg-max-workers" type="number" min="1" max="{{.Config.MaxAllowedWorkersOnHost}}" placeholder="{{.Config.MaxWorkers}}">
-    <span class="hint">1&ndash;{{.Config.MaxAllowedWorkersOnHost}} on this host. Two was the measured optimum.</span>
+    <input id="cfg-max-workers" type="number" min="1" max="{{.Status.Config.MaxAllowedWorkersOnHost}}" placeholder="{{.Status.Config.MaxWorkers}}">
+    <span class="hint">1&ndash;{{.Status.Config.MaxAllowedWorkersOnHost}} on this host. Two was the measured optimum.</span>
   </label>
 
   <label>Minimum workers
-    <input id="cfg-min-workers" type="number" min="1" max="{{.Config.MaxAllowedWorkersOnHost}}" placeholder="{{.Config.MinWorkers}}">
+    <input id="cfg-min-workers" type="number" min="1" max="{{.Status.Config.MaxAllowedWorkersOnHost}}" placeholder="{{.Status.Config.MinWorkers}}">
   </label>
 
   <label>Batch size
-    <input id="cfg-batch-size" type="number" min="{{.Config.MinBatchSizeAllowed}}" max="{{.Config.MaxBatchSizeAllowed}}" placeholder="{{.Config.BatchSize}}">
-    <span class="hint">Passages per forward pass, {{.Config.MinBatchSizeAllowed}}&ndash;{{.Config.MaxBatchSizeAllowed}}. Larger is slower, not faster.</span>
+    <input id="cfg-batch-size" type="number" min="{{.Status.Config.MinBatchSizeAllowed}}" max="{{.Status.Config.MaxBatchSizeAllowed}}" placeholder="{{.Status.Config.BatchSize}}">
+    <span class="hint">Passages per forward pass, {{.Status.Config.MinBatchSizeAllowed}}&ndash;{{.Status.Config.MaxBatchSizeAllowed}}. Larger is slower, not faster.</span>
   </label>
 
   <p><button id="cfg-apply" onclick="applyConfig()">Apply</button><span id="config-msg"></span></p>
 </fieldset>
 
 <table>
-  <tr><th>Window</th><td>{{.WindowLabel}}</td></tr>
-  <tr><th>Worker band</th><td>{{.Config.MinWorkers}}&ndash;{{.Config.MaxWorkers}} (host ceiling {{.Config.MaxAllowedWorkersOnHost}})</td></tr>
-  <tr><th>Load threshold</th><td>{{printf "%.2f" .Config.LoadThreshold}} per core</td></tr>
-  <tr><th>Batch size</th><td>{{.Config.BatchSize}} passages per forward pass</td></tr>
-  <tr><th>Page size</th><td>{{.Config.PageSize}} entries per batch</td></tr>
-  <tr><th>Poll interval</th><td>{{.PollInterval}}</td></tr>
-  <tr><th>Idle re-sweep</th><td>{{.IdleResweep}}</td></tr>
+  <tr><th>Window</th><td>{{.Status.WindowLabel}}</td></tr>
+  <tr><th>Worker band</th><td>{{.Status.Config.MinWorkers}}&ndash;{{.Status.Config.MaxWorkers}} (host ceiling {{.Status.Config.MaxAllowedWorkersOnHost}})</td></tr>
+  <tr><th>Load threshold</th><td>{{printf "%.2f" .Status.Config.LoadThreshold}} per core</td></tr>
+  <tr><th>Batch size</th><td>{{.Status.Config.BatchSize}} passages per forward pass</td></tr>
+  <tr><th>Page size</th><td>{{.Status.Config.PageSize}} entries per batch</td></tr>
+  <tr><th>Poll interval</th><td>{{.Status.PollInterval}}</td></tr>
+  <tr><th>Idle re-sweep</th><td>{{.Status.IdleResweep}}</td></tr>
+</table>
+</section>
+
+<section id="model">
+<h1>Model</h1>
+{{if .Model.Available}}
+<table>
+  <tr><th>Kind</th><td>{{.Model.Kind}}</td></tr>
+  {{if eq .Model.Kind "local"}}
+  <tr><th>Backend</th><td>{{.Model.Backend}}{{if ne .Model.Backend "ORT"}} <span class="restart-badge">— not ORT, roughly 10&times; slower (built without -tags ORT)</span>{{end}}</td></tr>
+  {{end}}
+  <tr><th>Identity</th><td>{{.Model.Identity}}</td></tr>
+  <tr><th>Dimensions</th><td>{{.Model.Dimensions}} <span class="hint">(schema requires {{.Model.SchemaDimensions}})</span></td></tr>
+  {{if eq .Model.Kind "remote"}}
+  <tr><th>Remote URL</th><td>{{.Model.RemoteURL}}</td></tr>
+  <tr><th>Reachable</th><td>
+    {{if not .Model.ReachabilityChecked}}unknown
+    {{else if .Model.Reachable}}yes
+    {{else}}no<div class="reason">{{.Model.ReachabilityError}}</div>{{end}}
+  </td></tr>
+  {{end}}
 </table>
 
-<p class="reason">Generated {{.GeneratedAt}}. This page refreshes every 10 seconds.</p>
+<p class="hint">
+  Changing the model changes every stored passage's expected content hash,
+  so the whole corpus becomes pending and is re-embedded from scratch —
+  minutes for a small corpus, hours at real scale. The one exception: the
+  <em>same</em> model running on another machine needs no re-index, but
+  only if the candidate reports an identity <strong>identical</strong> to
+  the one active now — and it will not by default, because a local
+  model's identity is a sha256 of the model file while a remote's is
+  whatever that server reports. In practice, switching local &rarr;
+  remote re-indexes unless the remote is deliberately configured to
+  report the same identity.
+</p>
+
+<fieldset>
+  <legend>Switch embedder</legend>
+  <p class="hint">Test a candidate first — nothing is swapped until you confirm the switch below.</p>
+
+  <label>Kind
+    <select id="embed-kind">
+      <option value="remote">remote</option>
+      <option value="local">local</option>
+    </select>
+  </label>
+  <label>Remote URL
+    <input id="embed-url" type="text" placeholder="http://gpu-host:9000">
+    <span class="hint">Ignored for kind "local".</span>
+  </label>
+
+  <p>
+    <button id="embed-test" onclick="previewEmbedder()">Test</button>
+    <span id="embed-preview-msg"></span>
+  </p>
+  <p>
+    <button id="embed-switch" onclick="switchEmbedder()">Switch</button>
+    <span id="embed-switch-msg"></span>
+  </p>
+</fieldset>
+{{else}}
+<p class="unavailable">Embedder controls unavailable — the sidecar's embedder manager is not configured.</p>
+{{end}}
+</section>
+
+  </main>
+</div>
+
+<p class="reason">Generated {{.Status.GeneratedAt}}. This page refreshes every 10 seconds.</p>
 
 <script>
   // A small inline fetch, not a JS framework (spec §9.4 / task-7 brief).
@@ -199,6 +319,69 @@
     document.getElementById('config-msg').textContent = '';
     post('/api/backfill/config', body).catch(function (err) {
       document.getElementById('config-msg').textContent = ' ' + String(err);
+    });
+  }
+
+  // The Model section's own two-step flow: Test (POST .../preview, never
+  // swaps anything) populates lastPreview, which Switch then summarises
+  // into a confirm() dialog before it ever sends the actual switch
+  // request — section 5's "the switch must not proceed without explicit
+  // confirmation", on the client; Manager.Switch enforces the same rule
+  // again server-side regardless of what this dialog does.
+  var lastPreview = null;
+
+  function embedderRequestBody() {
+    return {
+      kind: document.getElementById('embed-kind').value,
+      remote_url: document.getElementById('embed-url').value.trim()
+    };
+  }
+
+  function previewEmbedder() {
+    lastPreview = null;
+    var msg = document.getElementById('embed-preview-msg');
+    msg.textContent = 'testing…';
+    fetch('/api/embedder/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(embedderRequestBody())
+    }).then(function (r) {
+      return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        msg.textContent = 'Refused: ' + (res.body.error || ('request failed: ' + res.status));
+        return;
+      }
+      lastPreview = res.body;
+      var text = 'Identity: ' + res.body.identity + ' (' + res.body.dimensions + ' dims).';
+      if (res.body.same_identity) {
+        text += ' Same model already active — no re-index needed.';
+      } else {
+        text += ' ' + (res.body.entry_count_unknown ? 'Entry count unknown.' : (res.body.entry_count + ' entries')) +
+          (res.body.estimated_duration_label ? ', estimated re-index time ' + res.body.estimated_duration_label + '.' : '.');
+      }
+      msg.textContent = text;
+    }).catch(function (err) { msg.textContent = String(err); });
+  }
+
+  function switchEmbedder() {
+    var msg = document.getElementById('embed-switch-msg');
+    if (!lastPreview) {
+      msg.textContent = 'Test the candidate first.';
+      return;
+    }
+    var summary = lastPreview.same_identity
+      ? 'Switch to this embedder? Same model identity — no re-index needed.'
+      : 'Switch to this embedder? This will re-index the whole corpus (' +
+        (lastPreview.entry_count_unknown ? 'entry count unknown' : lastPreview.entry_count + ' entries') +
+        (lastPreview.estimated_duration_label ? ', estimated ' + lastPreview.estimated_duration_label : '') + ').';
+    if (!window.confirm(summary)) { return; }
+
+    var body = embedderRequestBody();
+    body.confirm = true;
+    msg.textContent = '';
+    post('/api/embedder/switch', body).catch(function (err) {
+      msg.textContent = String(err);
     });
   }
 </script>
