@@ -70,6 +70,100 @@ func newFakeServer(t *testing.T, dimensions int, name, revision string) (*httpte
 	return srv, &requests
 }
 
+// newDriftingServer behaves like newFakeServer for its first request (the
+// probe New's construction makes), then reports a different model name on
+// every request after that. It exists to test Embed's per-call identity
+// check: a remote redeployed to a different model behind the same URL,
+// with no restart on this side.
+func newDriftingServer(t *testing.T, dimensions int, initialName, laterName, revision string) *httptest.Server {
+	t.Helper()
+	var requests int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requests, 1)
+
+		var req struct {
+			Texts []string `json:"texts"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		vectors := make([][]float32, len(req.Texts))
+		for i := range req.Texts {
+			vectors[i] = fakeVector(float32(i + 1))
+		}
+
+		name := initialName
+		if n > 1 {
+			name = laterName
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"vectors": vectors,
+			"model": map[string]any{
+				"name":       name,
+				"revision":   revision,
+				"dimensions": dimensions,
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestEmbedAcceptsRepeatedCallsWithStableIdentity is the happy path for
+// the mid-run identity check: as long as the remote keeps reporting the
+// same model, repeated Embed calls succeed.
+func TestEmbedAcceptsRepeatedCallsWithStableIdentity(t *testing.T) {
+	srv := newDriftingServer(t, 384, "bge-small-en-v1.5", "bge-small-en-v1.5", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+
+	for i := 0; i < 3; i++ {
+		vectors, err := e.Embed(context.Background(), []string{"hello"})
+		if err != nil {
+			t.Fatalf("Embed call %d: unexpected error: %v", i, err)
+		}
+		if len(vectors) != 1 {
+			t.Fatalf("Embed call %d: expected 1 vector, got %d", i, len(vectors))
+		}
+	}
+}
+
+// TestEmbedRejectsIdentityChangeMidRun is the failure path: a remote that
+// starts reporting a different model after New's probe recorded the
+// first one. This is the exact scenario the mid-run re-check exists for
+// (spec §13.1) — without it, a remote redeployed to a different model
+// behind the same URL would have its vectors silently mixed into an
+// index built under the old identity.
+func TestEmbedRejectsIdentityChangeMidRun(t *testing.T) {
+	srv := newDriftingServer(t, 384, "bge-small-en-v1.5", "some-other-model", "abc123")
+
+	e, err := New(Config{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer e.Close()
+
+	vectors, err := e.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected an error when the remote's identity changes mid-run, got nil")
+	}
+	if vectors != nil {
+		t.Fatalf("expected no vectors returned alongside the identity-change error, got %v", vectors)
+	}
+	if !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("error should mention the identity change, got: %v", err)
+	}
+}
+
 func TestNewProbesRemoteAndBatchRoundTrips(t *testing.T) {
 	srv, requests := newFakeServer(t, 384, "bge-small-en-v1.5", "abc123")
 
@@ -152,12 +246,32 @@ func TestDimensionMismatchFailsAtConstruction(t *testing.T) {
 	}
 }
 
+// TestIdentityWithAmbiguousSeparatorIsRejected covers all four places
+// embed.Identity's unescaped separators ('@' and '#') could turn up in a
+// remote-reported name/revision pair: '@' or '#' in either field. Each
+// case is independently necessary — a check that only looked at '@' in
+// name, say, would still let a revision containing '@' or either field
+// containing '#' through and silently risk two distinct (name, revision)
+// pairs formatting identically.
 func TestIdentityWithAmbiguousSeparatorIsRejected(t *testing.T) {
-	srv, _ := newFakeServer(t, 384, "bge-small@evil", "abc123")
+	cases := []struct {
+		name, revision string
+	}{
+		{"bge-small@evil", "abc123"},
+		{"bge-small", "abc@123"},
+		{"bge-small#evil", "abc123"},
+		{"bge-small", "abc#123"},
+	}
 
-	_, err := New(Config{URL: srv.URL})
-	if err == nil {
-		t.Fatal("expected an error for a model name containing '@', got nil")
+	for _, tc := range cases {
+		t.Run(tc.name+"/"+tc.revision, func(t *testing.T) {
+			srv, _ := newFakeServer(t, 384, tc.name, tc.revision)
+
+			_, err := New(Config{URL: srv.URL})
+			if err == nil {
+				t.Fatalf("expected an error for name=%q revision=%q, got nil", tc.name, tc.revision)
+			}
+		})
 	}
 }
 

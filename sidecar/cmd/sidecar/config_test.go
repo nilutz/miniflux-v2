@@ -5,6 +5,7 @@ package main // import "miniflux.app/v2/sidecar/cmd/sidecar"
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,6 +95,121 @@ func TestLoadBackfillPatchRejectsMalformedValues(t *testing.T) {
 			t.Setenv(tc.name, tc.value)
 			if _, err := loadBackfillPatch(); err == nil {
 				t.Fatalf("expected %s=%q to be a startup error, not silently ignored", tc.name, tc.value)
+			}
+		})
+	}
+}
+
+// configEnvVars is every environment variable loadConfig reads that this
+// suite needs to control precisely, for both this file's tests and the
+// backfill ones above. Clearing all of them at the start of a subtest
+// means each one starts from "nothing is set", not whatever the previous
+// subtest (or a stray variable in the real environment) left behind.
+var configEnvVars = []string{
+	"SIDECAR_DATABASE_URL", "SIDECAR_EMBEDDER", "SIDECAR_MODEL_PATH", "SIDECAR_ONNX_LIB_DIR",
+	"SIDECAR_REMOTE_EMBEDDER_URL", "SIDECAR_REMOTE_EMBEDDER_TIMEOUT", "SIDECAR_ADMIN_ADDR",
+}
+
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range configEnvVars {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unable to unset %s: %v", name, err)
+		}
+	}
+}
+
+// TestLoadConfigEmbedderKind covers loadConfig's SIDECAR_EMBEDDER
+// branching: which variables are required for "local" vs "remote", the
+// unset-defaults-to-local guarantee an existing deployment depends on,
+// and an unrecognised value being a startup error rather than silently
+// falling through to one backend or the other.
+func TestLoadConfigEmbedderKind(t *testing.T) {
+	cases := []struct {
+		name        string
+		env         map[string]string
+		wantErr     bool
+		errContains string
+		wantKind    string
+	}{
+		{
+			name: "unset SIDECAR_EMBEDDER defaults to local",
+			env: map[string]string{
+				"SIDECAR_DATABASE_URL": "postgres://x",
+				"SIDECAR_MODEL_PATH":   "/models/model.onnx",
+			},
+			wantKind: "local",
+		},
+		{
+			name: "explicit local requires SIDECAR_MODEL_PATH",
+			env: map[string]string{
+				"SIDECAR_DATABASE_URL": "postgres://x",
+				"SIDECAR_EMBEDDER":     "local",
+				"SIDECAR_MODEL_PATH":   "/models/model.onnx",
+			},
+			wantKind: "local",
+		},
+		{
+			name: "explicit local without SIDECAR_MODEL_PATH is an error",
+			env: map[string]string{
+				"SIDECAR_DATABASE_URL": "postgres://x",
+				"SIDECAR_EMBEDDER":     "local",
+			},
+			wantErr:     true,
+			errContains: "SIDECAR_MODEL_PATH",
+		},
+		{
+			name: "remote with a URL",
+			env: map[string]string{
+				"SIDECAR_DATABASE_URL":        "postgres://x",
+				"SIDECAR_EMBEDDER":            "remote",
+				"SIDECAR_REMOTE_EMBEDDER_URL": "http://gpu-host:9000",
+			},
+			wantKind: "remote",
+		},
+		{
+			name: "remote without a URL is an error",
+			env: map[string]string{
+				"SIDECAR_DATABASE_URL": "postgres://x",
+				"SIDECAR_EMBEDDER":     "remote",
+			},
+			wantErr:     true,
+			errContains: "SIDECAR_REMOTE_EMBEDDER_URL",
+		},
+		{
+			name: "unrecognised value is an error",
+			env: map[string]string{
+				"SIDECAR_DATABASE_URL": "postgres://x",
+				"SIDECAR_EMBEDDER":     "bogus",
+			},
+			wantErr:     true,
+			errContains: "SIDECAR_EMBEDDER",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			cfg, err := loadConfig()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got nil (cfg=%+v)", cfg)
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Fatalf("error %q does not mention %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadConfig failed: %v", err)
+			}
+			if cfg.embedderKind != tc.wantKind {
+				t.Fatalf("embedderKind = %q, want %q", cfg.embedderKind, tc.wantKind)
 			}
 		})
 	}
