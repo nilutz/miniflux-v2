@@ -1,0 +1,225 @@
+# Fork-owned CI entry point.
+#
+# Every upstream test workflow -- tests.yml, linters.yml, sidecar.yml --
+# triggers only on `pull_request`. This fork's work has gone straight to
+# `main` with no PR, so none of them has ever actually run on it. This
+# file exists to close that gap, on push to main as well as on PRs, for
+# both Go modules this repository contains (the root Miniflux module and
+# the separate sidecar/ module) -- without editing any upstream workflow
+# file, since this fork rebases onto upstream indefinitely and every
+# edited upstream file is permanent rebase surface (see CLAUDE.md).
+#
+# Three independent jobs:
+#
+#   root             -- `make test` and `make lint` from the repository
+#                        root. go test ./... here never descends into
+#                        sidecar/, a separate Go module with its own
+#                        go.mod -- that's why sidecar gets its own jobs
+#                        below instead of a step in this one.
+#   sidecar-hermetic -- exactly what sidecar.yml already runs: the
+#                        packages that need no build tags, no native
+#                        libraries and no database.
+#   sidecar-native   -- does not exist anywhere else. internal/embed/onnx
+#                        and cmd/sidecar fail at the LINK step without
+#                        libtokenizers.a and libonnxruntime, so sidecar.yml
+#                        excludes them and their model-gated tests have
+#                        never run in CI. This job installs the pinned
+#                        native dependencies and runs them for real.
+name: Fork CI
+
+permissions: read-all
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # Versions pinned here MUST match sidecar/Dockerfile's ARG defaults and,
+  # for TOKENIZERS_VERSION, sidecar/go.mod's daulet/tokenizers requirement
+  # exactly -- the tokenizers Rust ABI is not stable across releases.
+  ONNXRUNTIME_VERSION: "1.30.0"
+  TOKENIZERS_VERSION: "v1.27.0"
+  MODEL_REPO: "nomic-ai/nomic-embed-text-v1.5"
+  # Bump this to force-refresh the cached model download below without
+  # touching the version pins above -- e.g. if nomic-ai changes the files
+  # on the model repo's "main" branch, which is what both this workflow and
+  # sidecar/Dockerfile download from (neither pins a specific revision).
+  MODEL_CACHE_VERSION: "v1"
+
+jobs:
+  root:
+    name: Root module (test + lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+
+      - name: make test
+        run: make test
+
+      # golangci-lint's own release binaries lag the Go toolchain this
+      # repo pins (go.mod requires go1.26+; verified locally that a
+      # binary built with go1.25.x refuses to load this repo's
+      # .golangci.yml with "the Go language version ... is lower than the
+      # targeted Go version"). `go install` builds it with whatever Go
+      # toolchain this job already set up instead, which sidesteps that.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+
+      - name: make lint
+        run: make lint
+
+  sidecar-hermetic:
+    name: Sidecar hermetic tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sidecar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache-dependency-path: sidecar/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      # SIDECAR_TEST_DATABASE_URL is intentionally not set: the
+      # database-backed tests in these packages t.Skip without it, exactly
+      # as sidecar.yml documents. No PostgreSQL service is started here.
+      - name: Hermetic tests
+        run: make test-hermetic
+
+  sidecar-native:
+    name: Sidecar native tests (ONNX Runtime + tokenizers)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sidecar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache-dependency-path: sidecar/go.sum
+
+      # --- Native dependency 1: ONNX Runtime --------------------------
+      # URL shape copied from sidecar/Dockerfile, which already worked
+      # these out. Runners are always linux/amd64, so this hardcodes the
+      # "x64" asset name rather than reimplementing the Dockerfile's
+      # TARGETARCH -> aarch64 mapping, which only matters on arm64.
+      - name: Cache ONNX Runtime
+        id: cache-onnxruntime
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /opt/onnxruntime
+          key: onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Download ONNX Runtime
+        if: steps.cache-onnxruntime.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          curl -fsSL -o /tmp/ort.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo mkdir -p /opt/onnxruntime
+          sudo tar -xzf /tmp/ort.tgz -C /opt/onnxruntime --strip-components=1
+          rm /tmp/ort.tgz
+          test -f /opt/onnxruntime/lib/libonnxruntime.so
+
+      # --- Native dependency 2: libtokenizers.a ------------------------
+      # The version MUST match sidecar/go.mod's daulet/tokenizers
+      # requirement exactly -- the Rust ABI is not stable across releases.
+      - name: Cache libtokenizers
+        id: cache-tokenizers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /opt/tokenizers
+          key: libtokenizers-linux-amd64-${{ env.TOKENIZERS_VERSION }}
+
+      - name: Download libtokenizers
+        if: steps.cache-tokenizers.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          curl -fsSL -o /tmp/tokenizers.tgz \
+            "https://github.com/daulet/tokenizers/releases/download/${TOKENIZERS_VERSION}/libtokenizers.linux-amd64.tar.gz"
+          sudo mkdir -p /opt/tokenizers
+          sudo tar -xzf /tmp/tokenizers.tgz -C /opt/tokenizers
+          rm /tmp/tokenizers.tgz
+          test -f /opt/tokenizers/libtokenizers.a
+
+      # --- Native dependency 3: the model (~131MB) ---------------------
+      # Same file list and layout as sidecar/Dockerfile's model stage:
+      # hugot expects tokenizer.json and friends one directory up from the
+      # .onnx file itself.
+      - name: Cache model
+        id: cache-model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /opt/models
+          key: sidecar-model-${{ env.MODEL_REPO }}-${{ env.MODEL_CACHE_VERSION }}
+
+      - name: Download model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          model_dir="/opt/models/$(basename "${MODEL_REPO}")"
+          sudo mkdir -p "${model_dir}/onnx"
+          sudo chown -R "$(id -u):$(id -g)" /opt/models
+          base="https://huggingface.co/${MODEL_REPO}/resolve/main"
+          for f in tokenizer.json vocab.txt config.json tokenizer_config.json special_tokens_map.json; do
+            curl -fsSL -o "${model_dir}/${f}" "${base}/${f}"
+          done
+          curl -fsSL -o "${model_dir}/onnx/model_quantized.onnx" "${base}/onnx/model_quantized.onnx"
+          test -s "${model_dir}/onnx/model_quantized.onnx"
+
+      # --- The job's actual purpose -------------------------------------
+      # -v is required: the skip-detection step below parses it. Both env
+      # vars are set so the gated tests run instead of skipping --
+      # SIDECAR_TEST_DATABASE_URL stays unset on purpose (no database
+      # here), so the handful of database-gated tests in cmd/sidecar
+      # still skip; that's expected, see the checker script's own
+      # comment for exactly which tests it does and doesn't require.
+      - name: Run native tests
+        env:
+          CGO_LDFLAGS: "-L/opt/tokenizers"
+          SIDECAR_MODEL_PATH: /opt/models/nomic-embed-text-v1.5/onnx/model_quantized.onnx
+          SIDECAR_ONNX_LIB_DIR: /opt/onnxruntime/lib
+          LD_LIBRARY_PATH: /opt/onnxruntime/lib
+        run: |
+          set -o pipefail
+          go test -tags ORT -v ./internal/embed/... ./cmd/sidecar/ 2>&1 | tee test-output.log
+
+      # A skipped test must not read as a pass: go test prints "ok" for a
+      # run that skipped every gated test in it, which is exactly the
+      # false green this job exists to prevent (see the script's header
+      # comment -- it happened twice in one day during this fork's
+      # development, from setting the wrong env var and trusting "ok").
+      - name: Verify gated tests actually ran
+        run: |
+          "$GITHUB_WORKSPACE/.github/workflows/scripts/check-sidecar-gated-tests.sh" test-output.log
