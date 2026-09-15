@@ -110,13 +110,63 @@ type EmbedderManager interface {
 // *store.Store satisfies it with no adaptation, the same way it already
 // satisfies EntryLookup and DatabaseMetricsSource.
 type ArticleLookup interface {
-	EntryArticle(ctx context.Context, entryID int64) (*store.ArticleDetail, error)
+	EntryArticle(ctx context.Context, entryID, userID int64) (*store.ArticleDetail, error)
 }
 
 // Server is the sidecar's status and admin HTTP server (spec §9.4), and,
 // since task 7, its read-only search HTTP API (spec §6.3-6.4, §7), and,
 // since task 15, GET /api/article — the full-content read the MCP server's
 // fetch_article tool wraps.
+//
+// Since task 17, GET /api/search, /api/similar and /api/article are
+// protected by requireAPIKey (auth.go): a Miniflux API key, read from the
+// same X-Auth-Token header and validated read-only against the same
+// public.api_keys table Miniflux's own REST API uses. The status page
+// (GET /{$}), GET /api/status, and every control endpoint (backfill
+// pause/resume/config, the Task 9 embedder-switch endpoints) are
+// deliberately left unauthenticated, exactly as before -- a decision this
+// task made, not an oversight:
+//
+//   - The confidentiality problem task 17 exists to fix is per-user
+//     article content leaking between Miniflux users through the search
+//     API. Status and control state carry no per-user data at all --
+//     they are global operational metrics (throughput, ETA, database
+//     size) and global on/off switches (pause, the embedder in use).
+//     There is nothing there for one Miniflux user's key to protect from
+//     another's.
+//   - Network isolation is already this server's documented security
+//     model, unchanged by this task: it binds to loopback by default
+//     (DefaultAddr's own doc comment), the production compose stack
+//     deliberately publishes no port for it, and README.md already
+//     states plainly that binding it anywhere else is a deliberate
+//     operator override. Everyone who can already reach this admin
+//     surface at all sits inside that same trust boundary.
+//   - Gating these endpoints on "any valid Miniflux API key" would not
+//     actually restrict them to an operator: public.api_keys carries no
+//     admin/operator distinction (any Miniflux user, including a
+//     low-privilege reader, can mint one from their own account
+//     settings). Requiring one here would look like it raises the bar
+//     against a malicious LAN actor -- the embedder switch's real threat,
+//     since it can trigger a multi-hour full re-index -- while actually
+//     only requiring that actor to hold any one valid reader's key, which
+//     the confidentiality leak this task closes makes no harder to
+//     obtain than before. That is a worse outcome than today's plain
+//     network-isolation boundary: an operator who saw "now protected by
+//     an API key" would reasonably read that as raising the bar, when it
+//     would not.
+//   - The task brief's own hard constraint -- no configuration flag may
+//     disable authentication, because that is the flag production
+//     forgets to unset -- has a mirror image here: gating an operator's
+//     own pause button, or the embedder-switch preview/config forms they
+//     use to recover a stuck backfill, behind a key they may not have to
+//     hand on the box in front of them has a real operational cost, for
+//     a security benefit this endpoint's actual threat model (an
+//     authenticated non-admin Miniflux user versus an unauthenticated
+//     LAN actor) does not clearly provide.
+//
+// See auth_test.go's TestControlAndStatusEndpointsRemainUnauthenticated,
+// which pins this decision so a later change cannot silently narrow it by
+// accident.
 type Server struct {
 	backfill BackfillController
 	live     LiveLane
@@ -125,6 +175,7 @@ type Server struct {
 	articles ArticleLookup
 	metrics  DatabaseMetricsSource
 	manager  EmbedderManager
+	keys     APIKeyValidator
 	tmpl     *template.Template
 	mux      *http.ServeMux
 }
@@ -134,20 +185,25 @@ type Server struct {
 // /api/similar), entries (loaded per result to build a highlighted
 // search.BuildSnippet — see search_handlers.go), articles (GET
 // /api/article's full-content read — see article_handler.go), metrics (the
-// database-size and health section — spec §13.2) and manager (the Model
-// section's embedder controls — Task 9, spec §13.1). It parses the
-// embedded status page template eagerly so a malformed template fails at
-// startup, not on the first request.
+// database-size and health section — spec §13.2), manager (the Model
+// section's embedder controls — Task 9, spec §13.1) and keys (task 17's
+// API key validator, guarding GET /api/search, /api/similar and
+// /api/article — see this type's own doc comment for which endpoints are
+// and are not protected, and why). It parses the embedded status page
+// template eagerly so a malformed template fails at startup, not on the
+// first request.
 //
-// live, searcher, entries, articles, metrics and manager may all be nil in
-// tests that don't care about what they cover (see server_test.go);
-// cmd/sidecar always supplies all six. A nil live renders as "not paused"
-// — the zero value of indexer.LiveStats — rather than panicking; a nil (or
-// erroring) metrics source renders the database-size section as
+// live, searcher, entries, articles, metrics, manager and keys may all be
+// nil in tests that don't care about what they cover (see server_test.go);
+// cmd/sidecar always supplies all seven. A nil live renders as "not
+// paused" — the zero value of indexer.LiveStats — rather than panicking; a
+// nil (or erroring) metrics source renders the database-size section as
 // unavailable rather than panicking or showing zeroes as if they were real
 // (see view()); a nil manager renders the Model section as unavailable the
-// same way (see modelView()).
-func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, articles ArticleLookup, metrics DatabaseMetricsSource, manager EmbedderManager) (*Server, error) {
+// same way (see modelView()); a nil keys fails every protected request
+// closed with 500 (see requireAPIKey in auth.go) rather than silently
+// admitting every caller.
+func New(backfill BackfillController, live LiveLane, searcher SearchService, entries EntryLookup, articles ArticleLookup, metrics DatabaseMetricsSource, manager EmbedderManager, keys APIKeyValidator) (*Server, error) {
 	tmpl, err := template.New("status.html").Funcs(template.FuncMap{
 		"comma":    commaInt,
 		"bytesize": formatBytes,
@@ -156,7 +212,7 @@ func New(backfill BackfillController, live LiveLane, searcher SearchService, ent
 		return nil, fmt.Errorf("web: unable to parse status template: %w", err)
 	}
 
-	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, articles: articles, metrics: metrics, manager: manager, tmpl: tmpl}
+	s := &Server{backfill: backfill, live: live, searcher: searcher, entries: entries, articles: articles, metrics: metrics, manager: manager, keys: keys, tmpl: tmpl}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -175,10 +231,13 @@ func New(backfill BackfillController, live LiveLane, searcher SearchService, ent
 	// sameOriginOrNoOrigin's check — see handleSearch/handleSimilar's own
 	// doc comment for why a read-only endpoint on this loopback-bound
 	// server does not need it; handleArticle is the same shape of
-	// endpoint for the same reason.
-	mux.HandleFunc("GET /api/search", s.handleSearch)
-	mux.HandleFunc("GET /api/similar", s.handleSimilar)
-	mux.HandleFunc("GET /api/article", s.handleArticle)
+	// endpoint for the same reason. They DO carry requireAPIKey (task 17,
+	// auth.go) — these are the sidecar's data endpoints, the ones this
+	// task's Server doc comment explains are protected while the routes
+	// above are not.
+	mux.HandleFunc("GET /api/search", s.requireAPIKey(s.handleSearch))
+	mux.HandleFunc("GET /api/similar", s.requireAPIKey(s.handleSimilar))
+	mux.HandleFunc("GET /api/article", s.requireAPIKey(s.handleArticle))
 	s.mux = mux
 
 	return s, nil

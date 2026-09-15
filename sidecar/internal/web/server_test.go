@@ -124,6 +124,73 @@ func (f *fakeMetrics) DatabaseMetrics(context.Context) (store.DatabaseMetrics, e
 	return f.metrics, f.err
 }
 
+// fakeKeyValidator is a hermetic stand-in for APIKeyValidator (task 17):
+// an in-memory token -> user id map, mutable mid-test (delete a token to
+// simulate Miniflux revoking an API key by deleting its api_keys row), so
+// these tests never need a database. A non-nil err makes ValidateAPIKey
+// always fail instead of consulting the map, for the "validation itself
+// errors" case.
+type fakeKeyValidator struct {
+	mu     sync.Mutex
+	tokens map[string]int64
+	err    error
+}
+
+func newFakeKeyValidator(tokens map[string]int64) *fakeKeyValidator {
+	cp := make(map[string]int64, len(tokens))
+	for k, v := range tokens {
+		cp[k] = v
+	}
+	return &fakeKeyValidator{tokens: cp}
+}
+
+func (f *fakeKeyValidator) ValidateAPIKey(_ context.Context, token string) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return 0, false, f.err
+	}
+	id, ok := f.tokens[token]
+	return id, ok, nil
+}
+
+// revoke removes token from the map, simulating Miniflux deleting the
+// underlying api_keys row: the very next ValidateAPIKey call for it must
+// report ok=false.
+func (f *fakeKeyValidator) revoke(token string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.tokens, token)
+}
+
+// testAuthToken/testAuthUserID are the fixed API key and user id every
+// helper below that builds a Server with a real SearchService/
+// ArticleLookup authenticates requests as, via authedHandler, unless a
+// test is specifically about authentication itself (see auth_test.go)
+// and sets its own header (or none) directly.
+const (
+	testAuthToken           = "sidecar-test-token"
+	testAuthUserID    int64 = 777
+	testOtherAuthToken      = "sidecar-test-token-other-user"
+	testOtherUserID   int64 = 888
+)
+
+// authedHandler wraps h so every request it serves already carries a
+// valid X-Auth-Token header (testAuthToken), unless the request already
+// set one itself -- which lets the many pre-existing search/similar/
+// article tests that predate task 17's authentication requirement keep
+// exercising their own, unrelated behaviour unchanged, while auth_test.go
+// and the handful of tests below that ARE about authentication set (or
+// deliberately omit) their own header and are never overridden here.
+type authedHandler struct{ h http.Handler }
+
+func (a authedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(authTokenHeader) == "" {
+		r.Header.Set(authTokenHeader, testAuthToken)
+	}
+	a.h.ServeHTTP(w, r)
+}
+
 func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	t.Helper()
 	// nil for live: these tests exercise only the backfill control
@@ -133,7 +200,7 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 	// service/entries/articles/metrics source either -- see
 	// search_handlers_test.go and article_handler_test.go for the first
 	// three and TestStatusPage*Metrics* below for the fourth.
-	srv, err := New(fb, nil, nil, nil, nil, nil, nil)
+	srv, err := New(fb, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -145,7 +212,7 @@ func newTestServer(t *testing.T, fb *fakeBackfill) http.Handler {
 // renders distinctly from the backfill lane's.
 func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.Handler {
 	t.Helper()
-	srv, err := New(fb, live, nil, nil, nil, nil, nil)
+	srv, err := New(fb, live, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -157,7 +224,7 @@ func newTestServerWithLive(t *testing.T, fb *fakeBackfill, live LiveLane) http.H
 // database-size section renders from it.
 func newTestServerWithMetrics(t *testing.T, fb *fakeBackfill, metrics DatabaseMetricsSource) http.Handler {
 	t.Helper()
-	srv, err := New(fb, nil, nil, nil, nil, metrics, nil)
+	srv, err := New(fb, nil, nil, nil, nil, metrics, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -220,7 +287,7 @@ func (f *fakeEmbedderManager) switchCallCount() int {
 // EmbedderManager, for the tests that check the Model section (Task 9).
 func newTestServerWithManager(t *testing.T, fb *fakeBackfill, manager EmbedderManager) http.Handler {
 	t.Helper()
-	srv, err := New(fb, nil, nil, nil, nil, nil, manager)
+	srv, err := New(fb, nil, nil, nil, nil, nil, manager, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

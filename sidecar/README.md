@@ -531,9 +531,13 @@ of them fails, the process cancels the others and exits non-zero.
 ### The admin page
 
 The status and admin page is at **<http://127.0.0.1:8081/>** by default
-(`SIDECAR_ADMIN_ADDR` to change it). It has **no authentication** — binding
-to loopback is its only protection — so point it anywhere else only
-deliberately.
+(`SIDECAR_ADMIN_ADDR` to change it). The status page and every control
+endpoint below have **no authentication** — binding to loopback is their
+only protection — so point this server anywhere else only deliberately.
+This is a deliberate decision, not an oversight left over from before the
+[search API's own API-key requirement](#the-search-http-api) below: see
+"Why the status page and control endpoints are not gated by an API key"
+at the end of this section for the reasoning.
 
 It shows progress and ETA, current throughput, the live worker count with
 the controller's reason for it, skip and failure counts by cause, the
@@ -547,10 +551,53 @@ the throttle. JSON equivalents:
 | `POST /api/backfill/pause` | stop starting new batches |
 | `POST /api/backfill/resume` | release a paused lane |
 | `POST /api/backfill/config` | change the throttle |
+| `GET /api/embedder` | the Model section's current state (Task 9) |
+| `POST /api/embedder/preview` | test a candidate embedder without switching |
+| `POST /api/embedder/switch` | apply an embedder switch (can trigger a full re-index) |
 
-The three `POST` endpoints check the `Origin` header and reject
-cross-origin requests, so a page open in your browser on another origin
-cannot drive them.
+The three `POST /api/backfill/*` and `/api/embedder/*` endpoints check the
+`Origin` header and reject cross-origin requests, so a page open in your
+browser on another origin cannot drive them.
+
+#### Why the status page and control endpoints are not gated by an API key
+
+None of the endpoints in this section require a Miniflux API key, even
+though [the search API](#the-search-http-api) below does as of the change
+that added authentication. That split was a deliberate decision, argued
+here rather than made by accident:
+
+- **There is no per-user data here to protect.** The confidentiality
+  problem the search API's own authentication requirement exists to fix
+  is one Miniflux user's articles leaking into another's search results.
+  The status page and every control endpoint above are global —
+  throughput, ETA, database size, the embedder in use, pause/resume — with
+  no per-user dimension at all. A Miniflux API key has nothing to scope
+  here.
+- **Network isolation is the existing, documented protection**, unchanged
+  by adding an API key requirement elsewhere: this server binds to
+  loopback by default, and the production compose stack deliberately
+  publishes no port for it at all. Anyone who can already reach this admin
+  surface is already inside that trust boundary.
+- **A Miniflux API key does not actually mean "operator".** Any Miniflux
+  user — including a low-privilege reader — can mint their own API key
+  from their account settings; `public.api_keys` carries no admin
+  distinction. Gating the embedder switch (the most dangerous control
+  endpoint here — it can trigger a multi-hour full corpus re-index) behind
+  "any valid Miniflux key" would look like it raises the bar against a
+  malicious actor on the network, while actually only requiring that actor
+  to hold any one reader's key — which the search API's own confidentiality
+  fix does nothing to make harder to obtain. That would be a worse outcome
+  than today's plain network-isolation boundary: it would look like
+  protection without providing much.
+- **Locking an operator out of their own pause button has a real cost.**
+  An operator recovering a stuck backfill from the box in front of them
+  may not have a Miniflux API key to hand at all.
+
+If your threat model requires more than network isolation for this admin
+surface specifically, the answer is to isolate it further at the network
+layer (a firewall rule, a reverse-proxy auth layer, an SSH tunnel) — not a
+Miniflux API key, which was not designed to express an admin/operator
+privilege level in the first place.
 
 ### The backfill lane and its throttle
 
@@ -609,8 +656,7 @@ output changes, as a reminder.
 ## The search HTTP API
 
 `internal/web/search_handlers.go` and `article_handler.go` serve three
-read-only, **unauthenticated** GET endpoints on the same admin server
-above:
+read-only GET endpoints on the same admin server above:
 
 | Endpoint | Purpose |
 |---|---|
@@ -619,12 +665,53 @@ above:
 | `GET /api/article?entry_id=` | one entry's title, url, published date and full content (task 15) |
 
 All three also accept the filter parameters `parseFilters` documents in
-`search_handlers.go` (`user`, `feed`, `category`, `unread`, `starred`,
-`since`, `until`). There is no authentication on this server today — see
-that file's own package doc comment for why binding it to loopback (or a
-trusted LAN) is this API's only protection, and why the MCP server below
-talks to it over a local child process rather than opening its own
-network port.
+`search_handlers.go` (`feed`, `category`, `unread`, `starred`, `since`,
+`until`, and `user` — see "Authentication" just below for what `user` does
+now).
+
+### Authentication
+
+**These three endpoints require a Miniflux API key.** Send it as the
+`X-Auth-Token` header — the exact header Miniflux's own REST API reads
+(`internal/api/middleware.go`) — and the sidecar validates it with a
+single read-only lookup against `public.api_keys`, the same table
+Miniflux itself uses. **One Miniflux API key works against both
+services**; there is no separate sidecar credential to create or manage.
+
+Create one from Miniflux's own web UI: **Settings → API Keys → Create a
+new API key**. Give it a description and save it; the token shown there
+is what you send as `X-Auth-Token`.
+
+```sh
+curl -H 'X-Auth-Token: <your-miniflux-api-key>' \
+  'http://127.0.0.1:8081/api/search?q=widgets'
+```
+
+- **Missing or unrecognised token → `401`**, with a JSON body naming the
+  expected header (never anything that would let a caller tell "wrong
+  token" apart from "this token doesn't exist" — see
+  `internal/web/auth.go`).
+- **A revoked key stops working immediately.** Validation is a live,
+  read-only lookup on every request — nothing is cached — so deleting an
+  `api_keys` row in Miniflux takes effect on the very next sidecar
+  request. The sidecar never writes to `api_keys` itself (in particular,
+  it never updates `last_used_at` — that column belongs to Miniflux).
+- **Results are scoped to your key's user, not to a `user=` parameter you
+  send.** Before this authentication requirement existed, `user=<id>` in
+  the query string was the caller's own unchecked assertion of identity.
+  It still exists for backward compatibility, but it can no longer be
+  used to claim a different identity: the user id is now derived from your
+  API key, an omitted `user` parameter is filled in from your key
+  automatically, and a `user` parameter that disagrees with your key is
+  rejected with `400` rather than honoured or silently overridden.
+
+The admin/status page, `GET /api/status`, and the backfill/embedder
+control endpoints documented under "The admin page" above are **not**
+gated by an API key — see that section's own "Why the status page and
+control endpoints are not gated by an API key" for the reasoning. Binding
+this server to loopback (or a trusted LAN) remains that group's only
+protection, and is why the MCP server below talks to it over a local
+child process rather than opening its own network port.
 
 ## The MCP server (`cmd/mcp`)
 
@@ -632,10 +719,9 @@ network port.
 server that Claude Code spawns locally over **stdio** and that calls the
 search HTTP API above. It is not another HTTP service, and it is not a
 CLI flag on `cmd/sidecar` — see `cmd/mcp/main.go`'s own package doc
-comment for why stdio, specifically, is the right transport here: the
-search API has no authentication, so serving MCP from it would open an
-unauthenticated search surface on the network, where a stdio child
-process Claude Code owns the pipes of adds none.
+comment for why stdio, specifically, is the right transport here: a stdio
+child process Claude Code spawns and owns the pipes of opens no network
+surface at all, where serving MCP directly from the admin server would.
 
 It exposes three tools, each wrapping one endpoint above:
 
@@ -679,18 +765,17 @@ Environment variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `SIDECAR_URL` | `http://localhost:8081` | base URL of a running sidecar's admin server (`SIDECAR_ADMIN_ADDR` above, spelled out as a URL) |
-| `MINIFLUX_API_KEY` | *(none)* | a Miniflux API key, sent as the `X-Auth-Token` header on every request — see below |
+| `MINIFLUX_API_KEY` | *(none)* | a Miniflux API key, sent as the `X-Auth-Token` header on every request — required; see "Authentication" under "The search HTTP API" above |
 
-**`MINIFLUX_API_KEY` does nothing yet, and that is expected.** The search
-API above has no authentication today, so every tool call works with no
-key configured; `cmd/mcp` logs a warning to stderr when it is unset,
-nothing more. A follow-on task has the sidecar validate this header
-against `public.api_keys` — the same table and header
-`internal/api/middleware.go` already reads on the main Miniflux fork's own
-REST API — at which point every tool call **will** start failing with
-"sidecar rejected the API key" until this variable is set to a real key.
-Setting it now costs nothing and means that change requires no
-`claude mcp add` update later.
+**`MINIFLUX_API_KEY` is required.** As of the sidecar's own API-key
+requirement (see "Authentication" under "The search HTTP API" above),
+`GET /api/search`, `/api/similar` and `/api/article` all reject a request
+with no valid token. Leaving this unset still starts `cmd/mcp` — it is a
+warning to stderr, not a fatal error, since the tool can still report a
+clear failure per call rather than refusing to start — but every
+`search`/`similar`/`fetch_article` tool call will fail with "sidecar
+rejected the API key" until it is set to a real Miniflux key. Create one
+from Miniflux's own **Settings → API Keys → Create a new API key**.
 
 ### Failure modes
 
@@ -700,7 +785,8 @@ different fix (`internal/sidecarclient`'s `UnreachableError`/`AuthError`/
 
 - **The sidecar is not running** (the common case — the stack gets torn
   down routinely): `"sidecar unreachable at http://localhost:8081: ..."`.
-- **The sidecar rejected the API key** (401/403, once auth lands):
+- **The sidecar rejected the API key** (401 for a missing/unknown token,
+  403 for a valid-but-forbidden one — see "Authentication" above):
   `"sidecar rejected the API key (HTTP 401): ... -- set MINIFLUX_API_KEY
   to a valid Miniflux API key"`.
 - **The request itself was rejected** (400/404/500 — an unknown `mode`, an

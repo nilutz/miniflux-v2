@@ -26,8 +26,17 @@ func createTestEntry(t *testing.T, s *Store, username, content string) int64 {
 // multi-byte content).
 func createTestEntryWithTitle(t *testing.T, s *Store, username, title, content string) int64 {
 	t.Helper()
+	entryID, _ := createTestEntryWithTitleAndUser(t, s, username, title, content)
+	return entryID
+}
 
-	var userID int64
+// createTestEntryWithTitleAndUser is createTestEntryWithTitle, but also
+// returns the id of the user it created -- needed by tests that assert an
+// entry is scoped to its owning user (task 17's EntryArticle ownership
+// check), which no caller needed exposed before this task.
+func createTestEntryWithTitleAndUser(t *testing.T, s *Store, username, title, content string) (entryID, userID int64) {
+	t.Helper()
+
 	if err := s.db.QueryRow(
 		`INSERT INTO users (username, password) VALUES ($1, 'x') RETURNING id`,
 		username,
@@ -55,7 +64,6 @@ func createTestEntryWithTitle(t *testing.T, s *Store, username, title, content s
 		t.Fatalf("unable to create feed: %v", err)
 	}
 
-	var entryID int64
 	if err := s.db.QueryRow(
 		`INSERT INTO entries (title, hash, url, published_at, changed_at, user_id, feed_id, content)
 		 VALUES ($1, $2, 'https://example.org/'||$3, now(), now(), $4, $5, $6)
@@ -69,7 +77,7 @@ func createTestEntryWithTitle(t *testing.T, s *Store, username, title, content s
 		s.db.Exec(`DELETE FROM search.entry_index_state WHERE entry_id=$1`, entryID)
 	})
 
-	return entryID
+	return entryID, userID
 }
 
 func updateEntryContent(t *testing.T, s *Store, entryID int64, content string) {
@@ -207,9 +215,9 @@ func TestEntryArticleReturnsTitleURLPublishedAtAndContent(t *testing.T) {
 		t.Fatalf("migrate failed: %v", err)
 	}
 
-	entryID := createTestEntryWithTitle(t, s, "article-fetch", "An Article Title", "<p>full body</p>")
+	entryID, userID := createTestEntryWithTitleAndUser(t, s, "article-fetch", "An Article Title", "<p>full body</p>")
 
-	a, err := s.EntryArticle(context.Background(), entryID)
+	a, err := s.EntryArticle(context.Background(), entryID, userID)
 	if err != nil {
 		t.Fatalf("EntryArticle: %v", err)
 	}
@@ -242,12 +250,47 @@ func TestEntryArticleReturnsErrorForUnknownEntry(t *testing.T) {
 		t.Fatalf("migrate failed: %v", err)
 	}
 
-	_, err := s.EntryArticle(context.Background(), -1)
+	_, err := s.EntryArticle(context.Background(), -1, -1)
 	if err == nil {
 		t.Fatal("expected an error for an entry id that does not exist")
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("error = %v, want it to wrap sql.ErrNoRows", err)
+	}
+}
+
+// TestEntryArticleDoesNotReturnAnotherUsersEntry is task 17's ownership
+// guard on GET /api/article: an entry id that genuinely exists, but
+// belongs to a DIFFERENT user than the one asking, must be refused
+// exactly like an entry id that does not exist at all -- both wrap
+// sql.ErrNoRows, so a caller cannot use this method to tell "not mine"
+// apart from "does not exist". Without the AND user_id=$2 predicate this
+// method would happily hand back another user's title, URL and full
+// article content by number.
+func TestEntryArticleDoesNotReturnAnotherUsersEntry(t *testing.T) {
+	s := testStore(t)
+	if err := s.Migrate(); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+
+	entryID, ownerID := createTestEntryWithTitleAndUser(t, s, "article-owner", "Owner's Article", "<p>owner content</p>")
+	_, otherUserID := createTestEntryWithTitleAndUser(t, s, "article-stranger", "Stranger's Article", "<p>stranger content</p>")
+	if ownerID == otherUserID {
+		t.Fatalf("fixture error: both entries belong to user %d", ownerID)
+	}
+
+	// The owner can fetch their own entry.
+	if _, err := s.EntryArticle(context.Background(), entryID, ownerID); err != nil {
+		t.Fatalf("owner's own EntryArticle call failed: %v", err)
+	}
+
+	// A different, real user cannot fetch it via the same entry id.
+	_, err := s.EntryArticle(context.Background(), entryID, otherUserID)
+	if err == nil {
+		t.Fatal("expected an error when a different user requests someone else's entry")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("error = %v, want it to wrap sql.ErrNoRows (indistinguishable from \"does not exist\")", err)
 	}
 }
 

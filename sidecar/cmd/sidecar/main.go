@@ -447,7 +447,12 @@ func run() error {
 		RemoteURL: choice.remoteURL,
 	}, searcher)
 
-	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s, s, manager)
+	// The final s: task 17's APIKeyValidator, guarding GET /api/search,
+	// /api/similar and /api/article with the same Miniflux API keys
+	// Miniflux's own REST API validates (public.api_keys, read-only) —
+	// see web.Server's own doc comment for which endpoints are and are
+	// not protected, and why.
+	adminServer, err := web.New(backfill, liveMonitor, searcher, s, s, s, manager, s)
 	if err != nil {
 		return fmt.Errorf("sidecar: unable to build admin server: %w", err)
 	}

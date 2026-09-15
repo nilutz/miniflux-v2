@@ -426,14 +426,20 @@ func parseDateParam(raw, name string) (time.Time, error) {
 // parseUserID parses the optional "user" query parameter into
 // search.Filters.UserID.
 //
-// Absent/blank means 0, which search.Filters reads as "every user's
-// content is eligible". That is deliberately still permitted — this
-// service is loopback-bound, unauthenticated, and has operator-facing
-// callers (the eval harness, a curl against one's own corpus) for which
-// a global search is the point — but it is NOT what a multi-user reader
-// UI should send: see search.Filters.UserID's own doc comment for why an
-// unscoped search silently shortens a user's own result page rather than
-// merely widening it. The fork's searchclient always sets it.
+// Since task 17, GET /api/search and /api/similar are authenticated, and
+// resolveAuthenticatedUserID (below) always overwrites whatever this
+// returns with the id the caller's own API key resolved to before a
+// request reaches the Searcher — so a value parsed here is no longer the
+// thing that decides scope. It still has two jobs: a malformed value (not
+// a whole number, zero, negative) is still rejected here with a 400
+// before authentication's own scope check ever runs, and a well-formed
+// value that disagrees with the authenticated key is what
+// resolveAuthenticatedUserID rejects. Absent/blank still means 0 at this
+// parsing stage — resolveAuthenticatedUserID reads that as "the caller
+// expressed no opinion" and fills in the authenticated user unconditionally,
+// never as "every user's content is eligible" the way it did before
+// authentication existed (see search.Filters.UserID's own doc comment for
+// why an unscoped search was already a footgun even before this task).
 //
 // A present-but-nonsensical value (not a whole number, zero, negative)
 // is a 400 rather than a silent fall back to "unscoped": a caller that
@@ -492,6 +498,52 @@ func parseFilters(q url.Values) (search.Filters, error) {
 	return f, nil
 }
 
+// resolveAuthenticatedUserID is task 17's "second problem" fix, applied to
+// both GET /api/search and GET /api/similar: it reconciles f.UserID (as
+// parsed by parseFilters, above, from the caller-supplied "user" query
+// parameter) against the user id the caller's own API key resolved to
+// (requireAPIKey in auth.go, always run first on both routes).
+//
+//   - f.UserID == 0 (the caller expressed no opinion): filled in from the
+//     authenticated user unconditionally. Once a request is authenticated
+//     there is no longer such a thing as an intentionally unscoped
+//     search through this endpoint — the key IS the scope.
+//   - f.UserID != 0 and it matches the authenticated user: left as is (a
+//     no-op — this is the same value resolveAuthenticatedUserID would
+//     have filled in anyway).
+//   - f.UserID != 0 and it does NOT match: rejected with 400. This is a
+//     deliberate choice among three defensible ones (ignore it, remove
+//     the parameter entirely, or reject a disagreement) — rejecting
+//     follows the same fail-loud policy parseUserID's own doc comment
+//     already established for a malformed value, and it is what actually
+//     closes the hole this task exists to close: before this task, the
+//     "user" parameter was the caller's unchecked assertion of identity;
+//     after it, a caller can no longer make that assertion at all, loudly
+//     or quietly — the key is what decides who they are.
+//
+// Writes a 400 or 500 response and returns false when it refuses the
+// request; returns true, with f.UserID authoritatively set to the
+// authenticated user, otherwise.
+func resolveAuthenticatedUserID(w http.ResponseWriter, r *http.Request, f *search.Filters) bool {
+	authUserID, ok := authenticatedUserID(r)
+	if !ok {
+		// Unreachable through the registered routes: handleSearch and
+		// handleSimilar are only ever invoked wrapped by requireAPIKey,
+		// which always sets this before calling through. Fail closed
+		// rather than silently search unscoped if that invariant is ever
+		// broken by a future refactor.
+		slog.Error("web: resolveAuthenticatedUserID called with no authenticated user id in context")
+		writeAPIError(w, http.StatusInternalServerError, "authentication context missing")
+		return false
+	}
+	if f.UserID != 0 && f.UserID != authUserID {
+		writeAPIError(w, http.StatusBadRequest, `the "user" parameter does not match the user your API key belongs to`)
+		return false
+	}
+	f.UserID = authUserID
+	return true
+}
+
 // handleSearch serves GET /api/search. See this file's package-level doc
 // comment for why it carries no sameOriginOrNoOrigin check.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -518,6 +570,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	filters, err := parseFilters(q)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !resolveAuthenticatedUserID(w, r, &filters) {
 		return
 	}
 
@@ -578,6 +633,9 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 	filters, err := parseFilters(q)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !resolveAuthenticatedUserID(w, r, &filters) {
 		return
 	}
 

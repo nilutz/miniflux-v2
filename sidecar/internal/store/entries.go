@@ -41,10 +41,19 @@ type ArticleDetail struct {
 // public.entries (read-only): title, URL, published date and content. It
 // takes a context for the same reason EntryForIndexing does -- this backs
 // an HTTP handler on the synchronous request path, not background work.
-func (s *Store) EntryArticle(ctx context.Context, entryID int64) (*ArticleDetail, error) {
+//
+// userID scopes the lookup to entries that user owns (task 17): GET
+// /api/article is now an authenticated endpoint, and without this an
+// entry id from one user's search results could be used to read another
+// user's article content by number, regardless of whose API key asked for
+// it. A mismatch (an entry that exists, but belongs to someone else) is
+// deliberately indistinguishable from "no such entry" -- both return the
+// same wrapped sql.ErrNoRows below -- so a caller cannot use this
+// endpoint to probe whether an entry id it doesn't own exists at all.
+func (s *Store) EntryArticle(ctx context.Context, entryID, userID int64) (*ArticleDetail, error) {
 	var d ArticleDetail
 	var content sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT title, url, published_at, content FROM entries WHERE id=$1`, entryID).
+	err := s.db.QueryRowContext(ctx, `SELECT title, url, published_at, content FROM entries WHERE id=$1 AND user_id=$2`, entryID, userID).
 		Scan(&d.Title, &d.URL, &d.PublishedAt, &content)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("store: entry #%d does not exist: %w", entryID, err)

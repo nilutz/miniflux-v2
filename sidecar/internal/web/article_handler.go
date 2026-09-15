@@ -45,7 +45,12 @@ func toArticleResponseView(d *store.ArticleDetail) articleResponseView {
 }
 
 // handleArticle serves GET /api/article. See this file's package-level
-// doc comment for why it carries no sameOriginOrNoOrigin check.
+// doc comment for why it carries no sameOriginOrNoOrigin check. It DOES
+// carry requireAPIKey (task 17, auth.go): the entry lookup below is
+// scoped to the authenticated caller's own user id, exactly like
+// handleSearch/handleSimilar's own resolveAuthenticatedUserID — see
+// store.Store.EntryArticle's doc comment for why an entry belonging to a
+// different user comes back identically to one that does not exist.
 func (s *Server) handleArticle(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -60,13 +65,25 @@ func (s *Server) handleArticle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userID, ok := authenticatedUserID(r)
+	if !ok {
+		// Unreachable through the registered routes: handleArticle is
+		// only ever invoked wrapped by requireAPIKey, which always sets
+		// this before calling through. Fail closed rather than look up
+		// the entry unscoped if that invariant is ever broken by a future
+		// refactor.
+		slog.Error("web: handleArticle called with no authenticated user id in context")
+		writeAPIError(w, http.StatusInternalServerError, "authentication context missing")
+		return
+	}
+
 	if s.articles == nil {
 		slog.Error("web: article lookup requested but no ArticleLookup is configured")
 		writeAPIError(w, http.StatusInternalServerError, "article lookup unavailable")
 		return
 	}
 
-	article, err := s.articles.EntryArticle(r.Context(), entryID)
+	article, err := s.articles.EntryArticle(r.Context(), entryID, userID)
 	if err != nil {
 		// store.Store.EntryArticle wraps sql.ErrNoRows (via %w) for an
 		// unknown id, which is a caller error (404): every other error is

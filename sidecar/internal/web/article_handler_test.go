@@ -22,11 +22,27 @@ import (
 type fakeArticles struct {
 	byID map[int64]*store.ArticleDetail
 	err  error // when set, EntryArticle always returns this instead of consulting byID
+
+	// ownerOf, when non-nil, maps entryID -> the user id that "owns" it,
+	// mirroring store.Store.EntryArticle's own AND user_id=$2 predicate
+	// (task 17): a userID that does not match comes back exactly like an
+	// unknown entry. Left nil by every test that predates task 17 and
+	// does not care about ownership, in which case any userID is
+	// accepted -- so this file's existing fixtures need no changes.
+	ownerOf map[int64]int64
+
+	lastUserID int64 // the userID EntryArticle was most recently called with
 }
 
-func (f *fakeArticles) EntryArticle(_ context.Context, entryID int64) (*store.ArticleDetail, error) {
+func (f *fakeArticles) EntryArticle(_ context.Context, entryID, userID int64) (*store.ArticleDetail, error) {
+	f.lastUserID = userID
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.ownerOf != nil {
+		if owner, ok := f.ownerOf[entryID]; !ok || owner != userID {
+			return nil, fmt.Errorf("store: entry #%d does not exist: %w", entryID, sql.ErrNoRows)
+		}
 	}
 	d, ok := f.byID[entryID]
 	if !ok {
@@ -35,13 +51,24 @@ func (f *fakeArticles) EntryArticle(_ context.Context, entryID int64) (*store.Ar
 	return d, nil
 }
 
+// newTestArticleServer builds a Server wired with articles and a
+// permissive fakeKeyValidator (testAuthToken -> testAuthUserID,
+// testOtherAuthToken -> testOtherUserID), returning a handler wrapped in
+// authedHandler (server_test.go) so every one of this file's pre-existing
+// tests -- written before task 17 added authentication -- keeps
+// exercising its own, unrelated behaviour without setting a header
+// itself; only the auth/scoping-specific tests below set their own.
 func newTestArticleServer(t *testing.T, articles ArticleLookup) http.Handler {
 	t.Helper()
-	srv, err := New(&fakeBackfill{}, nil, nil, nil, articles, nil, nil)
+	keys := newFakeKeyValidator(map[string]int64{
+		testAuthToken:      testAuthUserID,
+		testOtherAuthToken: testOtherUserID,
+	})
+	srv, err := New(&fakeBackfill{}, nil, nil, nil, articles, nil, nil, keys)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return srv.Handler()
+	return authedHandler{h: srv.Handler()}
 }
 
 func TestArticleReturnsFullContentByEntryID(t *testing.T) {
@@ -162,5 +189,55 @@ func TestArticleLookupFailureReturns500WithGenericMessage(t *testing.T) {
 	decodeJSONBody(t, rec, &body)
 	if strings.Contains(body["error"], "connection reset") {
 		t.Errorf("error body leaked the internal error: %q", body["error"])
+	}
+}
+
+// TestArticleScopesLookupToTheAuthenticatedUser proves handleArticle
+// passes the AUTHENTICATED caller's user id to ArticleLookup, not some
+// other value -- the "results scoped to that key's user" half of task
+// 17's own required coverage, which a status-code-only assertion would
+// not catch (see fakeArticles.lastUserID).
+func TestArticleScopesLookupToTheAuthenticatedUser(t *testing.T) {
+	fa := &fakeArticles{
+		byID:    map[int64]*store.ArticleDetail{42: {ID: 42, Title: "t"}},
+		ownerOf: map[int64]int64{42: testAuthUserID},
+	}
+	handler := newTestArticleServer(t, fa)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/article?entry_id=42", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fa.lastUserID != testAuthUserID {
+		t.Fatalf("EntryArticle called with userID=%d, want the authenticated user %d", fa.lastUserID, testAuthUserID)
+	}
+}
+
+// TestArticleDoesNotReturnAnotherUsersEntry seeds one entry owned by
+// testAuthUserID and proves a DIFFERENT authenticated user
+// (testOtherAuthToken -> testOtherUserID) requesting the same entry id
+// gets a 404, exactly like an entry that does not exist -- task 17's "a
+// token belonging to user A must not return user B's entries",
+// specifically for GET /api/article.
+func TestArticleDoesNotReturnAnotherUsersEntry(t *testing.T) {
+	fa := &fakeArticles{
+		byID:    map[int64]*store.ArticleDetail{42: {ID: 42, Title: "owner's article"}},
+		ownerOf: map[int64]int64{42: testAuthUserID},
+	}
+	handler := newTestArticleServer(t, fa)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/article?entry_id=42", nil)
+	req.Header.Set(authTokenHeader, testOtherAuthToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s, want 404 (a different user's entry must look like it doesn't exist)", rec.Code, rec.Body.String())
+	}
+	if fa.lastUserID != testOtherUserID {
+		t.Fatalf("EntryArticle called with userID=%d, want %d", fa.lastUserID, testOtherUserID)
 	}
 }

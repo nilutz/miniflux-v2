@@ -79,13 +79,26 @@ func (f *fakeEntries) EntryIndexState(_ context.Context, entryID int64) (*store.
 	return f.states[entryID], nil
 }
 
+// newTestSearchServer builds a Server wired with searcher and entries, and
+// a permissive fakeKeyValidator mapping testAuthToken -> testAuthUserID
+// (and testOtherAuthToken -> testOtherUserID, for the handful of tests
+// that need a second identity). The returned handler is wrapped in
+// authedHandler (server_test.go) so every one of this file's many
+// pre-existing tests -- written before task 17 added authentication --
+// keeps exercising its own, unrelated behaviour without having to set a
+// header itself; only the tests about authentication or scoping below set
+// their own header explicitly.
 func newTestSearchServer(t *testing.T, searcher SearchService, entries EntryLookup) http.Handler {
 	t.Helper()
-	srv, err := New(&fakeBackfill{}, nil, searcher, entries, nil, nil, nil)
+	keys := newFakeKeyValidator(map[string]int64{
+		testAuthToken:      testAuthUserID,
+		testOtherAuthToken: testOtherUserID,
+	})
+	srv, err := New(&fakeBackfill{}, nil, searcher, entries, nil, nil, nil, keys)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return srv.Handler()
+	return authedHandler{h: srv.Handler()}
 }
 
 func decodeJSONBody(t *testing.T, rec *httptest.ResponseRecorder, out any) {
@@ -495,30 +508,15 @@ func (c *countingEntries) EntryIndexState(_ context.Context, entryID int64) (*st
 	return nil, nil
 }
 
-// TestSearchUserParameterReachesTheSearcher is the fix for the review's
-// finding 3 at the API boundary: search.passages is global, so unless the
-// caller's user id reaches search.Filters the top-N is drawn from every
-// user's content and the caller silently gets a short page of their own.
-func TestSearchUserParameterReachesTheSearcher(t *testing.T) {
-	fs := &fakeSearcher{}
-	handler := newTestSearchServer(t, fs, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/search?q=widgets&user=7", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if fs.lastRequest.Filters.UserID != 7 {
-		t.Fatalf("Filters.UserID sent to Search = %d, want 7", fs.lastRequest.Filters.UserID)
-	}
-}
-
-// TestSearchWithoutUserParameterIsUnscoped pins the documented default:
-// an absent "user" still means "every user's content", for the operator
-// and eval callers that legitimately want that.
-func TestSearchWithoutUserParameterIsUnscoped(t *testing.T) {
+// TestSearchWithoutUserParameterIsScopedToTheAuthenticatedUser is task
+// 17's replacement for the old "absent user means unscoped" default: once
+// GET /api/search requires a Miniflux API key (authedHandler supplies
+// testAuthToken -- see newTestSearchServer), an absent "user" query
+// parameter is filled in from the AUTHENTICATED caller, never left at 0
+// meaning "every user's content" -- there is no more such thing as an
+// intentionally unscoped search through this endpoint once it is
+// authenticated at all.
+func TestSearchWithoutUserParameterIsScopedToTheAuthenticatedUser(t *testing.T) {
 	fs := &fakeSearcher{}
 	handler := newTestSearchServer(t, fs, nil)
 
@@ -529,30 +527,99 @@ func TestSearchWithoutUserParameterIsUnscoped(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if fs.lastRequest.Filters.UserID != 0 {
-		t.Fatalf("Filters.UserID = %d, want 0 (unscoped)", fs.lastRequest.Filters.UserID)
+	if fs.lastRequest.Filters.UserID != testAuthUserID {
+		t.Fatalf("Filters.UserID = %d, want %d (the authenticated user, from the API key, not 0/unscoped)", fs.lastRequest.Filters.UserID, testAuthUserID)
 	}
 }
 
-func TestSimilarUserParameterReachesTheSearcher(t *testing.T) {
+// TestSearchUserParameterMatchingAuthenticatedUserIsAccepted proves a
+// caller-supplied "user" that happens to agree with their own key is a
+// harmless no-op, not an error -- resolveAuthenticatedUserID's "matches"
+// branch.
+func TestSearchUserParameterMatchingAuthenticatedUserIsAccepted(t *testing.T) {
 	fs := &fakeSearcher{}
 	handler := newTestSearchServer(t, fs, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/similar?entry_id=42&user=7", nil)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/search?q=widgets&user=%d", testAuthUserID), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if fs.lastFilters.UserID != 7 {
-		t.Fatalf("Filters.UserID sent to Similar = %d, want 7", fs.lastFilters.UserID)
+	if fs.lastRequest.Filters.UserID != testAuthUserID {
+		t.Fatalf("Filters.UserID = %d, want %d", fs.lastRequest.Filters.UserID, testAuthUserID)
+	}
+}
+
+// TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected is
+// task 17's actual security fix, pinned as a test: a caller can no longer
+// use "user" to assert a DIFFERENT identity than the one their API key
+// authenticates as. Before this task, ?user=<anyone> was trusted outright;
+// now it is rejected outright, and — the discriminating assertion — the
+// Searcher must never even be called with the wrong scope in flight.
+func TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected(t *testing.T) {
+	fs := &fakeSearcher{}
+	handler := newTestSearchServer(t, fs, nil)
+
+	otherUserID := testAuthUserID + 1
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/search?q=widgets&user=%d", otherUserID), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want 400", rec.Code, rec.Body.String())
+	}
+	if fs.lastRequest.Query != "" {
+		t.Fatalf("expected the Searcher to never be called for a disagreeing user parameter, but it received %+v", fs.lastRequest)
+	}
+}
+
+// TestSimilarWithoutUserParameterIsScopedToTheAuthenticatedUser is
+// TestSearchWithoutUserParameterIsScopedToTheAuthenticatedUser's
+// counterpart for GET /api/similar.
+func TestSimilarWithoutUserParameterIsScopedToTheAuthenticatedUser(t *testing.T) {
+	fs := &fakeSearcher{}
+	handler := newTestSearchServer(t, fs, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/similar?entry_id=42", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fs.lastFilters.UserID != testAuthUserID {
+		t.Fatalf("Filters.UserID sent to Similar = %d, want %d", fs.lastFilters.UserID, testAuthUserID)
+	}
+}
+
+// TestSimilarUserParameterDisagreeingWithAuthenticatedUserIsRejected is
+// TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected's
+// counterpart for GET /api/similar.
+func TestSimilarUserParameterDisagreeingWithAuthenticatedUserIsRejected(t *testing.T) {
+	fs := &fakeSearcher{}
+	handler := newTestSearchServer(t, fs, nil)
+
+	otherUserID := testAuthUserID + 1
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/similar?entry_id=42&user=%d", otherUserID), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want 400", rec.Code, rec.Body.String())
+	}
+	if fs.similarCalled {
+		t.Fatal("expected the Searcher's Similar to never be called for a disagreeing user parameter")
 	}
 }
 
 // TestBadUserParameterIsBadRequest proves a caller that meant to scope
 // and got it wrong is told so, rather than quietly answered with the
-// whole corpus.
+// whole corpus. These specific values (a non-number, zero, negative) are
+// rejected by parseUserID itself, independently of task 17's own
+// authenticated-scope check (see TestSearchUserParameterDisagreeingWithAuthenticatedUserIsRejected
+// for the "well-formed but disagrees with the key" case).
 func TestBadUserParameterIsBadRequest(t *testing.T) {
 	for _, target := range []string{
 		"/api/search?q=widgets&user=nope",
