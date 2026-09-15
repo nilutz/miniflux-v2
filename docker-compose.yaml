@@ -1,0 +1,163 @@
+# Production stack: pinned, published images only -- no source build, no
+# Go toolchain, no model download at deploy time. See docker-compose.dev.yaml
+# for the development counterpart; the two are deliberately separate files
+# (see its header comment) and this one is not a drop-in replacement for it.
+#
+#   cp .env.example .env   # then fill in every value -- see that file
+#   docker compose -f docker-compose.yaml up -d
+#
+# Miniflux ends up on http://localhost:8080. The sidecar's admin/status
+# page is deliberately NOT published here -- see the `sidecar` service
+# below -- reach it with `docker compose exec` or a loopback-only override
+# if you genuinely need it.
+#
+# *** IMAGE TAGS ARE PLACEHOLDERS. REPLACE BEFORE USE. ***
+# As of 2026-09-15 this fork's release pipeline
+# (.github/workflows/fork_release.yml, added in the same commit series as
+# this file) has never run: no `v*` tag has been pushed, so
+# ghcr.io/nilutz/miniflux:v0.0.0-UNRELEASED and
+# ghcr.io/nilutz/miniflux-sidecar:v0.0.0-UNRELEASED do not exist in the
+# registry. `v0.0.0-UNRELEASED` is not a real tag and never will be one --
+# it is chosen specifically so it cannot collide with a future release. Edit
+# the two `image:` lines below to the first real released tag before
+# running this anywhere. `latest` is deliberately never used: a compose
+# file that silently changes what it runs on the next `pull` is not a
+# production artifact.
+#
+# One database serves both services, same as the dev stack: the sidecar
+# owns the `search` schema and reads `public.entries` read-only, so it
+# must be the same PostgreSQL instance Miniflux writes to.
+
+services:
+  db:
+    # ParadeDB, not stock postgres: the sidecar needs pg_search (BM25) and
+    # vector (pgvector/HNSW), and stock PostgreSQL ships neither -- see
+    # docker-compose.dev.yaml's identical comment.
+    image: paradedb/paradedb:latest
+    restart: unless-stopped
+    # Docker's /dev/shm default is 64MiB. A parallel HNSW index build once
+    # requested ~1.02GB here and failed with "No space left on device
+    # (53100)" -- not a disk error, a /dev/shm ceiling -- which
+    # crash-looped the sidecar unrecoverably until the offending migration
+    # was removed. Current migrations avoid parallel builds, but the index
+    # is 768-dimensional (nomic-embed-text-v1.5) and an operator running
+    # REINDEX by hand will hit this exact wall. Set generously and
+    # explicitly rather than relying on the default.
+    shm_size: "1gb"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:?POSTGRES_USER is required -- copy .env.example to .env and fill it in}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required -- copy .env.example to .env and fill it in}
+      - POSTGRES_DB=${POSTGRES_DB:?POSTGRES_DB is required -- copy .env.example to .env and fill it in}
+    volumes:
+      # Mounted at /var/lib/postgresql, NOT .../data. This looks like a
+      # mistake and is not one: ParadeDB's PostgreSQL 18 image sets
+      # PGDATA=/var/lib/postgresql/18/docker, so /var/lib/postgresql/data
+      # holds nothing -- mounting there would leave the real data
+      # directory on an anonymous volume, discarded on the next recreate.
+      # Carried across from docker-compose.dev.yaml's identical comment,
+      # not rediscovered.
+      - miniflux-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Deliberately no `ports:` here. Nothing outside this compose network
+    # needs to reach Postgres directly -- miniflux and sidecar both reach
+    # it by service name (`db`). Use `docker compose exec db psql -U
+    # "$POSTGRES_USER"` for ad-hoc access instead of publishing 5432.
+
+  miniflux:
+    image: ghcr.io/nilutz/miniflux:v0.0.0-UNRELEASED # <- replace with the first real release tag
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER:?POSTGRES_USER is required -- copy .env.example to .env and fill it in}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required -- copy .env.example to .env and fill it in}@db/${POSTGRES_DB:?POSTGRES_DB is required -- copy .env.example to .env and fill it in}?sslmode=disable
+      - RUN_MIGRATIONS=1
+      - CREATE_ADMIN=1
+      - ADMIN_USERNAME=${ADMIN_USERNAME:?ADMIN_USERNAME is required -- copy .env.example to .env and fill it in}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD is required -- copy .env.example to .env and fill it in}
+      # Goal 0 / task 16 requirement 5. Upstream defaults this off and the
+      # fork keeps that default to stay rebaseable, so it is turned on
+      # explicitly here -- without it, new feeds store only the RSS
+      # excerpt and there is very little text to search. Silent when
+      # omitted: no error, search just quietly degrades. See
+      # docker-compose.dev.yaml's identical comment.
+      - CRAWLER_ENABLED_BY_DEFAULT=1
+      # Empty by default, which makes the search page fall back to
+      # Miniflux's own full-text search with no error. Pointing it at the
+      # sidecar by service name is what enables keyword/semantic/hybrid/
+      # passage modes and "more like this".
+      - SEARCH_SIDECAR_URL=http://sidecar:8081
+    healthcheck:
+      # Miniflux's own binary has a built-in health-check client that hits
+      # its readiness endpoint (internal/cli/health_check.go) -- no need
+      # for curl/wget, which this image does not ship.
+      test: ["CMD", "/usr/bin/miniflux", "-healthcheck", "auto"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  sidecar:
+    image: ghcr.io/nilutz/miniflux-sidecar:v0.0.0-UNRELEASED # <- replace with the first real release tag
+    restart: unless-stopped
+    # Deliberately NO `ports:` entry -- this is the change that matters
+    # most in this file. docker-compose.dev.yaml publishes 8081:8081 for
+    # local inspection; that is not acceptable in production. The
+    # sidecar's HTTP API has no authentication of any kind -- its own
+    # package documentation: "no authentication in this protocol -- run
+    # the remote on a private network, the same trust boundary Postgres
+    # itself is given" -- and it exposes an embedder-switch control that
+    # can trigger a full corpus re-index. Reachable only on the compose
+    # network here; Miniflux talks to it by service name
+    # (http://sidecar:8081). If you genuinely need the admin page, bind it
+    # to the host's loopback ONLY, in a docker-compose.override.yaml, e.g.
+    # `ports: ["127.0.0.1:8081:8081"]` -- never publish it on 0.0.0.0.
+    depends_on:
+      db:
+        condition: service_healthy
+      # Ordering only, exactly as in docker-compose.dev.yaml: the sidecar
+      # reads public.entries, so Miniflux's migrations must have created
+      # that table first. Compose cannot wait on "migrations finished",
+      # and adding a healthcheck to miniflux above does not change that
+      # for THIS dependency -- it stays service_started, not
+      # service_healthy, so the sidecar can still lose the race on a
+      # first-ever boot. It exits, and restart: unless-stopped brings it
+      # back once the table exists, same as in dev.
+      miniflux:
+        condition: service_started
+    environment:
+      - SIDECAR_DATABASE_URL=postgres://${POSTGRES_USER:?POSTGRES_USER is required -- copy .env.example to .env and fill it in}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required -- copy .env.example to .env and fill it in}@db/${POSTGRES_DB:?POSTGRES_DB is required -- copy .env.example to .env and fill it in}?sslmode=disable
+      # local runs the in-process ONNX embedder baked into the image (see
+      # sidecar/Dockerfile). Set remote + SIDECAR_REMOTE_EMBEDDER_URL to
+      # embed on another machine instead (spec 13.1); the model identity
+      # the remote reports is folded into the content hash, so switching
+      # re-indexes the corpus.
+      - SIDECAR_EMBEDDER=local
+    healthcheck:
+      # No curl/wget in this image (sidecar/Dockerfile installs only
+      # ca-certificates on top of debian:trixie-slim) and no built-in
+      # `-healthcheck` flag the way Miniflux's binary has -- adding one
+      # would mean changing the sidecar's Go code, out of scope for this
+      # task. A bare TCP connect to the admin port, via bash's /dev/tcp
+      # (bash is part of the debian:trixie-slim base, unlike curl/wget),
+      # is the least-assumption check available without touching the
+      # image: it confirms the process is up and accepting connections,
+      # not that migrations or indexing succeeded. Watch `docker compose
+      # logs sidecar` for the startup line reporting `backend=ORT`, the
+      # embedding dimension and the model identity to confirm the rest --
+      # see SEARCH.md.
+      test: ["CMD-SHELL", "bash -c '(exec 3<>/dev/tcp/127.0.0.1/8081) 2>/dev/null' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  miniflux-db:
