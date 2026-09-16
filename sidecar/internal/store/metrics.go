@@ -49,14 +49,25 @@ type DatabaseMetrics struct {
 	PassageCountUnknown bool
 	EntryCountUnknown   bool
 
-	// PassagesPerEntry is the ratio spec §13.2 exists to surface: it is
-	// what makes disk growth predictable, and it is exactly the number
-	// the spec's own §5.5 estimate got wrong by roughly 5x. Zero when
-	// EntryCount is a genuine zero. PassagesPerEntryUnknown is true
-	// whenever either count feeding this ratio is itself unknown (see
-	// PassageCountUnknown/EntryCountUnknown) -- a ratio computed from a
-	// 0 that is really "no estimate yet" is not a small number, it is no
-	// number, and the page must say so rather than render 0.00.
+	// PassagesPerEntry is PassageCount divided by EntryCount -- EVERY
+	// entry Miniflux has, indexed or not. This is deliberately NOT the
+	// number the admin page renders (see web.buildView, which divides by
+	// the backfill lane's own reconciled Indexed count instead): a
+	// passage exists only for an entry that has actually been indexed,
+	// so dividing by every entry in the corpus dilutes this ratio toward
+	// zero on exactly the corpus spec §13.2's own number is most useful
+	// for -- one still catching up on a large backlog, where most entries
+	// have no passages yet for a completely ordinary reason. Kept as its
+	// own, honestly-named field (passages per ENTRY, not per INDEXED
+	// entry) rather than removed: it is still a well-defined, correct
+	// ratio, just not the one the page needs, and store package tests
+	// pin it against the pre-existing exact PassageCount/EntryCount
+	// arithmetic. Zero when EntryCount is a genuine zero.
+	// PassagesPerEntryUnknown is true whenever either count feeding this
+	// ratio is itself unknown (see PassageCountUnknown/EntryCountUnknown)
+	// -- a ratio computed from a 0 that is really "no estimate yet" is
+	// not a small number, it is no number, and a caller must say so
+	// rather than render 0.00.
 	PassagesPerEntry        float64
 	PassagesPerEntryUnknown bool
 

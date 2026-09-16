@@ -982,14 +982,18 @@ func TestStatusShowsTheConfigurationInForce(t *testing.T) {
 // specific values a hardcoded placeholder or a wrong-field mix-up would
 // not reproduce.
 func TestStatusPageRendersDatabaseMetrics(t *testing.T) {
-	fb := &fakeBackfill{}
+	// Indexed: 436 -- defect 7's fix divides PassagesPerEntry by the
+	// backfill lane's own Indexed count, not by EntryCount, so it is set
+	// here to the SAME value EntryCount used to carry alone, which keeps
+	// this test's own long-pinned 13.03 figure meaningful under the
+	// corrected denominator (5681/436 = 13.03...).
+	fb := &fakeBackfill{stats: indexer.Stats{Indexed: 436}}
 	metrics := &fakeMetrics{metrics: store.DatabaseMetrics{
 		DatabaseSizeBytes:     117440512, // 112.0 MiB
 		SearchSchemaSizeBytes: 16777216,  // 16.0 MiB
 		HNSWIndexSizeBytes:    8388608,   // 8.0 MiB
 		PassageCount:          5681,
 		EntryCount:            436,
-		PassagesPerEntry:      13.03,
 		CountsAreEstimated:    true,
 		DeadTuples:            1066,
 	}}
@@ -1022,8 +1026,12 @@ func TestStatusPageRendersDatabaseMetrics(t *testing.T) {
 	if got.PassageCount != 5681 || got.EntryCount != 436 {
 		t.Errorf("count fields = %+v", got)
 	}
-	if got.PassagesPerEntry != 13.03 {
-		t.Errorf("PassagesPerEntry = %v, want 13.03", got.PassagesPerEntry)
+	// Computed by buildView itself now (defect 7: PassageCount / the
+	// backfill lane's own Indexed count, not a value the fixture merely
+	// carries through), so the expectation is the same arithmetic, not a
+	// decoupled literal.
+	if want := float64(5681) / float64(436); got.PassagesPerEntry != want {
+		t.Errorf("PassagesPerEntry = %v, want %v (5681/436)", got.PassagesPerEntry, want)
 	}
 	if !got.CountsAreEstimated {
 		t.Error("expected counts_are_estimated = true")
@@ -1159,18 +1167,23 @@ func TestStatusPageDistinguishesUnknownRatioFromARealZero(t *testing.T) {
 		t.Errorf("expected NO '0.00' in the passages-per-entry row for an unknown ratio -- that is indistinguishable from a real zero, got row:\n%s", ratioRow)
 	}
 
-	// The other half: a REAL zero (analyzed, genuinely empty) must not
-	// print the same "unknown" wording in that same row -- these are
-	// different states and must look different on the page. (A fix that
-	// treated every falsy PassagesPerEntry as "unknown" would pass the
-	// check above but fail this one.)
+	// The other half: a REAL zero (analyzed, and genuinely no passages
+	// for the entries actually indexed) must not print the same
+	// "unknown" wording in that same row -- these are different states
+	// and must look different on the page. (A fix that treated every
+	// falsy PassagesPerEntry as "unknown" would pass the check above but
+	// fail this one.) fbWithIndexed carries a positive Indexed count --
+	// defect 7's fix divides by that, not by EntryCount, so a genuine
+	// zero ratio requires Indexed > 0 with PassageCount == 0 (every
+	// indexed entry happened to produce no passages), not merely
+	// EntryCount == 0.
+	fbWithIndexed := &fakeBackfill{stats: indexer.Stats{Indexed: 10}}
 	realZero := &fakeMetrics{metrics: store.DatabaseMetrics{
 		CountsAreEstimated: true,
 		PassageCount:       0,
-		EntryCount:         0,
-		PassagesPerEntry:   0,
+		EntryCount:         10,
 	}}
-	handler = newTestServerWithMetrics(t, fb, realZero)
+	handler = newTestServerWithMetrics(t, fbWithIndexed, realZero)
 	htmlReq = httptest.NewRequest(http.MethodGet, "/", nil)
 	htmlRec = httptest.NewRecorder()
 	handler.ServeHTTP(htmlRec, htmlReq)

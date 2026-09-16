@@ -375,19 +375,38 @@ type statusView struct {
 	// always true today — and the page must render the word "estimated"
 	// next to them when it is, rather than presenting an approximation as
 	// an exact count.
+	//
+	// PassagesPerEntry (defect 7) is built by buildView, NOT passed
+	// through from store.DatabaseMetrics.PassagesPerEntry: it is
+	// PassageCount divided by the backfill lane's own Indexed count
+	// (Stats().Indexed, itself reconciled against the database — defect
+	// 6), not by EntryCount. EntryCount is every entry Miniflux has,
+	// indexed or not; dividing by it dilutes the ratio toward zero on
+	// exactly the corpus this number is most useful for — a large
+	// backlog still catching up, where most entries have no passages yet
+	// for a perfectly ordinary reason. That is what turned "606 passages,
+	// ~46 entries actually indexed, ~13 passages per entry" into a
+	// rendered 0.07: 606 divided by 8,845 (EntryCount, nearly all not yet
+	// indexed) rather than by 46.
 	PassageCount       int64   `json:"passage_count"`
 	EntryCount         int64   `json:"entry_count"`
 	PassagesPerEntry   float64 `json:"passages_per_entry"`
 	CountsAreEstimated bool    `json:"counts_are_estimated"`
 
-	// PassageCountUnknown/EntryCountUnknown/PassagesPerEntryUnknown mirror
-	// store.DatabaseMetrics' own fields of the same name: pg_class.reltuples
-	// is -1 for a relation Postgres has never ANALYZEd, which
-	// search.passages hits for real right at the start of a fresh backfill
-	// -- exactly when an operator is most likely watching. Without these, a
-	// 0 rendered here is indistinguishable from "the backfill is producing
-	// nothing"; the template must check these before rendering a number at
-	// all.
+	// PassageCountUnknown/EntryCountUnknown mirror store.DatabaseMetrics'
+	// own fields of the same name: pg_class.reltuples is -1 for a
+	// relation Postgres has never ANALYZEd, which search.passages hits
+	// for real right at the start of a fresh backfill -- exactly when an
+	// operator is most likely watching. Without these, a 0 rendered here
+	// is indistinguishable from "the backfill is producing nothing"; the
+	// template must check these before rendering a number at all.
+	//
+	// PassagesPerEntryUnknown is buildView's own flag (not
+	// store.DatabaseMetrics') for the same reason PassagesPerEntry itself
+	// is buildView's own computation: it is true when PassageCountUnknown
+	// is true, OR when Indexed is not yet known to be positive (a corpus
+	// with nothing indexed yet has no meaningful per-indexed-entry ratio,
+	// not a ratio of zero).
 	PassageCountUnknown     bool `json:"passage_count_unknown"`
 	EntryCountUnknown       bool `json:"entry_count_unknown"`
 	PassagesPerEntryUnknown bool `json:"passages_per_entry_unknown"`
@@ -440,24 +459,42 @@ func buildView(st indexer.Stats, liveSt indexer.LiveStats, cfg indexer.RuntimeCo
 		PollInterval:    formatSeconds(cfg.PollIntervalSeconds),
 		IdleResweep:     formatSeconds(cfg.IdleResweepIntervalSecs),
 
-		MetricsAvailable:        dmOK,
-		DatabaseSizeBytes:       dm.DatabaseSizeBytes,
-		SearchSchemaSizeBytes:   dm.SearchSchemaSizeBytes,
-		HNSWIndexSizeBytes:      dm.HNSWIndexSizeBytes,
-		PassageCount:            dm.PassageCount,
-		EntryCount:              dm.EntryCount,
-		PassagesPerEntry:        dm.PassagesPerEntry,
-		CountsAreEstimated:      dm.CountsAreEstimated,
-		PassageCountUnknown:     dm.PassageCountUnknown,
-		EntryCountUnknown:       dm.EntryCountUnknown,
-		PassagesPerEntryUnknown: dm.PassagesPerEntryUnknown,
-		DeadTuples:              dm.DeadTuples,
+		MetricsAvailable:      dmOK,
+		DatabaseSizeBytes:     dm.DatabaseSizeBytes,
+		SearchSchemaSizeBytes: dm.SearchSchemaSizeBytes,
+		HNSWIndexSizeBytes:    dm.HNSWIndexSizeBytes,
+		PassageCount:          dm.PassageCount,
+		EntryCount:            dm.EntryCount,
+		CountsAreEstimated:    dm.CountsAreEstimated,
+		PassageCountUnknown:   dm.PassageCountUnknown,
+		EntryCountUnknown:     dm.EntryCountUnknown,
+		DeadTuples:            dm.DeadTuples,
 	}
 	if v.SkippedByReason == nil {
 		v.SkippedByReason = map[string]int64{}
 	}
 	if v.FailedByReason == nil {
 		v.FailedByReason = map[string]int64{}
+	}
+
+	// PassagesPerEntry (defect 7): dm.PassagesPerEntry (PassageCount /
+	// dm.EntryCount, EVERY entry in the corpus, indexed or not) was wired
+	// straight through here, which is wrong for what this ratio exists to
+	// answer (spec §13.2: "the number that actually predicts disk
+	// growth") -- a passage exists only for an entry that has actually
+	// been indexed, so dividing by entries that have not been touched yet
+	// dilutes the ratio toward zero on exactly the corpus this page is
+	// most useful for: one still catching up. Divide by st.Indexed (spec
+	// §13.2's own "13 passages per entry", not dm.EntryCount's "13
+	// passages per entry INCLUDING the 8,000 that have none yet") instead
+	// -- the same reconciled, database-backed figure defect 6 fixed
+	// Stats().Indexed to report, so a healthy, still-catching-up corpus
+	// no longer reads as broken.
+	switch {
+	case dm.PassageCountUnknown, st.Indexed <= 0:
+		v.PassagesPerEntryUnknown = true
+	default:
+		v.PassagesPerEntry = float64(dm.PassageCount) / float64(st.Indexed)
 	}
 
 	if st.Remaining >= 0 {
