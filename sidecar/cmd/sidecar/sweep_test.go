@@ -60,7 +60,7 @@ import (
 //
 //	CGO_LDFLAGS="-L<dir-with-libtokenizers.a>" \
 //	DYLD_LIBRARY_PATH=/opt/homebrew/opt/onnxruntime/lib \
-//	SIDECAR_TEST_DATABASE_URL=postgres://miniflux:REDACTED-DEV-PASSWORD@127.0.0.1:5432/<throwaway>?sslmode=disable \
+//	SIDECAR_TEST_DATABASE_URL=postgres://<user>:<password>@127.0.0.1:5432/<throwaway>?sslmode=disable \
 //	SIDECAR_MODEL_PATH=<path-to-model_quantized.onnx> \
 //	SIDECAR_ONNX_LIB_DIR=/opt/homebrew/opt/onnxruntime/lib \
 //	SIDECAR_SWEEP=1 \
