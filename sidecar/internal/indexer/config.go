@@ -4,12 +4,25 @@
 package indexer // import "miniflux.app/v2/sidecar/internal/indexer"
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"miniflux.app/v2/sidecar/internal/store"
 )
+
+// BackfillSettingsStore is the subset of *store.Store Backfill needs to
+// persist an operator's runtime configuration change (spec §9.2),
+// mirroring Manager's own SettingsStore precedent for the embedder choice
+// (spec §13.1) exactly: "the persisted row wins; the environment
+// variables are the initial default used only when no row exists".
+type BackfillSettingsStore interface {
+	SetBackfillSettings(ctx context.Context, settings store.BackfillSettings) error
+}
 
 // Spec §9.2 requires three knobs, "all live-editable without a restart":
 // the schedule window, the concurrency ceiling, and the embedding batch
@@ -256,7 +269,74 @@ func (b *Backfill) ApplyConfig(patch ConfigPatch) (RuntimeConfig, error) {
 		b.SetIdleResweepInterval(clampDuration(*patch.IdleResweepInterval, MinIdleResweepInterval, MaxIdleResweepInterval))
 	}
 
-	return b.RuntimeConfig(), nil
+	applied := b.RuntimeConfig()
+	b.persistConfig(applied)
+	return applied, nil
+}
+
+// persistConfig writes applied to the settings store attached via
+// SetSettingsStore, if any -- a no-op, not an error, when none is
+// attached (tests, or cmd/sidecar's own startup call, made before
+// SetSettingsStore is ever called -- see that method's own doc comment
+// for why that ordering means startup itself never persists).
+//
+// Errors are logged, not returned: the configuration change itself
+// already took effect (every setter above already ran), exactly
+// mirroring Manager.installEmbedder's own rationale for the identical
+// choice on the embedder-settings write -- left unpersisted, the NEXT
+// restart reverts to the SIDECAR_BACKFILL_* environment variables'
+// default (the exact gap defect 2 describes), so this is still worth
+// surfacing loudly. context.Background(), not a ctx threaded from the
+// HTTP handler that called ApplyConfig: that request may already be long
+// gone by the time this runs, and a persistence write following a
+// successful in-memory change must not be skipped just because the
+// ORIGINAL request that triggered it is gone -- the identical reasoning
+// installEmbedder's own doc comment gives for the same choice.
+func (b *Backfill) persistConfig(applied RuntimeConfig) {
+	settings := b.settingsStore()
+	if settings == nil {
+		return
+	}
+	err := settings.SetBackfillSettings(context.Background(), store.BackfillSettings{
+		WindowStart:             applied.WindowStart,
+		WindowEnd:               applied.WindowEnd,
+		MinWorkers:              applied.MinWorkers,
+		MaxWorkers:              applied.MaxWorkers,
+		LoadThreshold:           applied.LoadThreshold,
+		BatchSize:               applied.BatchSize,
+		PageSize:                applied.PageSize,
+		PollIntervalSeconds:     applied.PollIntervalSeconds,
+		IdleResweepIntervalSecs: applied.IdleResweepIntervalSecs,
+	})
+	if err != nil {
+		slog.Error("indexer: backfill configuration changed but could not be persisted -- a restart will revert to the environment variables' default",
+			slog.Any("error", err))
+	}
+}
+
+// BackfillSettingsToPatch converts a persisted row back into a ConfigPatch
+// with every field populated -- the form ApplyConfig accepts, used by
+// cmd/sidecar's startup resolution (resolveBackfillPatch) to apply a
+// persisted row in place of the environment-derived patch when one
+// exists, exactly like resolveEmbedderChoice does for the embedder.
+func BackfillSettingsToPatch(s store.BackfillSettings) ConfigPatch {
+	window := Window{Start: s.WindowStart, End: s.WindowEnd}
+	minWorkers, maxWorkers := s.MinWorkers, s.MaxWorkers
+	loadThreshold := s.LoadThreshold
+	batchSize, pageSize := s.BatchSize, s.PageSize
+	pollInterval := time.Duration(s.PollIntervalSeconds * float64(time.Second))
+	idleResweepInterval := time.Duration(s.IdleResweepIntervalSecs * float64(time.Second))
+
+	return ConfigPatch{
+		Window:              &window,
+		MinWorkers:          &minWorkers,
+		MaxWorkers:          &maxWorkers,
+		LoadThreshold:       &loadThreshold,
+		BatchSize:           &batchSize,
+		PageSize:            &pageSize,
+		PollInterval:        &pollInterval,
+		IdleResweepInterval: &idleResweepInterval,
+	}
 }
 
 func clampInt(v, lo, hi int) int {

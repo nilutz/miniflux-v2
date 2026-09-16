@@ -226,6 +226,52 @@ var migrations = [...]func(tx *sql.Tx) error{
 		`)
 		return err
 	},
+	func(tx *sql.Tx) error {
+		// The backfill lane's live-editable runtime configuration (spec
+		// §9.2: schedule window, worker floor/ceiling, load threshold,
+		// batch size, page size, poll interval, idle resweep interval)
+		// now lives here too, following migration 5
+		// (search.embedder_settings) exactly -- same singleton-row
+		// pattern, same reason: POST /api/backfill/config was in-memory
+		// only, so an operator's change (min_workers=1, say, dialed down
+		// specifically to survive defect 1's crash-restart loop) reverted
+		// to the SIDECAR_BACKFILL_* environment variables' default on
+		// every container restart, with nobody asking.
+		//
+		// A single-row table, enforced by the same CHECK(id = 1) singleton
+		// pattern as search.embedder_settings, for the identical reasons:
+		// there is exactly one runtime configuration in effect at a time,
+		// an UPSERT is simpler than a DELETE-then-INSERT pair, and a CHECK
+		// constraint makes "more than one row" a schema-level
+		// impossibility. Absent (no row at all) is a distinct, meaningful
+		// state -- "no operator has ever changed the config from this
+		// page" -- from any row's own content, which is what lets the
+		// SIDECAR_BACKFILL_* environment variables keep acting as the
+		// startup default: see store.GetBackfillSettings.
+		//
+		// No SET/SET LOCAL of any kind, and no index -- this migration
+		// only creates a small table, nothing that could hold a lock
+		// across a slow operation the way the since-reverted parallel HNSW
+		// rebuild (see the comment on the migration two above this one)
+		// did.
+		_, err := tx.Exec(`
+			CREATE TABLE search.backfill_settings (
+				id                            int NOT NULL CHECK (id = 1),
+				window_start                  int NOT NULL DEFAULT 0,
+				window_end                    int NOT NULL DEFAULT 0,
+				min_workers                   int NOT NULL,
+				max_workers                   int NOT NULL,
+				load_threshold                double precision NOT NULL,
+				batch_size                    int NOT NULL,
+				page_size                     int NOT NULL,
+				poll_interval_seconds         double precision NOT NULL,
+				idle_resweep_interval_seconds double precision NOT NULL,
+				updated_at                    timestamptz NOT NULL DEFAULT now(),
+				PRIMARY KEY (id)
+			);
+		`)
+		return err
+	},
 }
 
 var schemaVersion = len(migrations)

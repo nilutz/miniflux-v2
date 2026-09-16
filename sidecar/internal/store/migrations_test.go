@@ -398,7 +398,7 @@ func TestMigrateFromCrashLoopedVersionFourIsANoOp(t *testing.T) {
 // Update this literal deliberately, in the same commit, whenever a
 // migration is appended or (never) removed.
 func TestSchemaVersionIsPinned(t *testing.T) {
-	const want = 6
+	const want = 7
 	if schemaVersion != want {
 		t.Fatalf("schemaVersion = %d, want %d -- a migration was added or removed without updating this pinned assertion", schemaVersion, want)
 	}

@@ -269,6 +269,27 @@ func resolveEmbedderChoice(cfg config, persisted *store.EmbedderSettings) resolv
 	return resolvedEmbedderChoice{kind: cfg.embedderKind, remoteURL: cfg.remoteURL}
 }
 
+// resolveBackfillPatch applies spec §9.2's startup rule, mirroring
+// resolveEmbedderChoice exactly (spec §13.1): "the persisted row wins;
+// the SIDECAR_BACKFILL_* environment variables are the initial default
+// used only when no row exists." persisted is nil when an operator has
+// never changed the backfill configuration through the admin page
+// (store.GetBackfillSettings' own nil-means-no-row contract) -- in that
+// case, and only then, cfg.backfill (the environment-variable-derived
+// patch) is used.
+//
+// A pure function, not inlined into run(), for the same testability
+// reason resolveEmbedderChoice is one: see
+// TestResolveBackfillPatchPrefersPersistedRowOverEnvironmentVariable,
+// which sets the two to DIFFERENT values and asserts which one actually
+// took effect.
+func resolveBackfillPatch(cfg config, persisted *store.BackfillSettings) indexer.ConfigPatch {
+	if persisted != nil {
+		return indexer.BackfillSettingsToPatch(*persisted)
+	}
+	return cfg.backfill
+}
+
 // newEmbedderFactory builds the indexer.EmbedderFactory Manager.Switch
 // uses to construct a candidate embedder for a probe/preview/switch —
 // closing over cfg's local model path/ONNX library dir and the
@@ -412,11 +433,32 @@ func run() error {
 	controller := indexer.NewController(indexer.DefaultControllerConfig())
 	backfill := indexer.NewBackfill(ix, controller, indexer.BackfillConfig{})
 
+	// spec §9.2, following spec §13.1's embedder-settings precedent
+	// exactly: "the persisted row wins; the SIDECAR_BACKFILL_*
+	// environment variables are the initial default used only when no
+	// row exists." Without this, the compose stack's
+	// `restart: unless-stopped` -- and every ordinary process restart,
+	// including one forced by defect 1's crash -- would silently revert
+	// an operator's own POST /api/backfill/config change back to the
+	// environment variables' default, which is exactly what let defect 1
+	// and defect 2 compound on the Pi: an operator's mitigation
+	// (min_workers=1, dialed down to survive the crash loop) reverted on
+	// every single restart the crash itself caused.
+	persistedBackfill, err := s.GetBackfillSettings(context.Background())
+	if err != nil {
+		return fmt.Errorf("sidecar: unable to read persisted backfill settings: %w", err)
+	}
+	backfillPatch := resolveBackfillPatch(cfg, persistedBackfill)
+	if persistedBackfill != nil {
+		slog.Info("sidecar: using the persisted backfill configuration from the admin page",
+			slog.Time("changed_at", persistedBackfill.UpdatedAt))
+	}
+
 	// Startup configuration goes through exactly the same validation and
 	// clamping as a later admin-page change, and the result is logged: an
 	// operator who asked for something out of range needs to see what
 	// they actually got, not discover it 40 hours later.
-	effective, err := backfill.ApplyConfig(cfg.backfill)
+	effective, err := backfill.ApplyConfig(backfillPatch)
 	if err != nil {
 		return fmt.Errorf("sidecar: invalid backfill configuration: %w", err)
 	}
@@ -430,6 +472,15 @@ func run() error {
 		slog.Float64("poll_interval_seconds", effective.PollIntervalSeconds),
 		slog.Float64("idle_resweep_interval_seconds", effective.IdleResweepIntervalSecs),
 	)
+
+	// Attached only AFTER the startup ApplyConfig call above, never
+	// before -- see SetSettingsStore's own doc comment for why that
+	// ordering is what keeps startup itself from ever writing to the
+	// settings table (mirroring Manager's embedder-settings persistence,
+	// which likewise only ever writes from an operator-triggered Switch,
+	// never from startup's own construction). Every ApplyConfig call from
+	// here on is POST /api/backfill/config, through the admin page.
+	backfill.SetSettingsStore(s)
 
 	// The Searcher is built over the same *store.Store as the indexing
 	// lanes, with the same embedder passed to Semantic/Hybrid/Passages

@@ -391,6 +391,17 @@ type Backfill struct {
 	paused   bool
 	resumeCh chan struct{}
 
+	// settings persists an operator's runtime configuration change (spec
+	// §9.2), mirroring Manager's own embedder-settings persistence (spec
+	// §13.1) exactly -- see BackfillSettingsStore's own doc comment. May
+	// be nil (tests, or no store configured), in which case ApplyConfig
+	// simply does not persist -- guarded by settingsMu, not mu, so a
+	// config change's own persistence write is never serialised behind
+	// mu's much hotter, much shorter-held critical sections (pageSize,
+	// pollInterval, and the rest read every batch).
+	settingsMu sync.Mutex
+	settings   BackfillSettingsStore
+
 	// embedderPaused and embedderPauseReason are the lane's OWN pause,
 	// entered automatically when the embedder reports itself unavailable
 	// (isEmbedderUnavailable; spec §13.1), and cleared automatically the
@@ -484,6 +495,33 @@ func (b *Backfill) SetIdleResweepInterval(d time.Duration) {
 	if d > 0 {
 		b.cfg.IdleResweepInterval = d
 	}
+}
+
+// SetSettingsStore attaches settings as the destination ApplyConfig
+// persists a successful runtime configuration change to (spec §9.2,
+// mirroring Manager's own embedder-settings persistence, spec §13.1).
+//
+// cmd/sidecar calls this only AFTER applying its own startup
+// configuration (the SIDECAR_BACKFILL_* environment variables, or a
+// persisted row read before this Backfill was ever touched -- see
+// resolveBackfillPatch) -- never before it. That ordering is what keeps
+// this mirroring Manager's own precedent exactly: startup NEVER writes to
+// the settings table on its own (see cmd/sidecar's own comment on this),
+// only an operator's own POST /api/backfill/config does, through the
+// admin page. Attaching the store only after startup's own ApplyConfig
+// call means that call -- whichever source it resolved its patch from --
+// can never itself trigger a write, by construction, with no separate
+// flag needed to suppress it.
+func (b *Backfill) SetSettingsStore(settings BackfillSettingsStore) {
+	b.settingsMu.Lock()
+	defer b.settingsMu.Unlock()
+	b.settings = settings
+}
+
+func (b *Backfill) settingsStore() BackfillSettingsStore {
+	b.settingsMu.Lock()
+	defer b.settingsMu.Unlock()
+	return b.settings
 }
 
 func (b *Backfill) pageSize() int {
