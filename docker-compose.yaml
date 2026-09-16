@@ -51,7 +51,7 @@ services:
     # Use `docker compose exec db psql -U "$POSTGRES_USER"` for ad-hoc access.
 
   miniflux:
-    image: ghcr.io/nilutz/miniflux:v0.1.0
+    image: ghcr.io/nilutz/miniflux:v0.1.1
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -81,7 +81,7 @@ services:
       start_period: 30s
 
   sidecar:
-    image: ghcr.io/nilutz/miniflux-sidecar:v0.1.0
+    image: ghcr.io/nilutz/miniflux-sidecar:v0.1.1
     restart: unless-stopped
     # Safe to publish: the sidecar authenticates every request with the
     # same credentials Miniflux issues (X-Auth-Token, or the browser's
