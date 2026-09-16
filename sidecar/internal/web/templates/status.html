@@ -194,6 +194,26 @@
     <span class="hint">Passages per forward pass, {{.Status.Config.MinBatchSizeAllowed}}&ndash;{{.Status.Config.MaxBatchSizeAllowed}}. Larger is slower, not faster.</span>
   </label>
 
+  <label>Load threshold
+    <input id="cfg-load-threshold" type="number" step="0.1" min="0.1" max="8.0" placeholder="{{printf "%.2f" .Status.Config.LoadThreshold}}">
+    <span class="hint">Per-core 1-minute load average the controller backs workers off at. Raise this on a machine where the sidecar itself is the main workload.</span>
+  </label>
+
+  <label>Page size
+    <input id="cfg-page-size" type="number" min="1" max="500" placeholder="{{.Status.Config.PageSize}}">
+    <span class="hint">Pending entry ids fetched per pagination page.</span>
+  </label>
+
+  <label>Poll interval (seconds)
+    <input id="cfg-poll-interval" type="number" step="1" min="1" placeholder="{{printf "%.0f" .Status.Config.PollIntervalSeconds}}">
+    <span class="hint">How long an idle lane waits before checking for work again.</span>
+  </label>
+
+  <label>Idle re-sweep interval (seconds)
+    <input id="cfg-idle-resweep" type="number" step="1" min="1" placeholder="{{printf "%.0f" .Status.Config.IdleResweepIntervalSecs}}">
+    <span class="hint">How long a drained lane waits before sweeping the whole table again.</span>
+  </label>
+
   <p><button id="cfg-apply" onclick="applyConfig()">Apply</button><span id="config-msg"></span></p>
 </fieldset>
 
@@ -307,9 +327,16 @@
     if (text !== '') { body.window = text; }
     [['cfg-max-workers', 'max_workers'],
      ['cfg-min-workers', 'min_workers'],
-     ['cfg-batch-size', 'batch_size']].forEach(function (pair) {
+     ['cfg-batch-size', 'batch_size'],
+     ['cfg-page-size', 'page_size']].forEach(function (pair) {
       var v = document.getElementById(pair[0]).value.trim();
       if (v !== '') { body[pair[1]] = parseInt(v, 10); }
+    });
+    [['cfg-load-threshold', 'load_threshold'],
+     ['cfg-poll-interval', 'poll_interval_seconds'],
+     ['cfg-idle-resweep', 'idle_resweep_interval_seconds']].forEach(function (pair) {
+      var v = document.getElementById(pair[0]).value.trim();
+      if (v !== '') { body[pair[1]] = parseFloat(v); }
     });
 
     if (Object.keys(body).length === 0) {
