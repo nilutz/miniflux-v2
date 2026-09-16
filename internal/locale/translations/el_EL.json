@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Δεν υπάρχουν άρθρα για αυτήν τη ροή.",
     "alert.no_feed_in_category": "Δεν υπάρχει συνδρομή για αυτήν την κατηγορία.",
     "alert.no_history": "Δεν υπάρχει ιστορικό αυτή τη στιγμή.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Δεν υπάρχουν αποτελέσματα για αυτήν την αναζήτηση.",
     "alert.no_shared_entry": "Δεν υπάρχει κοινόχρηστη καταχώρηση.",
     "alert.no_starred": "Δεν υπάρχει σελιδοδείκτης αυτή τη στιγμή.",
@@ -432,6 +433,7 @@
     "menu.preferences": "Προτιμήσεις",
     "menu.refresh_all_feeds": "Ανανέωση όλων των ροών στο παρασκήνιο",
     "menu.refresh_feed": "Ανανέωση",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Αναζήτηση",
     "menu.sessions": "Συνδέσεις",
     "menu.settings": "Ρυθμίσεις",
@@ -567,6 +569,7 @@
         "%d αναγνωσμένη καταχώρηση",
         "%d αναγνωσμένες καταχωρήσεις"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Αποτελέσματα Αναζήτησης",
     "page.sessions.table.actions": "Eνέργειες",
     "page.sessions.table.current_session": "Τρέχουσα Συνεδρία",

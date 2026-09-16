@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "У цій стрічці немає записів.",
     "alert.no_feed_in_category": "У цій категорії немає підписок.",
     "alert.no_history": "Наразі історія порожня.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Немає результатів для цього пошуку.",
     "alert.no_shared_entry": "Немає спільного запису.",
     "alert.no_starred": "Наразі закладки відсутні.",
@@ -435,6 +436,7 @@
     "menu.preferences": "Уподобання",
     "menu.refresh_all_feeds": "Оновити всі стрічки у фоновому режимі",
     "menu.refresh_feed": "Оновити",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Пошук",
     "menu.sessions": "Сеанси",
     "menu.settings": "Налаштування",
@@ -574,6 +576,7 @@
         "%d прочитаних записів",
         "%d прочитаних записів"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Результати пошуку",
     "page.sessions.table.actions": "Дії",
     "page.sessions.table.current_session": "Поточний сеанс",

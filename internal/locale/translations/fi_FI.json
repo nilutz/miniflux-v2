@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Tässä syötteessä ei ole artikkeleita.",
     "alert.no_feed_in_category": "Tälle kategorialle ei ole tilausta.",
     "alert.no_history": "Tällä hetkellä ei ole historiaa.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Ei hakua vastaavia tuloksia.",
     "alert.no_shared_entry": "Jaettua artikkelia ei ole.",
     "alert.no_starred": "Tällä hetkellä ei ole kirjanmerkkiä.",
@@ -432,6 +433,7 @@
     "menu.preferences": "Asetukset",
     "menu.refresh_all_feeds": "Päivitä kaikki syötteet taustalla",
     "menu.refresh_feed": "Päivitä",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Haku",
     "menu.sessions": "Istunnot",
     "menu.settings": "Asetukset",
@@ -567,6 +569,7 @@
         "%d luettu merkintä",
         "%d luettua merkintää"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Hakutulokset",
     "page.sessions.table.actions": "Toiminnot",
     "page.sessions.table.current_session": "Nykyinen istunto",

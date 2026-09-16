@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Non hai artigos para esta canle.",
     "alert.no_feed_in_category": "Non hai canles nesta categoría.",
     "alert.no_history": "Por agora non hai historial.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Non hai resultados para esta busca.",
     "alert.no_shared_entry": "Non hai artigos compartidos.",
     "alert.no_starred": "Non hai artigos con estrela.",
@@ -432,6 +433,7 @@
     "menu.preferences": "Preferencias",
     "menu.refresh_all_feeds": "Actualizar en segundo plano todas as canles",
     "menu.refresh_feed": "Actualizar",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Buscar",
     "menu.sessions": "Sesións",
     "menu.settings": "Axustes",
@@ -567,6 +569,7 @@
         "%d entrada lida",
         "%d entradas lidas"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Resultados da busca",
     "page.sessions.table.actions": "Accións",
     "page.sessions.table.current_session": "Sesión actual",

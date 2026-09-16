@@ -55,6 +55,10 @@ func Serve(store *storage.Storage, pool *worker.Pool) http.Handler {
 	mux.HandleFunc("GET /starred", handler.showStarredPage)
 	mux.HandleFunc("GET /starred/entry/{entryID}", handler.showStarredEntryPage)
 
+	// Saved pages (spec §13.4).
+	mux.HandleFunc("GET /saved-pages", handler.showSavedPagesPage)
+	mux.HandleFunc("GET /saved-pages/entry/{entryID}", handler.showSavedPagesEntryPage)
+
 	// Search pages.
 	mux.HandleFunc("GET /search", handler.showSearchPage)
 	mux.HandleFunc("GET /search/entry/{entryID}", handler.showSearchEntryPage)

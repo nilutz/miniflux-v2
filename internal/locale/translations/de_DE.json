@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Es existiert kein Artikel für dieses Abonnement.",
     "alert.no_feed_in_category": "Für diese Kategorie gibt es kein Abonnement.",
     "alert.no_history": "Es existiert zur Zeit kein Verlauf.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Es gibt kein Ergebnis für diese Suche.",
     "alert.no_shared_entry": "Es existieren derzeit keine geteilten Artikel.",
     "alert.no_starred": "Es existieren derzeit keine markierten Artikel.",
@@ -432,6 +433,7 @@
     "menu.preferences": "Einstellungen",
     "menu.refresh_all_feeds": "Alle Abonnements im Hintergrund aktualisieren",
     "menu.refresh_feed": "Aktualisieren",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Suche",
     "menu.sessions": "Sitzungen",
     "menu.settings": "Einstellungen",
@@ -567,6 +569,7 @@
         "%d gelesener Artikel",
         "%d gelesene Artikel"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Suchergebnisse",
     "page.sessions.table.actions": "Aktionen",
     "page.sessions.table.current_session": "Aktuelle Sitzung",

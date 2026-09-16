@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "此订阅源中没有条目。",
     "alert.no_feed_in_category": "此分类中没有订阅源。",
     "alert.no_history": "当前没有历史记录。",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "此搜索没有结果。",
     "alert.no_shared_entry": "没有已分享条目。",
     "alert.no_starred": "没有收藏的条目。",
@@ -429,6 +430,7 @@
     "menu.preferences": "偏好设置",
     "menu.refresh_all_feeds": "后台刷新所有订阅源",
     "menu.refresh_feed": "刷新",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "搜索",
     "menu.sessions": "会话",
     "menu.settings": "设置",
@@ -560,6 +562,7 @@
     "page.read_entry_count": [
         "%d 个已读条目"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "搜索结果",
     "page.sessions.table.actions": "操作",
     "page.sessions.table.current_session": "当前会话",

@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Chit ê siau-sit lâi-goân lāi bô siau-sit",
     "alert.no_feed_in_category": "Bô chit ê lūi-pia̍t ê siau-sit lâi-goân",
     "alert.no_history": "Chit-má ah bô kì-lo̍k",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Bô hû-ha̍p ê chhiau-chhē kiat-kó",
     "alert.no_shared_entry": "Chit-má ah bô hun-hióng ê siau-sit",
     "alert.no_starred": "Chit-má ah bô siu-chông",
@@ -429,6 +430,7 @@
     "menu.preferences": "Siat-tēng",
     "menu.refresh_all_feeds": "Tī pōe-āu têng lia̍h só͘-ū ê siau-sit lâi-goân",
     "menu.refresh_feed": "Têng lia̍h",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Chhiau-chhē",
     "menu.sessions": "Ū teng-lo̍k--ê",
     "menu.settings": "Siat-tēng",
@@ -560,6 +562,7 @@
     "page.read_entry_count": [
         "%d ê tha̍k kè ê siau-sit"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Chhiau-chhē kiat-kó",
     "page.sessions.table.actions": "Chhau-chok",
     "page.sessions.table.current_session": "Chit-má teng-lo̍k--ê",

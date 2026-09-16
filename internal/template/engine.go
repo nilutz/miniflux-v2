@@ -39,6 +39,7 @@ func (e *Engine) ParseTemplates() {
 		"add_subscription.html":    {"feed_menu.html", "layout.html", "settings_menu.html"},
 		"api_keys.html":            {"layout.html", "settings_menu.html"},
 		"starred_entries.html":     {"item_meta.html", "layout.html", "pagination.html"},
+		"saved_pages_entries.html": {"item_meta.html", "layout.html", "pagination.html"},
 		"categories.html":          {"layout.html"},
 		"category_entries.html":    {"item_meta.html", "layout.html", "pagination.html"},
 		"category_feeds.html":      {"feed_list.html", "layout.html"},

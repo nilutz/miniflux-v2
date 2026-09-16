@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "このフィードには記事がありません。",
     "alert.no_feed_in_category": "このカテゴリには購読中のフィードがありません。",
     "alert.no_history": "現在履歴はありません。",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "検索で何も見つかりませんでした。",
     "alert.no_shared_entry": "共有エントリはありません。",
     "alert.no_starred": "現在星付きはありません。",
@@ -429,6 +430,7 @@
     "menu.preferences": "設定情報",
     "menu.refresh_all_feeds": "すべてのフィードをバックグラウンドで更新",
     "menu.refresh_feed": "更新",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "検索",
     "menu.sessions": "セッション",
     "menu.settings": "設定",
@@ -560,6 +562,7 @@
     "page.read_entry_count": [
         "%d 件の既読エントリ"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "検索結果",
     "page.sessions.table.actions": "アクション",
     "page.sessions.table.current_session": "現在のセッション",

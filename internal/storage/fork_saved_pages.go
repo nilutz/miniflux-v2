@@ -62,6 +62,16 @@ func (s *Storage) GetOrCreateSavedPagesFeed(userID, categoryID int64, title stri
 	return feed, nil
 }
 
+// SavedPagesFeed returns userID's saved-pages feed if the user has ever
+// saved a page, or nil if they have not. Unlike GetOrCreateSavedPagesFeed,
+// it never creates the feed: a page that only lists saved pages (rather
+// than storing a new one) must use this lookup, or merely visiting that
+// page would conjure an empty synthetic feed into the feed list of every
+// user who opens it, including users who have never saved anything.
+func (s *Storage) SavedPagesFeed(userID int64) (*model.Feed, error) {
+	return s.feedByUserAndFeedURL(userID, SavedPagesFeedURL(userID))
+}
+
 func (s *Storage) feedByUserAndFeedURL(userID int64, feedURL string) (*model.Feed, error) {
 	var feed model.Feed
 	feed.Category = &model.Category{}

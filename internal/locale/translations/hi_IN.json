@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "इस फ़ीड के लिए कोई विषय-वस्तु नहीं है।",
     "alert.no_feed_in_category": "इस श्रेणी के लिए कोई सदस्यता नहीं है।",
     "alert.no_history": "इस समय कोई इतिहास नहीं है",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "इस खोज के लिए कोई परिणाम नहीं हैं।",
     "alert.no_shared_entry": "कोई साझा प्रविष्टि नहीं है",
     "alert.no_starred": "इस समय कोई बुकमार्क नहीं है",
@@ -432,6 +433,7 @@
     "menu.preferences": "पसंद",
     "menu.refresh_all_feeds": "पृष्ठभूमि में सभी फ़ीड को ताज़ा करें",
     "menu.refresh_feed": "ताज़ा करें",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "खोज",
     "menu.sessions": "सत्र",
     "menu.settings": "समायोजन",
@@ -567,6 +569,7 @@
         "%d पढ़ी गई प्रविष्टि",
         "%d पढ़ी गई प्रविष्टियाँ"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "खोज का परिणाम",
     "page.sessions.table.actions": "कार्रवाई",
     "page.sessions.table.current_session": "वर्तमान सत्र",

@@ -81,6 +81,9 @@
                 <li {{ if eq .menu "history" }}class="active"{{ end }} title="{{ t "tooltip.keyboard_shortcuts" "g h" }}">
                     <a href="{{ routePath "/history" }}" data-page="history">{{ icon "history" }}{{ t "menu.history" }}</a>
                 </li>
+                <li {{ if eq .menu "saved-pages" }}class="active"{{ end }}>
+                    <a href="{{ routePath "/saved-pages" }}" data-page="saved-pages">{{ icon "save" }}{{ t "menu.saved_pages" }}</a>
+                </li>
                 <li {{ if eq .menu "feeds" }}class="active"{{ end }} title="{{ t "tooltip.keyboard_shortcuts" "g f" }}">
                     <a href="{{ routePath "/feeds" }}" data-page="feeds">{{ icon "feeds" }}{{ t "menu.feeds" }}
                       {{ if gt .countErrorFeeds 0 }}

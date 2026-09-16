@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "No hay artículos para esta fuente.",
     "alert.no_feed_in_category": "No hay fuentes para esta categoría.",
     "alert.no_history": "No hay historial en este momento.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "No hay resultados para esta búsqueda.",
     "alert.no_shared_entry": "No hay artículos compartidos.",
     "alert.no_starred": "No hay marcador en este momento.",
@@ -432,6 +433,7 @@
     "menu.preferences": "Preferencias",
     "menu.refresh_all_feeds": "Refrescar todas las fuentes en segundo plano",
     "menu.refresh_feed": "Refrescar",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Buscar",
     "menu.sessions": "Sesiones",
     "menu.settings": "Configuración",
@@ -567,6 +569,7 @@
         "%d artículo leído",
         "%d artículos leídos"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Resultados de la búsqueda",
     "page.sessions.table.actions": "Acciones",
     "page.sessions.table.current_session": "Sesión actual",

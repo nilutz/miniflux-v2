@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "В этой подписке отсутствуют статьи.",
     "alert.no_feed_in_category": "Для этой категории нет подписки.",
     "alert.no_history": "Истории пока что нет.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Нет результатов для данного поискового запроса.",
     "alert.no_shared_entry": "Общедоступные статьи отсутствуют.",
     "alert.no_starred": "Избранное отсутствует.",
@@ -435,6 +436,7 @@
     "menu.preferences": "Предпочтения",
     "menu.refresh_all_feeds": "Обновить все подписки в фоне",
     "menu.refresh_feed": "Обновить",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Поиск",
     "menu.sessions": "Сессии",
     "menu.settings": "Настройки",
@@ -574,6 +576,7 @@
         "%d прочитанных статьи",
         "%d прочитанных статей"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Результаты поиска",
     "page.sessions.table.actions": "Действия",
     "page.sessions.table.current_session": "Текущая сессия",

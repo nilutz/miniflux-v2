@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "이 피드에는 게시물이 없습니다.",
     "alert.no_feed_in_category": "이 카테고리에는 구독 중인 피드가 없습니다.",
     "alert.no_history": "현재 기록이 없습니다.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "검색 결과가 없습니다.",
     "alert.no_shared_entry": "공유된 게시물이 없습니다.",
     "alert.no_starred": "현재 즐겨찾기 표시된 게시물이 없습니다.",
@@ -429,6 +430,7 @@
     "menu.preferences": "설정 정보",
     "menu.refresh_all_feeds": "모든 피드를 백그라운드에서 새로고침",
     "menu.refresh_feed": "새로고침",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "검색",
     "menu.sessions": "세션",
     "menu.settings": "설정",
@@ -560,6 +562,7 @@
     "page.read_entry_count": [
         "읽은 게시물 %d개"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "검색 결과",
     "page.sessions.table.actions": "작업",
     "page.sessions.table.current_session": "현재 세션",

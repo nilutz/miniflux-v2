@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Tidak ada artikel di umpan ini.",
     "alert.no_feed_in_category": "Tidak ada langganan untuk kategori ini.",
     "alert.no_history": "Tidak ada riwayat untuk saat ini.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Tidak ada hasil untuk pencarian ini.",
     "alert.no_shared_entry": "Tidak ada entri yang dibagikan.",
     "alert.no_starred": "Tidak ada markah.",
@@ -429,6 +430,7 @@
     "menu.preferences": "Preferensi",
     "menu.refresh_all_feeds": "Muat ulang semua umpan di latar belakang",
     "menu.refresh_feed": "Muat ulang",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Cari",
     "menu.sessions": "Sesi",
     "menu.settings": "Pengaturan",
@@ -560,6 +562,7 @@
     "page.read_entry_count": [
         "%d entri dibaca"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Hasil Pencarian",
     "page.sessions.table.actions": "Tindakan",
     "page.sessions.table.current_session": "Sesi Saat Ini",

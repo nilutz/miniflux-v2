@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "該 Feed 中沒有文章",
     "alert.no_feed_in_category": "沒有該類別的 Feed。",
     "alert.no_history": "目前沒有歷史",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "沒有符合搜尋的結果",
     "alert.no_shared_entry": "沒有分享文章。",
     "alert.no_starred": "目前沒有收藏",
@@ -429,6 +430,7 @@
     "menu.preferences": "設定",
     "menu.refresh_all_feeds": "在背景更新所有 Feed",
     "menu.refresh_feed": "更新",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "搜尋",
     "menu.sessions": "工作階段",
     "menu.settings": "設定",
@@ -560,6 +562,7 @@
     "page.read_entry_count": [
         "%d 篇已讀文章"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "搜尋結果",
     "page.sessions.table.actions": "操作",
     "page.sessions.table.current_session": "目前工作階段",

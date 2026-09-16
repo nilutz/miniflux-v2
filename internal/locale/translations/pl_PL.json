@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Brak wpisów tego kanału.",
     "alert.no_feed_in_category": "Nie ma subskrypcji tej kategorii.",
     "alert.no_history": "Obecnie nie ma żadnej historii.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Brak wyników tego wyszukiwania.",
     "alert.no_shared_entry": "Brak udostępnionego wpisu.",
     "alert.no_starred": "Brak ulubionych w tej chwili.",
@@ -435,6 +436,7 @@
     "menu.preferences": "Preferencje",
     "menu.refresh_all_feeds": "Odśwież w tle wszystkie subskrypcje",
     "menu.refresh_feed": "Odśwież",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Szukaj",
     "menu.sessions": "Sesje",
     "menu.settings": "Ustawienia",
@@ -574,6 +576,7 @@
         "%d przeczytane wpisy",
         "%d przeczytanych wpisów"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Wyniki wyszukiwania",
     "page.sessions.table.actions": "Działania",
     "page.sessions.table.current_session": "Bieżąca sesja",

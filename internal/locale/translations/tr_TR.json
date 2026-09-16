@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Bu besleme için makele yok.",
     "alert.no_feed_in_category": "Bu kategori için besleme yok.",
     "alert.no_history": "Şu anda hiç geçmiş yok.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Bu arama için sonuç yok",
     "alert.no_shared_entry": "Paylaşılan bir makele yok.",
     "alert.no_starred": "Yıldızlanmış makale yok.",
@@ -432,6 +433,7 @@
     "menu.preferences": "Tercihler",
     "menu.refresh_all_feeds": "Tüm beslemeleri arka planda yenile",
     "menu.refresh_feed": "Yenile",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Ara",
     "menu.sessions": "Oturumlar",
     "menu.settings": "Ayarlar",
@@ -567,6 +569,7 @@
         "%d okunmuş makale",
         "%d okunmuş makale"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Arama Sonuçları",
     "page.sessions.table.actions": "Eylemler",
     "page.sessions.table.current_session": "Mevcut Oturum",

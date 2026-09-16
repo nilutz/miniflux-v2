@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Questo feed non contiene alcun articolo.",
     "alert.no_feed_in_category": "Non esiste un abbonamento per questa categoria.",
     "alert.no_history": "La tua cronologia al momento è vuota.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "La ricerca non ha prodotto risultati.",
     "alert.no_shared_entry": "Non ci sono voci condivise.",
     "alert.no_starred": "Nessun preferito disponibile.",
@@ -432,6 +433,7 @@
     "menu.preferences": "Preferenze",
     "menu.refresh_all_feeds": "Aggiorna tutti i feed in background",
     "menu.refresh_feed": "Aggiorna",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Cerca",
     "menu.sessions": "Sessioni",
     "menu.settings": "Impostazioni",
@@ -567,6 +569,7 @@
         "%d voce letta",
         "%d voci lette"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Risultati della ricerca",
     "page.sessions.table.actions": "Azioni",
     "page.sessions.table.current_session": "Sessione corrente",

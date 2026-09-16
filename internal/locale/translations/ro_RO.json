@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Nu sunt înregistrări pentru acest flux.",
     "alert.no_feed_in_category": "Nu sunt fluxuri pentru această categorie.",
     "alert.no_history": "Nu există istoric în acest moment.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Nu există înregistrări pentru această căutare.",
     "alert.no_shared_entry": "Nu sunt înregistrări partajate.",
     "alert.no_starred": "Nu sunt înregistrări marcate.",
@@ -435,6 +436,7 @@
     "menu.preferences": "Preferințe",
     "menu.refresh_all_feeds": "Reînnoiește toate fluxurile în fundal",
     "menu.refresh_feed": "Reînnoire",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Caută",
     "menu.sessions": "Sesiuni",
     "menu.settings": "Setări",
@@ -574,6 +576,7 @@
         "%d înregistrări citite",
         "%d înregistrări citite"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Rezultate Căutare",
     "page.sessions.table.actions": "Acțiuni",
     "page.sessions.table.current_session": "Sesiunea Curentă",

@@ -22,6 +22,7 @@
     "alert.no_feed_entry": "Il n'y a aucun article pour cet abonnement.",
     "alert.no_feed_in_category": "Il n'y a pas d'abonnement pour cette catégorie.",
     "alert.no_history": "Il n'y a aucun historique pour le moment.",
+    "alert.no_saved_pages": "You haven't saved any pages yet.",
     "alert.no_search_result": "Il n'y a aucun résultat pour cette recherche.",
     "alert.no_shared_entry": "Il n'y a pas d'article partagé.",
     "alert.no_starred": "Il n'y a aucun favoris pour le moment.",
@@ -432,6 +433,7 @@
     "menu.preferences": "Préférences",
     "menu.refresh_all_feeds": "Actualiser les abonnements en arrière-plan",
     "menu.refresh_feed": "Actualiser",
+    "menu.saved_pages": "Saved pages",
     "menu.search": "Recherche",
     "menu.sessions": "Sessions",
     "menu.settings": "Réglages",
@@ -567,6 +569,7 @@
         "%d entrée lue",
         "%d entrées lues"
     ],
+    "page.saved_pages.title": "Saved pages",
     "page.search.title": "Résultats de la recherche",
     "page.sessions.table.actions": "Actions",
     "page.sessions.table.current_session": "Session actuelle",
