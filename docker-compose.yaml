@@ -20,7 +20,14 @@ services:
   db:
     # ParadeDB, not stock postgres: the sidecar needs pg_search (BM25) and
     # vector (pgvector/HNSW), which stock PostgreSQL ships neither of.
-    image: paradedb/paradedb:latest
+    #
+    # Pinned to a specific tag, not `latest`, for the same reason as the
+    # two application images above. The `-pg18` suffix is load-bearing,
+    # not decorative: ParadeDB publishes this image for PostgreSQL 15-18,
+    # and only the pg18 build sets PGDATA=/var/lib/postgresql/18/docker
+    # (confirmed via the registry's image config), matching the volume
+    # comment below. Bumping this tag later must keep that suffix.
+    image: paradedb/paradedb:0.25.9-pg18
     restart: unless-stopped
     # Docker's 64MiB /dev/shm default is too small for a parallel HNSW
     # index build (~1GB) and crash-loops the sidecar. Set explicitly.
