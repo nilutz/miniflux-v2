@@ -21,6 +21,14 @@ import (
 // TestResolveSearchResults_SendsTheUserScope asserts directly.
 const testUserID int64 = 42
 
+// testServiceTokenForTest is the service credential every
+// resolveSearchResults call in this file authenticates with -- its
+// specific value does not matter to any test here (searchclient's own
+// suite covers the header actually being sent, byte for byte); what
+// matters is that resolveSearchResults accepts and forwards a token
+// parameter at all, which is what these calls exercise by compiling.
+const testServiceTokenForTest = "test-service-token"
+
 // fallbackEntries is what the pre-existing WithSearchQuery path would
 // have returned; resolveSearchResults must return exactly these entries
 // (wrapped as rows with no snippet) whenever it falls back, whatever the
@@ -48,7 +56,7 @@ func TestResolveSearchResults_NoSidecarConfigured(t *testing.T) {
 	rows, count, degraded, err := resolveSearchResults(
 		context.Background(),
 		"",
-		testUserID,
+		testServiceTokenForTest, testUserID,
 		"coffee",
 		"hybrid",
 		false,
@@ -97,7 +105,7 @@ func TestResolveSearchResults_SidecarUnreachableFallsBack(t *testing.T) {
 	rows, count, degraded, err := resolveSearchResults(
 		context.Background(),
 		"http://"+addr,
-		testUserID,
+		testServiceTokenForTest, testUserID,
 		"coffee",
 		"hybrid",
 		false,
@@ -140,7 +148,7 @@ func TestResolveSearchResults_SidecarNonOKFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, nil },
 		fallbackEntries,
 	)
@@ -166,7 +174,7 @@ func TestResolveSearchResults_SidecarMalformedBodyFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, nil },
 		fallbackEntries,
 	)
@@ -199,7 +207,7 @@ func TestResolveSearchResults_SidecarSuccessOrdersAndHydrates(t *testing.T) {
 
 	var hydratedIDs []int64
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) {
 			hydratedIDs = ids
 			// Return them out of order on purpose, to prove
@@ -257,7 +265,7 @@ func TestResolveSearchResults_PassagesModeBuildsOneRowPerPassage(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "passages", false, false, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "passages", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) {
 			return model.Entries{{ID: 5, Title: "Five"}}, nil
 		},
@@ -299,7 +307,7 @@ func TestResolveSearchResults_ExcludeHiddenFiltersSidecarEntries(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, true, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "hybrid", false, true, 0, 10,
 		func(ids []int64) (model.Entries, error) {
 			return model.Entries{
 				{ID: 5, Title: "Hidden one", Hidden: true},
@@ -340,7 +348,7 @@ func TestResolveSearchResults_ExcludeHiddenFiltersSidecarPassages(t *testing.T) 
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "passages", false, true, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "passages", false, true, 0, 10,
 		func(ids []int64) (model.Entries, error) {
 			return model.Entries{
 				{ID: 5, Title: "Hidden passage entry", Hidden: true},
@@ -377,7 +385,7 @@ func TestResolveSearchResults_HydrateErrorFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, errors.New("store exploded") },
 		fallbackEntries,
 	)
@@ -402,7 +410,7 @@ func TestResolveSearchResults_PassagesHydrateErrorFallsBack(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "passages", false, false, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "passages", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return nil, errors.New("store exploded") },
 		fallbackEntries,
 	)
@@ -455,7 +463,7 @@ func TestResolveSearchResults_SendsTheUserScope(t *testing.T) {
 	defer server.Close()
 
 	_, _, _, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "hybrid", false, false, 0, 10,
 		func(ids []int64) (model.Entries, error) { return model.Entries{}, nil },
 		func() (model.Entries, int, error) {
 			t.Fatal("fallback should not be called on a sidecar success")
@@ -484,7 +492,7 @@ func TestResolveSearchResults_OffsetFallbackIsDegraded(t *testing.T) {
 	defer server.Close()
 
 	rows, count, degraded, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 20, 10,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "hybrid", false, false, 20, 10,
 		func(ids []int64) (model.Entries, error) { return nil, nil },
 		fallbackEntries,
 	)
@@ -535,7 +543,7 @@ func TestResolveSearchResults_HonoursTheCappedLimit(t *testing.T) {
 	defer server.Close()
 
 	_, _, _, err := resolveSearchResults(
-		context.Background(), server.URL, testUserID, "coffee", "hybrid", false, false, 0,
+		context.Background(), server.URL, testServiceTokenForTest, testUserID, "coffee", "hybrid", false, false, 0,
 		sidecarSearchLimit(100),
 		func(ids []int64) (model.Entries, error) { return model.Entries{}, nil },
 		func() (model.Entries, int, error) {

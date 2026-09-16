@@ -16,6 +16,10 @@ import (
 	"time"
 )
 
+// testServiceToken is the shared secret every test in this file
+// configures its Client with, standing in for config.SearchSidecarToken().
+const testServiceToken = "test-service-token"
+
 // TestClientSearch_Success proves a well-formed sidecar response parses
 // into the shape search.go's routing depends on: entry ids, scores and
 // highlighted snippet text, in the order the sidecar returned them.
@@ -43,7 +47,7 @@ func TestClientSearch_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithTimeout(server.URL, time.Second)
+	client := NewClientWithTimeout(server.URL, testServiceToken, time.Second)
 	resp, err := client.Search(context.Background(), SearchRequest{Query: "coffee"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -105,7 +109,7 @@ func TestClientSearch_TimeoutBounded(t *testing.T) {
 	}()
 
 	const configuredTimeout = 200 * time.Millisecond
-	client := NewClientWithTimeout("http://"+listener.Addr().String(), configuredTimeout)
+	client := NewClientWithTimeout("http://"+listener.Addr().String(), testServiceToken, configuredTimeout)
 
 	start := time.Now()
 	_, err = client.Search(context.Background(), SearchRequest{Query: "coffee"})
@@ -135,7 +139,7 @@ func TestClientSearch_ConnectionRefused(t *testing.T) {
 	addr := listener.Addr().String()
 	listener.Close() // nothing is listening here now
 
-	client := NewClientWithTimeout("http://"+addr, time.Second)
+	client := NewClientWithTimeout("http://"+addr, testServiceToken, time.Second)
 
 	start := time.Now()
 	_, err = client.Search(context.Background(), SearchRequest{Query: "coffee"})
@@ -160,7 +164,7 @@ func TestClientSearch_NonOKStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithTimeout(server.URL, time.Second)
+	client := NewClientWithTimeout(server.URL, testServiceToken, time.Second)
 	_, err := client.Search(context.Background(), SearchRequest{Query: "coffee"})
 	if err == nil {
 		t.Fatal("expected an error for a non-200 response")
@@ -178,7 +182,7 @@ func TestClientSearch_MalformedBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithTimeout(server.URL, time.Second)
+	client := NewClientWithTimeout(server.URL, testServiceToken, time.Second)
 	_, err := client.Search(context.Background(), SearchRequest{Query: "coffee"})
 	if err == nil {
 		t.Fatal("expected an error for a malformed response body")
@@ -203,7 +207,7 @@ func TestClientSimilar_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithTimeout(server.URL, time.Second)
+	client := NewClientWithTimeout(server.URL, testServiceToken, time.Second)
 	resp, err := client.Similar(context.Background(), SimilarRequest{EntryID: 7})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -232,7 +236,7 @@ func TestClientSendsTheUserScope(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClientWithTimeout(server.URL, time.Second)
+	client := NewClientWithTimeout(server.URL, testServiceToken, time.Second)
 
 	if _, err := client.Search(context.Background(), SearchRequest{Query: "coffee", UserID: 7}); err != nil {
 		t.Fatalf("Search: %v", err)
@@ -261,6 +265,61 @@ func TestClientSendsTheUserScope(t *testing.T) {
 	}
 }
 
+// TestClientSendsTheServiceToken is defect 5's fix, as a test: Miniflux
+// (this client) previously sent no authentication header at all, so the
+// sidecar's Task 17 auth gate rejected every single request with 401,
+// and every search silently fell back to basic keyword matching. The
+// header this proves gets sent must reach the sidecar's own
+// X-Sidecar-Service-Token check (internal/web/auth.go) byte for byte.
+func TestClientSendsTheServiceToken(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(serviceTokenHeader)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"mode":"hybrid","query":"coffee","entries":[]}`)
+	}))
+	defer server.Close()
+
+	client := NewClientWithTimeout(server.URL, testServiceToken, time.Second)
+	if _, err := client.Search(context.Background(), SearchRequest{Query: "coffee", UserID: 7}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got != testServiceToken {
+		t.Fatalf("%s = %q, want %q", serviceTokenHeader, got, testServiceToken)
+	}
+
+	got = "unset"
+	if _, err := client.Similar(context.Background(), SimilarRequest{EntryID: 1, UserID: 7}); err != nil {
+		t.Fatalf("Similar: %v", err)
+	}
+	if got != testServiceToken {
+		t.Fatalf("Similar: %s = %q, want %q", serviceTokenHeader, got, testServiceToken)
+	}
+}
+
+// TestClientSendsNoServiceTokenHeaderWhenUnconfigured proves an empty
+// service token (config.SearchSidecarToken unset) omits the header
+// entirely rather than sending it empty -- matching the sidecar's own
+// "empty means disabled, not an empty credential" contract
+// (internal/web/auth.go's serviceTokenMatches).
+func TestClientSendsNoServiceTokenHeaderWhenUnconfigured(t *testing.T) {
+	var gotHeader bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, gotHeader = r.Header[http.CanonicalHeaderKey(serviceTokenHeader)]
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"mode":"hybrid","query":"coffee","entries":[]}`)
+	}))
+	defer server.Close()
+
+	client := NewClientWithTimeout(server.URL, "", time.Second)
+	if _, err := client.Search(context.Background(), SearchRequest{Query: "coffee"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if gotHeader {
+		t.Fatalf("expected no %s header when the client's service token is unconfigured", serviceTokenHeader)
+	}
+}
+
 // TestSimilarTimeoutIsShorterThanSearch pins the relationship the entry
 // page depends on: the similar-articles block is a sidebar on an
 // already-loaded page and must not be allowed to hold the render path as
@@ -285,7 +344,7 @@ func TestClientTimeoutBoundsASlowSidecar(t *testing.T) {
 		server.Close()
 	}()
 
-	client := NewClientWithTimeout(server.URL, 50*time.Millisecond)
+	client := NewClientWithTimeout(server.URL, testServiceToken, 50*time.Millisecond)
 
 	start := time.Now()
 	_, err := client.Similar(context.Background(), SimilarRequest{EntryID: 1})
@@ -326,7 +385,7 @@ func TestClientsReuseOneConnection(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		// A fresh Client each time, exactly as the UI handlers build one
 		// per page view.
-		client := NewClientWithTimeout(server.URL, time.Second)
+		client := NewClientWithTimeout(server.URL, testServiceToken, time.Second)
 		if _, err := client.Search(context.Background(), SearchRequest{Query: "coffee"}); err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}

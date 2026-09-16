@@ -58,6 +58,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  SIDECAR_REMOTE_EMBEDDER_URL      base URL of the remote embedding service (required when SIDECAR_EMBEDDER=remote)\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_REMOTE_EMBEDDER_TIMEOUT  per-request timeout, a Go duration (optional, default %s)\n", remote.DefaultTimeout)
 		fmt.Fprintf(os.Stderr, "  SIDECAR_ADMIN_ADDR     address for the status/admin HTTP server (optional, default %s)\n", web.DefaultAddr)
+		fmt.Fprintf(os.Stderr, "  SIDECAR_SERVICE_TOKEN  shared secret authenticating the Miniflux fork's own internal/searchclient\n")
+		fmt.Fprintf(os.Stderr, "                         (must match the fork's SEARCH_SIDECAR_TOKEN); unset disables that\n")
+		fmt.Fprintf(os.Stderr, "                         credential entirely rather than accepting an unauthenticated caller.\n")
 		fmt.Fprintf(os.Stderr, "\nBackfill throttle (spec §9.2; all optional, and all live-editable afterwards\n")
 		fmt.Fprintf(os.Stderr, "via POST /api/backfill/config on the admin server):\n")
 		fmt.Fprintf(os.Stderr, "  SIDECAR_BACKFILL_WINDOW        hours the backfill may run: \"always\" (default) or e.g. \"02:00-07:00\"\n")
@@ -95,6 +98,17 @@ type config struct {
 
 	adminAddr string
 
+	// serviceToken authenticates the fork's internal/searchclient against
+	// the admin server's data endpoints (GET /api/search, /api/similar)
+	// as a service rather than an end-user -- see
+	// internal/web/auth.go:serviceTokenHeader's own doc comment. Empty by
+	// default, which disables that credential entirely (fail closed, not
+	// "accept an unauthenticated caller"): every searchclient request is
+	// then rejected with 401, exactly the bug defect 5 describes, until
+	// an operator sets this to the SAME value as the fork's own
+	// SEARCH_SIDECAR_TOKEN.
+	serviceToken string
+
 	// backfill is the startup half of spec §9.2's "three knobs, all
 	// live-editable without a restart". Startup configuration and the
 	// admin server's POST /api/backfill/config produce the same
@@ -122,6 +136,7 @@ func loadConfig() (config, error) {
 		onnxLibDir:   os.Getenv("SIDECAR_ONNX_LIB_DIR"),
 		remoteURL:    os.Getenv("SIDECAR_REMOTE_EMBEDDER_URL"),
 		adminAddr:    os.Getenv("SIDECAR_ADMIN_ADDR"),
+		serviceToken: os.Getenv("SIDECAR_SERVICE_TOKEN"),
 	}
 	if cfg.embedderKind == "" {
 		cfg.embedderKind = "local"
@@ -527,6 +542,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("sidecar: unable to build admin server: %w", err)
 	}
+	// Defect 5: the fork's internal/searchclient had no credential to
+	// present at all against Task 17's auth gate, so every search fell
+	// back to basic keyword matching. cfg.serviceToken empty (the
+	// default) leaves this disabled -- fail closed, matching every other
+	// credential check in this package.
+	adminServer.SetServiceToken(cfg.serviceToken)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

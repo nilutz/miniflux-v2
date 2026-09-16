@@ -584,6 +584,22 @@ func NewConfigOptions() *configOptions {
 				rawValue:          "",
 				valueType:         stringType,
 			},
+			// SEARCH_SIDECAR_TOKEN authenticates this fork's
+			// internal/searchclient against the sidecar's own
+			// X-Sidecar-Service-Token check (sidecar/internal/web/auth.go)
+			// -- must be set to the SAME value as the sidecar's own
+			// SIDECAR_SERVICE_TOKEN, or every search/similar call is
+			// rejected with 401 and silently falls back to basic keyword
+			// search (the bug this option exists to fix). Empty by
+			// default like SEARCH_SIDECAR_URL: an unconfigured token sends
+			// no header at all (searchclient.Client.get), matching a
+			// sidecar with no SIDECAR_SERVICE_TOKEN of its own configured
+			// -- fails closed on both sides, never silently open.
+			"SEARCH_SIDECAR_TOKEN": {
+				parsedStringValue: "",
+				rawValue:          "",
+				valueType:         stringType,
+			},
 			"TRUSTED_REVERSE_PROXY_NETWORKS": {
 				parsedStringList: []string{},
 				rawValue:         "",
@@ -1015,6 +1031,16 @@ func (c *configOptions) SchedulerRoundRobinMinInterval() time.Duration {
 // — see this key's own comment in the options map above.
 func (c *configOptions) SearchSidecarURL() string {
 	return c.options["SEARCH_SIDECAR_URL"].parsedStringValue
+}
+
+// SearchSidecarToken returns the shared secret internal/searchclient
+// authenticates with against the sidecar's X-Sidecar-Service-Token check
+// -- see this key's own comment in the options map above. Empty by
+// default, which sends no authentication header at all (searchclient.
+// Client.get), the same fail-closed default SearchSidecarURL uses for
+// the feature as a whole.
+func (c *configOptions) SearchSidecarToken() string {
+	return c.options["SEARCH_SIDECAR_TOKEN"].parsedStringValue
 }
 
 func (c *configOptions) TrustedReverseProxyNetworks() []string {

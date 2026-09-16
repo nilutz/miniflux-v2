@@ -651,6 +651,16 @@ error\&.
 .br
 Default is empty (disabled)\&.
 .TP
+.B SEARCH_SIDECAR_TOKEN
+Shared secret Miniflux presents to the search sidecar's data endpoints,
+authenticating this service (not any one end-user) and authorising it to
+search on behalf of whichever user is browsing\&. Must be set to the same
+value as the sidecar's own \fBSIDECAR_SERVICE_TOKEN\fR, or every request is
+rejected and the search page silently falls back to Miniflux's built-in
+full-text search\&.
+.br
+Default is empty (no credential sent)\&.
+.TP
 .B TRUSTED_REVERSE_PROXY_NETWORKS
 A comma-separated list of networks (CIDR notation) allowed to use the proxy
 authentication header, \fBX-Forwarded-For\fR,

@@ -156,6 +156,27 @@ type Server struct {
 	admins   AdminChecker
 	tmpl     *template.Template
 	mux      *http.ServeMux
+
+	// serviceToken is the shared secret internal/searchclient (the
+	// fork's own HTTP client for this sidecar) presents via
+	// serviceTokenHeader (auth.go) -- empty by default, which disables
+	// that credential entirely (see serviceTokenMatches: fail closed, not
+	// "accept a matching empty header"). Set via SetServiceToken, not a
+	// New() parameter: unlike every other field above (all interfaces
+	// satisfied by *store.Store or similar, wired once at construction),
+	// this is a plain secret cmd/sidecar reads from its own environment,
+	// and giving it a dedicated setter keeps New()'s already-long
+	// parameter list from growing for a field most callers (every test in
+	// this package) never need to set at all.
+	serviceToken string
+}
+
+// SetServiceToken configures the shared secret internal/searchclient
+// authenticates with (see serviceTokenHeader and credentialService's own
+// doc comments in auth.go). token == "" (New's default) disables the
+// credential entirely -- fail closed, not "accept an empty header".
+func (s *Server) SetServiceToken(token string) {
+	s.serviceToken = token
 }
 
 // New builds a Server over backfill (control endpoints), live (the live

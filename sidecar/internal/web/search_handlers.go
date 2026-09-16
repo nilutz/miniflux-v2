@@ -500,9 +500,16 @@ func parseFilters(q url.Values) (search.Filters, error) {
 
 // resolveAuthenticatedUserID reconciles f.UserID (as parsed by
 // parseFilters, above, from the caller-supplied "user" query parameter)
-// against the user id the caller's own API key resolved to
-// (requireAuthenticatedUser in auth.go, always run first on both routes),
-// applied to both GET /api/search and GET /api/similar.
+// against the caller's own credential (requireAuthenticatedUser in
+// auth.go, always run first on both routes), applied to both
+// GET /api/search and GET /api/similar. Behaviour depends on which kind
+// of credential authenticated the request (see credentialKind's own doc
+// comment in auth.go):
+//
+// End-user credential (API key or session cookie) -- unchanged from
+// before the service credential existed, and this is the asymmetry
+// defect 5 requires: an end-user credential may NEVER cause a request to
+// be scoped to a DIFFERENT user than its own owner.
 //
 //   - f.UserID == 0 (the caller expressed no opinion): filled in from the
 //     authenticated user unconditionally. Once a request is authenticated
@@ -519,21 +526,41 @@ func parseFilters(q url.Values) (search.Filters, error) {
 //     not the caller's unchecked assertion of identity, loudly or
 //     quietly — the key is what decides who they are.
 //
+// Service credential (internal/searchclient's shared secret) -- has no
+// user of its own to fall back on (authenticatedUserID reports 0 for it;
+// see credentialService's own doc comment), so f.UserID must be present
+// and is trusted as given, with no match check: this is precisely the
+// one thing presenting the shared secret authorises (spec: "presenting
+// that secret authorises the caller to assert a user id — and only
+// that"), and it is what fixes defect 5 -- internal/searchclient renders
+// search/similar results on behalf of whichever Miniflux user is
+// browsing, a user who has no API key or session cookie of their own to
+// hand the fork.
+//
 // Writes a 400 or 500 response and returns false when it refuses the
-// request; returns true, with f.UserID authoritatively set to the
-// authenticated user, otherwise.
+// request; returns true, with f.UserID authoritatively set, otherwise.
 func resolveAuthenticatedUserID(w http.ResponseWriter, r *http.Request, f *search.Filters) bool {
 	authUserID, ok := authenticatedUserID(r)
-	if !ok {
+	kind, kindOK := authenticatedCredentialKind(r)
+	if !ok || !kindOK {
 		// Unreachable through the registered routes: handleSearch and
 		// handleSimilar are only ever invoked wrapped by requireAuthenticatedUser,
-		// which always sets this before calling through. Fail closed
+		// which always sets both before calling through. Fail closed
 		// rather than silently search unscoped if that invariant is ever
 		// broken by a future refactor.
-		slog.Error("web: resolveAuthenticatedUserID called with no authenticated user id in context")
+		slog.Error("web: resolveAuthenticatedUserID called with no authenticated user id/credential kind in context")
 		writeAPIError(w, http.StatusInternalServerError, "authentication context missing")
 		return false
 	}
+
+	if kind == credentialService {
+		if f.UserID == 0 {
+			writeAPIError(w, http.StatusBadRequest, `the "user" parameter is required for a service credential`)
+			return false
+		}
+		return true
+	}
+
 	if f.UserID != 0 && f.UserID != authUserID {
 		writeAPIError(w, http.StatusBadRequest, `the "user" parameter does not match the user your API key belongs to`)
 		return false

@@ -206,6 +206,7 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 		rows, entriesCount, degraded, err = resolveSearchResults(
 			r.Context(),
 			sidecarURL,
+			config.Opts.SearchSidecarToken(),
 			user.ID,
 			searchQuery,
 			searchMode,
@@ -312,6 +313,7 @@ func (h *handler) showSearchPage(w http.ResponseWriter, r *http.Request) {
 func resolveSearchResults(
 	ctx context.Context,
 	sidecarURL string,
+	serviceToken string,
 	userID int64,
 	query string,
 	searchMode string,
@@ -352,7 +354,7 @@ func resolveSearchResults(
 		return rows, count, true, err
 	}
 
-	client := searchclient.NewClient(sidecarURL)
+	client := searchclient.NewClient(sidecarURL, serviceToken)
 	resp, err := client.Search(ctx, searchclient.SearchRequest{
 		Query:      query,
 		Mode:       searchMode,

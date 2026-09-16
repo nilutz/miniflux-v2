@@ -173,16 +173,48 @@ var sharedHTTPClient = &http.Client{
 	},
 }
 
+// serviceTokenHeader is the header this client sends the shared service
+// secret in — must match the sidecar's own
+// internal/web/auth.go:serviceTokenHeader constant exactly, by name and
+// casing. Deliberately a DIFFERENT header from the one a real Miniflux
+// end-user API key would use (X-Auth-Token): this fork's own credential
+// authorises the caller to ASSERT a user id (via the "user" query
+// parameter both request types already set — see SearchRequest.UserID /
+// SimilarRequest.UserID) and nothing else, so it must never be
+// confusable with, or fall back to, an end-user credential that grants
+// none of that.
+//
+// This is the fix for a real production bug: Task 17 put X-Auth-Token
+// authentication on the sidecar's data endpoints, but this client had no
+// credential of its own to send at all — every request came back 401,
+// and every single search silently fell back to basic keyword matching.
+// The fork has no per-caller Miniflux credential to forward here: a
+// reader's page view carries their session, not an API key, and this
+// client is not itself acting as that reader against Miniflux's own API.
+// A single shared secret, configured identically on both sides
+// (config.SearchSidecarToken here, SIDECAR_SERVICE_TOKEN on the sidecar
+// — both components already share one Postgres database, so they are
+// already inside one trust boundary), authenticates this SERVICE, and
+// the request's own UserID field (never a shared, cross-user key) is
+// what scopes any one call to the right reader's content.
+const serviceTokenHeader = "X-Sidecar-Service-Token"
+
 // Client is a small HTTP client for one sidecar instance.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	timeout    time.Duration
+	baseURL      string
+	httpClient   *http.Client
+	timeout      time.Duration
+	serviceToken string
 }
 
-// NewClient returns a Client bounded by DefaultTimeout.
-func NewClient(baseURL string) *Client {
-	return NewClientWithTimeout(baseURL, DefaultTimeout)
+// NewClient returns a Client bounded by DefaultTimeout, authenticating
+// with serviceToken (see serviceTokenHeader's own doc comment) — pass
+// config.Opts.SearchSidecarToken(). An empty serviceToken sends no
+// credential at all, so every call fails closed with 401 exactly as it
+// does against a sidecar with no SIDECAR_SERVICE_TOKEN configured, rather
+// than silently succeeding unauthenticated.
+func NewClient(baseURL, serviceToken string) *Client {
+	return NewClientWithTimeout(baseURL, serviceToken, DefaultTimeout)
 }
 
 // NewClientWithTimeout returns a Client bounded by an explicit timeout.
@@ -190,11 +222,12 @@ func NewClient(baseURL string) *Client {
 // tolerance can say so — the similar-articles block uses SimilarTimeout
 // — and so tests can use a short timeout and keep the suite fast without
 // waiting out DefaultTimeout.
-func NewClientWithTimeout(baseURL string, timeout time.Duration) *Client {
+func NewClientWithTimeout(baseURL, serviceToken string, timeout time.Duration) *Client {
 	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: sharedHTTPClient,
-		timeout:    timeout,
+		baseURL:      strings.TrimRight(baseURL, "/"),
+		httpClient:   sharedHTTPClient,
+		timeout:      timeout,
+		serviceToken: serviceToken,
 	}
 }
 
@@ -310,6 +343,9 @@ func (c *Client) get(ctx context.Context, path string, values url.Values, out an
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
+	}
+	if c.serviceToken != "" {
+		httpReq.Header.Set(serviceTokenHeader, c.serviceToken)
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
