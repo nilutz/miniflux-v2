@@ -368,6 +368,42 @@ func (s *Store) PendingEntryCountApprox(afterID int64) (int64, error) {
 	return count, nil
 }
 
+// IndexedEntryCount returns how many entries with id > afterID are
+// currently successfully indexed (search.entry_index_state.status='ok'),
+// excluding any index-state row whose entry no longer exists (a deleted
+// entry's orphan row) -- the same EXISTS guard PendingEntryCountApprox
+// uses, and for the identical reason: nothing collects orphan rows today,
+// so on a long-lived instance they accumulate, and counting them as
+// "indexed" would overstate real progress. This is a plain count(*)
+// rather than an approximation like PendingEntryCountApprox, but it is
+// the same shape of query as that one's own subtraction term and pays the
+// same cost -- an index range scan over entry_index_state_status_idx --
+// so it belongs behind the identical caller-managed TTL, not called on
+// every render the way store.DatabaseMetrics deliberately avoids doing
+// for anything proportional to corpus size (see that method's own doc
+// comment). Backfill.Stats() is that caller -- see its own cachedIndexed.
+//
+// It exists to answer a real bug: the admin page reported "Indexed 0 of
+// N" with entries genuinely already indexed, because Backfill.Stats()'s
+// Indexed figure was purely an in-memory counter that resets to zero on
+// every process restart and is never re-populated for entries a PREVIOUS
+// run already finished -- PendingEntryIDs correctly never re-offers them,
+// so the counter that only increments when an entry is actually attempted
+// never catches up. This is the database-backed source of truth that
+// closes that gap.
+func (s *Store) IndexedEntryCount(afterID int64) (int64, error) {
+	var count int64
+	err := s.db.QueryRow(`
+		SELECT count(*) FROM search.entry_index_state s
+		WHERE s.entry_id > $1 AND s.status = 'ok'
+		  AND EXISTS (SELECT 1 FROM entries e WHERE e.id = s.entry_id)
+	`, afterID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: unable to count indexed entries: %w", err)
+	}
+	return count, nil
+}
+
 // MaxEntryID returns the highest entry id currently in public.entries, or 0
 // if the table is empty. It exists so the live lane can snapshot "the
 // newest entry that already existed" at startup and start its cursor

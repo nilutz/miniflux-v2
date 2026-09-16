@@ -55,6 +55,11 @@ func TestBackfillStatsNeverReportsDoneWhilePendingCountIsNonZero(t *testing.T) {
 	// reported through the same seam Stats() itself refreshes from.
 	b.remainingCountTTL = 0 // force cachedRemaining to call remainingCountFn, not serve a stale zero-value cache
 	b.remainingCountFn = func(afterID int64) (int64, error) { return 8815, nil }
+	// idx.store is nil in this hermetic test (New(nil, ...)); stub the
+	// indexed-count query too (defect 6) so Stats()'s own
+	// cachedIndexedFromDB call -- unrelated to what this test is about --
+	// never dereferences it.
+	b.indexedCountFn = func(afterID int64) (int64, error) { return 0, nil }
 
 	st := b.Stats()
 	if st.Remaining != 8815 {
@@ -79,6 +84,7 @@ func TestBackfillStatsLeavesDoneAloneWhenRemainingIsUnknown(t *testing.T) {
 	b.done = true
 	b.remainingCountTTL = 0
 	b.remainingCountFn = func(afterID int64) (int64, error) { return 0, errors.New("simulated PendingEntryCountApprox failure") }
+	b.indexedCountFn = func(afterID int64) (int64, error) { return 0, nil }
 
 	st := b.Stats()
 	if st.Remaining != -1 {

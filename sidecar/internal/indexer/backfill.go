@@ -442,6 +442,26 @@ type Backfill struct {
 	// queries N concurrent Stats() calls actually issue; production always
 	// leaves it as NewBackfill sets it.
 	remainingCountFn func(afterID int64) (int64, error)
+
+	// indexedMu/indexedCached/indexedCachedAt/indexedCountTTL/
+	// indexedRefreshing/indexedCountFn back cachedIndexedFromDB
+	// (defect 6) -- structurally identical to the remaining* quintet
+	// above (same TTL/single-flight discipline, same reason: the query
+	// behind it, store.IndexedEntryCount, is a count(*) whose cost is
+	// proportional to corpus size, same as PendingEntryCountApprox's own
+	// subtraction term), but kept as its own independent set of fields
+	// rather than generalising cachedRemaining to serve both: this file's
+	// defect-4 fix (Stats' own Done/Remaining cross-check) already reads
+	// remainingCached* directly, and giving the two counts separate,
+	// independently lockable state means a slow indexed-count refresh can
+	// never block a concurrent Stats() call's remaining-count refresh, or
+	// vice versa.
+	indexedMu         sync.Mutex
+	indexedCached     int64
+	indexedCachedAt   time.Time
+	indexedCountTTL   time.Duration
+	indexedRefreshing bool
+	indexedCountFn    func(afterID int64) (int64, error)
 }
 
 // NewBackfill builds a Backfill lane over idx, throttled by controller.
@@ -455,11 +475,18 @@ func NewBackfill(idx *Indexer, controller *Controller, cfg BackfillConfig) *Back
 		failedByReason:    newCauseCounts(),
 		retries:           newRetryTracker(),
 		remainingCountTTL: DefaultRemainingCountTTL,
+		indexedCountTTL:   DefaultRemainingCountTTL,
 	}
 	// The approximate count, not the exact one: this is refreshed on a
 	// timer behind an admin page that polls, and the exact predicate has
 	// to detoast and MD5 every candidate row. See store.PendingEntryCountApprox for exactly how it differs.
 	b.remainingCountFn = idx.store.PendingEntryCountApprox
+	// See store.IndexedEntryCount's own doc comment (defect 6): unlike
+	// remainingCountFn, no approximation is needed -- this is a plain,
+	// cheap, indexed count(*) already, but it is memoised here on the
+	// identical schedule for the identical reason (asked for on a timer
+	// behind a page that polls).
+	b.indexedCountFn = idx.store.IndexedEntryCount
 	return b
 }
 
@@ -1141,6 +1168,64 @@ func (b *Backfill) cachedRemaining() int64 {
 	return count
 }
 
+// cachedIndexedFromDB returns the database's own count of entries
+// currently indexed (store.IndexedEntryCount), refreshing it at most once
+// per indexedCountTTL and serving the memoised value otherwise --
+// structurally identical to cachedRemaining, including its single-flight
+// guard and its "-1 with no previous value at all" convention, for the
+// identical reasons (see that method's own doc comment).
+//
+// This is defect 6's fix: Stats().Indexed (see that field's own use in
+// Stats, below) is otherwise purely b.indexed, an in-memory counter that
+// only increments when THIS run's own process() actually attempts an
+// entry -- so it silently understates true progress by however many
+// entries a PREVIOUS run already finished, from the moment of every
+// restart until this run's own sweep happens to catch up, which for
+// already-indexed entries it structurally never does (PendingEntryIDs
+// correctly never re-offers them). Querying the database directly has no
+// such blind spot: an entry this run indexes a moment ago is already
+// visible to it, since ReplacePassages commits synchronously before
+// process() returns.
+func (b *Backfill) cachedIndexedFromDB() int64 {
+	b.indexedMu.Lock()
+	ttl := b.indexedCountTTL
+	if ttl <= 0 {
+		ttl = DefaultRemainingCountTTL
+	}
+	fresh := !b.indexedCachedAt.IsZero() && time.Since(b.indexedCachedAt) < ttl
+	cached := b.indexedCached
+	haveCached := !b.indexedCachedAt.IsZero()
+	if fresh {
+		b.indexedMu.Unlock()
+		return cached
+	}
+	if b.indexedRefreshing {
+		b.indexedMu.Unlock()
+		if haveCached {
+			return cached
+		}
+		return -1
+	}
+	b.indexedRefreshing = true
+	b.indexedMu.Unlock()
+
+	count, err := b.indexedCountFn(b.boundStartAfter())
+
+	b.indexedMu.Lock()
+	b.indexedRefreshing = false
+	if err == nil {
+		b.indexedCached = count
+		b.indexedCachedAt = time.Now()
+	}
+	b.indexedMu.Unlock()
+
+	if err != nil {
+		slog.Error("backfill lane: unable to count indexed entries for Stats()", slog.Any("error", err))
+		return -1
+	}
+	return count
+}
+
 // Stats returns a snapshot of the lane's current progress.
 //
 // Defect: a real deployment reported Done=true on the admin page while
@@ -1166,6 +1251,20 @@ func (b *Backfill) cachedRemaining() int64 {
 // nonzero Remaining. remaining < 0 (PendingEntryCountApprox itself
 // failed) is left alone in either direction -- there is no fresher signal
 // to prefer over the sweep's own latch in that case.
+//
+// Indexed (defect 6, the same class of bug as Done above): b.indexed
+// alone silently understates progress after a restart, for entries a
+// PREVIOUS run already finished and this run's own sweep will
+// structurally never re-attempt -- see cachedIndexedFromDB's own doc
+// comment. Reporting max(b.indexed, cachedIndexedFromDB()) rather than
+// replacing one with the other keeps this run's own live, per-entry
+// updates authoritative moment to moment (no TTL lag while this process
+// is the one doing the work -- existing tests that process a handful of
+// fixtures and immediately assert on Stats().Indexed depend on that), while
+// the database-backed figure is what fills the gap the instant a fresh
+// process starts with a corpus already partly done. A failed/not-yet-
+// warm cachedIndexedFromDB (-1) never wins a max() against a
+// non-negative b.indexed, so no extra case is needed for it.
 func (b *Backfill) Stats() Stats {
 	b.mu.Lock()
 	paused := b.paused
@@ -1180,8 +1279,10 @@ func (b *Backfill) Stats() Stats {
 		done = false
 	}
 
+	indexed := max(b.indexed.Load(), b.cachedIndexedFromDB())
+
 	return Stats{
-		Indexed:                      b.indexed.Load(),
+		Indexed:                      indexed,
 		Skipped:                      b.skipped.Load(),
 		Failed:                       b.failed.Load(),
 		Remaining:                    remaining,
