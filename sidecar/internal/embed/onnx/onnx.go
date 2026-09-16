@@ -249,12 +249,41 @@ func resolveModelRoot(onnxPath string) (root, onnxFilename string) {
 // apply e.prefixes" only ever has to be answered once, at each method's
 // own single call into this helper, rather than at every call site
 // RunPipeline might grow in the future.
+//
+// It deliberately never hands ctx itself to RunPipeline, passing
+// context.Background() instead — after first checking ctx.Err() so a
+// caller whose context is ALREADY done still fails fast rather than
+// starting a doomed call. hugot's ORT backend
+// (backends.runORTSessionOnBatch) races a cancelled ctx against its own
+// native call: on `<-ctx.Done()` it returns immediately WITHOUT waiting
+// for the goroutine it already started to run Session.Run (the ONNX
+// Runtime C call) to actually finish — its own comment on that call
+// admits as much ("C code does not support context, so cancelling a
+// context and/or session will usually trigger a segfault"). A caller one
+// level up who saw that early return and moved on -- IndexEntry treating
+// it as "interrupted, not failed" (see embedPassages), or (defect 1) a
+// shutdown path calling Close() the moment every lane has stopped -- has
+// no way to know a goroutine is still inside that C call, and Close()
+// destroying the session out from under it is exactly the confirmed
+// use-after-free defect 1 describes: goroutine 1 in ReleaseOrtSession
+// while another goroutine was still in RunOrtSessionWithOptions on the
+// very same pointer. Every EmbedDocuments/EmbedQuery call already runs
+// under Indexer's embedderMu read lock for its FULL duration specifically
+// so Close/SetEmbedderIfNotAbandoned's write lock can prove no such call
+// remains before closing anything (see indexer.go) — but that proof is
+// only as good as the read lock's held duration actually bounding the
+// real native call, which requires this call to run to completion rather
+// than returning early while the native work continues unseen. Never
+// forwarding a cancellable ctx into RunPipeline is what keeps that true.
 func (e *onnxEmbedder) embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-	result, err := e.pipeline.RunPipeline(ctx, texts)
+	result, err := e.pipeline.RunPipeline(context.Background(), texts)
 	if err != nil {
 		return nil, fmt.Errorf("embed: run pipeline: %w", err)
 	}

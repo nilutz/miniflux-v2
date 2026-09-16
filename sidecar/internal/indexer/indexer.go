@@ -317,14 +317,46 @@ func (idx *Indexer) SetEmbedderIfNotAbandoned(e embed.Embedder, abandoned func()
 	return old, true
 }
 
-// Close releases the currently configured embedder's underlying session.
+// Close blocks until no embedPassages/AsEmbedder call is in flight, then
+// releases the currently configured embedder's underlying session.
 // cmd/sidecar defers this instead of closing whatever embedder it
 // originally constructed directly, so that shutdown always closes
 // whichever embedder is active NOW -- the one a live switch may have
 // since swapped in -- not a stale reference to the one main() started
 // with.
+//
+// This takes embedderMu's write lock for its entire duration -- the exact
+// same field, and the exact same sync.RWMutex guarantee, that
+// SetEmbedderIfNotAbandoned uses to prove a live embedder switch never
+// closes an embedder a worker is still inside a native call on (see that
+// method's doc comment and embedderMu's own). A prior version of this
+// method called idx.Embedder(), which takes embedderMu only long enough to
+// copy the pointer out and release it, and then called Close() on that
+// copy with NO lock held at all -- giving Task 9's embedder-swap fix no
+// counterpart on the process-shutdown path. That gap reproduced on every
+// container restart as a confirmed use-after-free: goroutine 1 inside
+// ReleaseOrtSession while another goroutine was still inside
+// RunOrtSessionWithOptions on the very same session pointer -- for the
+// ONNX backend, closing a session a native call is still running on is a
+// segfault, not an error.
+//
+// Holding the write lock here only proves no call already in flight AT
+// THE MOMENT Close was invoked remains by the time it returns -- it
+// cannot stop a brand-new call from starting afterward, since the lock is
+// released the instant this returns. cmd/sidecar's run() only calls this
+// once every caller that could ever start a NEW embedder call -- the live
+// lane, the backfill lane, and the admin/search HTTP server -- has
+// already fully stopped (all three block on the same wg.Wait() before
+// Close is deferred-invoked), so "no call in flight right now" is
+// equivalent to "no call will ever be in flight again" by the time this
+// runs.
 func (idx *Indexer) Close() error {
-	return idx.Embedder().Close()
+	idx.embedderMu.Lock()
+	defer idx.embedderMu.Unlock()
+	if idx.embedder == nil {
+		return nil
+	}
+	return idx.embedder.Close()
 }
 
 // AsEmbedder returns an embed.Embedder that always delegates to whichever

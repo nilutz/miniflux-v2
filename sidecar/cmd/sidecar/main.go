@@ -383,6 +383,23 @@ func run() error {
 	// either double-close it (if it is still active) or leak whichever one
 	// actually ended up active. Indexer.Close always closes whichever
 	// embedder is configured right now.
+	//
+	// Ordering (defect 1 -- a confirmed use-after-free that reproduced on
+	// every container restart, ReleaseOrtSession racing a worker still
+	// inside RunOrtSessionWithOptions on the same session): this defer
+	// runs when run() RETURNS, which is strictly after wg.Wait() below has
+	// already observed the live lane, the backfill lane AND the admin/
+	// search HTTP server all return from their own top-level calls --
+	// Go's defer semantics, not an assumption. That is deliberately the
+	// full set of every caller that can ever start a new
+	// EmbedDocuments/EmbedQuery call against ix: the two indexing lanes
+	// directly, and the HTTP server indirectly through searcher's
+	// ix.AsEmbedder(). ix.Close() itself additionally blocks on
+	// embedderMu's write lock (see indexer.go) as a second, independent
+	// proof -- reusing the exact mechanism Task 9 built for the
+	// embedder-swap path -- so even a caller this ordering did not
+	// anticipate (a handler net/http's graceful Shutdown timed out
+	// waiting for, say) is still waited out rather than raced.
 	defer ix.Close()
 
 	// liveMonitor tracks the live lane's own embedder-pause state,
