@@ -71,6 +71,7 @@ services:
       # Pointing it at the sidecar enables keyword/semantic/hybrid/passage
       # modes and "more like this".
       - SEARCH_SIDECAR_URL=http://sidecar:8081
+      - SEARCH_SIDECAR_TOKEN=${SIDECAR_SERVICE_TOKEN:?SIDECAR_SERVICE_TOKEN is required -- copy .env.example to .env and fill it in}
     healthcheck:
       # Miniflux's binary has a built-in health-check client
       # (internal/cli/health_check.go); this image ships no curl/wget.
@@ -110,6 +111,7 @@ services:
       # 127.0.0.1 inside the container's network namespace never receives
       # traffic Docker forwards in from a published host port.
       - SIDECAR_ADMIN_ADDR=0.0.0.0:8081
+      - SIDECAR_SERVICE_TOKEN=${SIDECAR_SERVICE_TOKEN:?SIDECAR_SERVICE_TOKEN is required -- copy .env.example to .env and fill it in}
     healthcheck:
       # No curl/wget and no built-in `-healthcheck` flag in this image, so
       # this is a bare TCP connect via bash's /dev/tcp -- confirms the

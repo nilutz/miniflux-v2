@@ -61,6 +61,7 @@ services:
       # the sidecar enables keyword/semantic/hybrid/passage modes and
       # "more like this".
       - SEARCH_SIDECAR_URL=http://sidecar:8081
+      - SEARCH_SIDECAR_TOKEN=devonly-service-token-not-a-secret
 
   sidecar:
     build:
@@ -83,6 +84,7 @@ services:
       # remote + SIDECAR_REMOTE_EMBEDDER_URL embeds on another machine
       # instead; the reported model identity feeds the content hash, so
       # switching embedders re-indexes the corpus.
+      - SIDECAR_SERVICE_TOKEN=devonly-service-token-not-a-secret
       - SIDECAR_EMBEDDER=local
 
 volumes:
