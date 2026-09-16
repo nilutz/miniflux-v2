@@ -2,8 +2,12 @@
 #
 #   docker compose -f docker-compose.dev.yaml up --build
 #
-# Miniflux is on http://localhost:8080 (admin / REDACTED-DEV-PASSWORD), the sidecar's
-# status page on http://localhost:8081/.
+# Miniflux is on http://localhost:8080, the sidecar's status page on
+# http://localhost:8081/. The admin password is ADMIN_PASSWORD below.
+#
+# These credentials are committed and therefore public. That is acceptable
+# only because every port is bound to 127.0.0.1 -- keep it that way, and
+# never reuse them anywhere else.
 #
 # One database serves both: the sidecar owns the `search` schema and reads
 # `public.entries` read-only, so it must be the same PostgreSQL instance
@@ -19,10 +23,10 @@ services:
     image: paradedb/paradedb:latest
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       - POSTGRES_USER=miniflux
-      - POSTGRES_PASSWORD=REDACTED-DEV-PASSWORD
+      - POSTGRES_PASSWORD=Kvlu5vbFUfQYI29cgxstHcTnfFL6
       - POSTGRES_DB=miniflux
     volumes:
       # Mounted at /var/lib/postgresql, NOT .../data: this image sets
@@ -40,16 +44,16 @@ services:
       dockerfile: packaging/docker/alpine/Dockerfile
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       db:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgres://miniflux:REDACTED-DEV-PASSWORD@db/miniflux?sslmode=disable
+      - DATABASE_URL=postgres://miniflux:Kvlu5vbFUfQYI29cgxstHcTnfFL6@db/miniflux?sslmode=disable
       - RUN_MIGRATIONS=1
       - CREATE_ADMIN=1
       - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=REDACTED-DEV-PASSWORD
+      - ADMIN_PASSWORD=IC7JaBrgMcf2QWdmMUd0
       # Upstream defaults this off; the dev stack enables it explicitly so
       # new feeds store full content instead of just the RSS excerpt.
       - CRAWLER_ENABLED_BY_DEFAULT=1
@@ -64,7 +68,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     depends_on:
       db:
         condition: service_healthy
@@ -74,7 +78,7 @@ services:
       miniflux:
         condition: service_started
     environment:
-      - SIDECAR_DATABASE_URL=postgres://miniflux:REDACTED-DEV-PASSWORD@db/miniflux?sslmode=disable
+      - SIDECAR_DATABASE_URL=postgres://miniflux:Kvlu5vbFUfQYI29cgxstHcTnfFL6@db/miniflux?sslmode=disable
       # local runs the in-process ONNX embedder baked into the image.
       # remote + SIDECAR_REMOTE_EMBEDDER_URL embeds on another machine
       # instead; the reported model identity feeds the content hash, so
