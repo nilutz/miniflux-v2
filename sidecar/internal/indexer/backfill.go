@@ -352,6 +352,16 @@ type Stats struct {
 	// IdleResweepInterval, and Done goes back to false as soon as a sweep
 	// finds work again (an edited entry, a newly scraped body, a fresh
 	// import). Only a lane configured with StopWhenDrained stops here.
+	//
+	// Stats() never returns Done true in the same snapshot as a
+	// confidently-nonzero Remaining (see Stats' own doc comment): the
+	// sweep's own "done" bookkeeping is a LATCH that can go stale for up
+	// to IdleResweepInterval (15 minutes in production) after a
+	// legitimate full drain, if the corpus grows in the meantime -- a
+	// newly subscribed feed, an OPML import, a bulk backfill CLI. Nothing
+	// re-examines that latch between sweeps, but Remaining is refreshed
+	// far more often (its own 45s TTL), so whenever it confidently knows
+	// better, it wins.
 	Done bool
 }
 
@@ -1094,6 +1104,30 @@ func (b *Backfill) cachedRemaining() int64 {
 }
 
 // Stats returns a snapshot of the lane's current progress.
+//
+// Defect: a real deployment reported Done=true on the admin page while
+// 8,815 entries sat pending. Diagnosis: b.done is a LATCH the sweep loop
+// in start() sets once, when a sweep's last page comes back empty with
+// nothing outstanding (see that method's own doc comment) -- correct AS
+// OF that instant, but never re-checked until the next sweep fires, up to
+// IdleResweepInterval (15 minutes in production) later. A sweep that
+// drains a small corpus and then sees it grow -- a newly subscribed feed,
+// an OPML import, a bulk backfill CLI inserting rows below the live
+// lane's cursor, all ordinary events this package's own comments already
+// call out elsewhere -- leaves that latch stuck true for the whole idle
+// window, even though Remaining (below) is refreshed on its own, far
+// shorter TTL (DefaultRemainingCountTTL, 45s) and already knows better.
+// PendingEntryIDs and PendingEntryCount/PendingEntryCountApprox were
+// checked and share one predicate, so this is not a store bug, and stale
+// b.done from a process defect 1 killed mid-sweep was ruled out too: it
+// is unconditionally reset to false at the top of every start() call,
+// which runs exactly once per process. The latch itself, cross-checked
+// against nothing, is the bug.
+//
+// Fix: never report Done true in the same snapshot as a confidently
+// nonzero Remaining. remaining < 0 (PendingEntryCountApprox itself
+// failed) is left alone in either direction -- there is no fresher signal
+// to prefer over the sweep's own latch in that case.
 func (b *Backfill) Stats() Stats {
 	b.mu.Lock()
 	paused := b.paused
@@ -1103,11 +1137,16 @@ func (b *Backfill) Stats() Stats {
 	done := b.done
 	b.mu.Unlock()
 
+	remaining := b.cachedRemaining()
+	if remaining > 0 {
+		done = false
+	}
+
 	return Stats{
 		Indexed:                      b.indexed.Load(),
 		Skipped:                      b.skipped.Load(),
 		Failed:                       b.failed.Load(),
-		Remaining:                    b.cachedRemaining(),
+		Remaining:                    remaining,
 		SkippedByReason:              b.skippedByReason.snapshot(),
 		FailedByReason:               b.failedByReason.snapshot(),
 		Workers:                      b.controller.Workers(),
