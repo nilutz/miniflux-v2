@@ -5,6 +5,7 @@ package ui // import "miniflux.app/v2/internal/ui"
 
 import (
 	"database/sql"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -107,6 +108,13 @@ func TestSavedPagesPageIsolatedPerUser(t *testing.T) {
 
 	titleA := "User A's saved page"
 	titleB := "User B's saved page"
+	// The rendered page HTML-escapes entry titles, so the apostrophe in
+	// these arrives as &#39;. Matching the raw strings would fail the
+	// positive assertions and -- far worse -- make the negative ones
+	// vacuous: a leaked title could never match either, so cross-user
+	// isolation would appear proven by a check that can only ever pass.
+	wantA := html.EscapeString(titleA)
+	wantB := html.EscapeString(titleB)
 	createUISavedPagesTestEntry(t, db, store, userA, categoryA, titleA, "hash-isolation-a", time.Now())
 	createUISavedPagesTestEntry(t, db, store, userB, categoryB, titleB, "hash-isolation-b", time.Now())
 
@@ -123,18 +131,18 @@ func TestSavedPagesPageIsolatedPerUser(t *testing.T) {
 	}
 
 	bodyA := render(userA)
-	if !strings.Contains(bodyA, titleA) {
+	if !strings.Contains(bodyA, wantA) {
 		t.Fatalf("expected user A to see their own saved page %q; body:\n%s", titleA, bodyA)
 	}
-	if strings.Contains(bodyA, titleB) {
+	if strings.Contains(bodyA, wantB) {
 		t.Fatalf("expected user A to never see user B's saved page %q; body:\n%s", titleB, bodyA)
 	}
 
 	bodyB := render(userB)
-	if !strings.Contains(bodyB, titleB) {
+	if !strings.Contains(bodyB, wantB) {
 		t.Fatalf("expected user B to see their own saved page %q; body:\n%s", titleB, bodyB)
 	}
-	if strings.Contains(bodyB, titleA) {
+	if strings.Contains(bodyB, wantA) {
 		t.Fatalf("expected user B to never see user A's saved page %q; body:\n%s", titleA, bodyB)
 	}
 }
